@@ -1,0 +1,12 @@
+config_version=5
+
+[application]
+
+config/name="4k_Unreal_Engine_v1 - godot"
+config/features=PackedStringArray("4.3", "Forward Plus")
+config/icon="res://icon.svg"
+
+[rendering]
+
+renderer/rendering_method="forward_plus"
+
