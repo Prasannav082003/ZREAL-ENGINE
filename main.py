@@ -125,7 +125,11 @@ def _fetch_master_data_from_api():
                 else:
                     print(f"  {COLOR_RED}[X] Asset response was not a list.{COLOR_RESET}")
             else:
-                print(f"  {COLOR_RED}[X] Asset fetch failed: {resp.status_code} - {resp.text[:100]}{COLOR_RESET}")
+                if resp.status_code == 404:
+                    print(f"  {COLOR_YELLOW}[!] Asset fetch failed: 404 Not Found (Master data not available){COLOR_RESET}")
+                else:
+                    error_text = resp.text[:100] if resp.text and not resp.text.strip().startswith("<") else "Unknown Error"
+                    print(f"  {COLOR_RED}[X] Asset fetch failed: {resp.status_code} - {error_text}{COLOR_RESET}")
         except Exception as e:
             print(f"  {COLOR_RED}[X] Asset fetch exception: {e}{COLOR_RESET}")
 
@@ -161,7 +165,11 @@ def _fetch_master_data_from_api():
                 else:
                     print(f"  {COLOR_RED}[X] Texture response was not a list.{COLOR_RESET}")
             else:
-                print(f"  {COLOR_RED}[X] Texture fetch failed: {resp.status_code} - {resp.text[:100]}{COLOR_RESET}")
+                if resp.status_code == 404:
+                     print(f"  {COLOR_YELLOW}[!] Texture fetch failed: 404 Not Found (Master data not available){COLOR_RESET}")
+                else:
+                    error_text = resp.text[:100] if resp.text and not resp.text.strip().startswith("<") else "Unknown Error"
+                    print(f"  {COLOR_RED}[X] Texture fetch failed: {resp.status_code} - {error_text}{COLOR_RESET}")
         except Exception as e:
             print(f"  {COLOR_RED}[X] Texture fetch exception: {e}{COLOR_RESET}")
             
@@ -1688,6 +1696,7 @@ def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[
     # Arguments: --headless --path <project> "res://main.tscn" -- <input> <output>
     cmd = [
         godot_exe,
+        "--headless",
         "--path", project_path,
         "res://main.tscn",
         "--",
@@ -2482,6 +2491,7 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
     
     cmd = [
         godot_exe,
+        "--headless",
         "--path", project_path,
         "res://main.tscn",
         "--",
