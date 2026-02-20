@@ -1696,7 +1696,6 @@ def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[
     # Arguments: --headless --path <project> "res://main.tscn" -- <input> <output>
     cmd = [
         godot_exe,
-        "--headless",
         "--path", project_path,
         "res://main.tscn",
         "--",
@@ -2491,7 +2490,6 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
     
     cmd = [
         godot_exe,
-        "--headless",
         "--path", project_path,
         "res://main.tscn",
         "--",
