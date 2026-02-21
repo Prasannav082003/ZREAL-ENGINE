@@ -173,6 +173,13 @@ func render_image(data, output_path):
 	print("Rendering Single Image...")
 	await get_tree().process_frame
 	await get_tree().process_frame
+	var cam = get_node_or_null("MainCamera")
+	if cam:
+		setup_smart_point_lights(cam)
+		# Wait one more frame for lights to register if needed, 
+		# though OmniLight3D is usually immediate for the next force_draw
+		await get_tree().process_frame
+		
 	RenderingServer.force_draw()
 	for i in range(32): await get_tree().process_frame
 	await RenderingServer.frame_post_draw
@@ -316,6 +323,7 @@ func render_video(data, output_base_path):
 	for frame in range(total_frames):
 		var t = float(frame) / float(total_frames - 1) if total_frames > 1 else 0.0
 		cam.position = start_pos.lerp(end_pos, t)
+		setup_smart_point_lights(cam)
 		
 		await get_tree().process_frame
 		
@@ -327,3 +335,67 @@ func render_video(data, output_base_path):
 			print("Rendered frame ", frame, "/", total_frames)
 			
 	get_tree().quit(0)
+
+func setup_smart_point_lights(cam: Camera3D):
+	# Clear existing smart lights to allow re-placement (important for video)
+	var existing = get_tree().get_nodes_in_group("smart_lights")
+	for l in existing:
+		l.queue_free()
+	
+	var space_state = cam.get_world_3d().direct_space_state
+	if not space_state:
+		print("Warning: Physics space state not available for smart lights.")
+		return
+		
+	var cam_pos = cam.global_position
+	var basis = cam.global_transform.basis
+	var forward = -basis.z
+	var right = basis.x
+	var up = basis.y
+	
+	# Define a set of light offsets relative to the camera
+	# We want to illuminate the scene around and in front of the camera
+	var light_configs = [
+		{"offset": Vector3(0, 0.5, 0), "energy": 1.5, "range": 15.0, "name": "Near"},
+		{"offset": forward * 2.5 + up * 0.5, "energy": 1.2, "range": 12.0, "name": "Ahead"},
+		{"offset": right * 1.8 + up * 0.2, "energy": 0.8, "range": 10.0, "name": "Right"},
+		{"offset": -right * 1.8 + up * 0.2, "energy": 0.8, "range": 10.0, "name": "Left"},
+		{"offset": -forward * 1.2 + up * 1.0, "energy": 0.6, "range": 10.0, "name": "Behind"}
+	]
+	
+	print("Placing ", light_configs.size(), " smart point lights...")
+	
+	for config in light_configs:
+		var target_pos = cam_pos + config["offset"]
+		var safe_pos = _get_safe_pos(cam_pos, target_pos, space_state)
+		
+		var light = OmniLight3D.new()
+		light.name = "SmartLight_" + config["name"]
+		light.position = safe_pos
+		light.light_energy = config["energy"]
+		light.omni_range = config["range"]
+		light.shadow_enabled = true
+		# Neutral slightly warm light
+		light.light_color = Color(1.0, 0.98, 0.92)
+		# Add to group so we can find and clean them up
+		light.add_to_group("smart_lights")
+		add_child(light)
+
+func _get_safe_pos(start: Vector3, end: Vector3, space_state: PhysicsDirectSpaceState3D) -> Vector3:
+	var query = PhysicsRayQueryParameters3D.create(start, end)
+	# Collide with everything (walls, floors, etc.)
+	query.collide_with_bodies = true
+	query.collide_with_areas = false
+	
+	var result = space_state.intersect_ray(query)
+	if result:
+		var hit_pos = result.position
+		var dir = (hit_pos - start).normalized()
+		var dist = (hit_pos - start).length()
+		
+		# Back off from the hit point to avoid intersecting geometry
+		# We use a smaller back-off if the total distance is very small
+		var back_off = min(0.25, dist * 0.4) 
+		return hit_pos - dir * back_off
+		
+	return end
