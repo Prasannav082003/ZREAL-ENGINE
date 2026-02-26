@@ -3,8 +3,11 @@ extends Node3D
 # image_glb_creation.gd
 # Handles the construction of the scene: Architecture (Walls, Floors, Ceilings) and Asset Loading.
 var _tracked_assets = []
+var day_render = true
 
 func build_scene(data):
+	if data.has("day_render"):
+		day_render = data["day_render"]
 	setup_lighting(data)
 	
 	var geom_data = data
@@ -42,7 +45,35 @@ func setup_lighting(data):
 	var env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	env.sky = Sky.new()
-	env.sky.sky_material = ProceduralSkyMaterial.new()
+	
+	var sky_mat = ProceduralSkyMaterial.new()
+	if day_render:
+		sky_mat.sky_top_color = Color(0.35, 0.46, 0.71)
+		sky_mat.sky_horizon_color = Color(0.64, 0.65, 0.67)
+		sky_mat.ground_bottom_color = Color(0.12, 0.12, 0.13)
+		sky_mat.ground_horizon_color = Color(0.64, 0.65, 0.67)
+		env.ambient_light_energy = 1.0
+		
+		# If no light is provided, default to day light
+		if not data.has("directional_light"):
+			dir_light.light_energy = 1.0
+			dir_light.position = Vector3(10, 20, 10)
+			dir_light.look_at(Vector3.ZERO)
+	else:
+		sky_mat.sky_top_color = Color(0.02, 0.03, 0.05)
+		sky_mat.sky_horizon_color = Color(0.05, 0.07, 0.1)
+		sky_mat.ground_bottom_color = Color(0.01, 0.01, 0.02)
+		sky_mat.ground_horizon_color = Color(0.05, 0.07, 0.1)
+		env.ambient_light_energy = 0.1
+		
+		# If no light is provided, default to moonlight
+		if not data.has("directional_light"):
+			dir_light.light_energy = 0.1
+			dir_light.light_color = Color(0.6, 0.7, 0.9)
+			dir_light.position = Vector3(10, 20, 10)
+			dir_light.look_at(Vector3.ZERO)
+
+	env.sky.sky_material = sky_mat
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	
@@ -93,7 +124,7 @@ func _build_layer_geometry(layer_data, layer_altitude):
 	if layer_data.has("holes"):
 		all_holes = layer_data["holes"]
 	
-	print("Layer has ", lines.keys().size(), " lines.")
+	print("Layer has ", lines.size(), " lines.")
 	
 	# 1. Build Walls
 	for line_id in lines:
@@ -372,7 +403,14 @@ func load_assets(data):
 
 func _load_layer_items(items, layer_altitude):
 	for item_id in items:
-		var item = items[item_id]
+		# Handle both Dictionary (item_id is key) and Array (item_id IS the item) formats
+		var item
+		if typeof(items) == TYPE_DICTIONARY:
+			item = items[item_id]
+		else:
+			item = item_id  # When iterating an Array, item_id is the item itself
+		if typeof(item) != TYPE_DICTIONARY:
+			continue
 		var model_path = ""
 		
 		# Prioritize local paths

@@ -798,8 +798,11 @@ class VideoDirectionalLight(BaseModel):
 
 class VideoGenerationPayload(BaseModel):
     """Payload model for video rendering with camera animation data."""
-    video_animation: VideoAnimation
+    video_animation: Optional[VideoAnimation] = None  # Optional — if missing, Godot auto-generates a horizontal pan
     threejs_camera: Optional[Dict[str, Any]] = None
+    blender_camera: Optional[Dict[str, Any]] = None
+    blender_target: Optional[Dict[str, Any]] = None
+    blender_script: Optional[str] = None
     coordinate_system: Optional[str] = "right_handed_y_up"
     target_coordinate_system: Optional[str] = "right_handed_z_up"
     ambient_light: Optional[AmbientLight] = None
@@ -807,7 +810,7 @@ class VideoGenerationPayload(BaseModel):
     aspect_ratio: str = "16:9"
     render_quality: str = "hd"
     timestamp: int = 0
-    floor_plan_data: Optional[Dict[str, Any]] = None  # Object, not string
+    floor_plan_data: Optional[Any] = None  # Can be string or dict — both formats accepted
     enable_status_updates: bool = True  # If True, send status updates to UploadGallerAI endpoint at each step
     
     class Config:
@@ -871,9 +874,10 @@ def _validate_video_payload(payload: VideoGenerationPayload) -> tuple[bool, str]
         (is_valid, error_message) - True if valid, False with error message if invalid
     """
     try:
-        # Check video_animation is present
+        # Check video_animation — if not present, Godot will auto-generate a horizontal pan
         if not payload.video_animation:
-            return False, "Missing required field: video_animation"
+            print("ℹ️  No video_animation provided — Godot will auto-generate horizontal pan from camera position")
+            return True, ""
         
         # Validate duration and fps
         if payload.video_animation.duration_seconds <= 0:
@@ -898,7 +902,8 @@ def _validate_video_payload(payload: VideoGenerationPayload) -> tuple[bool, str]
         )
         
         if not has_keyframes and not has_start_end:
-            return False, "Missing camera animation data: either keyframes or camera_position_start/end is required"
+            # No keyframes or start/end — Godot will auto-generate from camera position
+            print("ℹ️  No keyframes or start/end positions — Godot will auto-generate from camera")
         
         # Validate render quality
         valid_qualities = ['HD', 'FULL HD', 'FULLHD', 'QUAD HD', 'QUADHD', '2K', '4K', '6K', '8K', '12K', 'FAST_PREVIEW', 'LOW', 'MEDIUM']
@@ -1654,7 +1659,53 @@ def _download_and_localize_assets(plan: dict, use_high_res: bool = True, logger:
     if logger:
         logger.end_asset_download()
     
-    return replace_urls_in_plan(plan)
+    localized_plan = replace_urls_in_plan(plan)
+    
+    # Post-processing: fix any broken local paths (e.g., from r&d or other project folders)
+    localized_plan = _fix_broken_local_paths(localized_plan)
+    
+    return localized_plan
+
+
+def _fix_broken_local_paths(data, _depth=0):
+    """
+    Recursively walks plan data and fixes local file paths that don't exist.
+    For paths pointing to other project folders (e.g., 'r&d'), tries to:
+    1. Find the same filename in local asset_downloads
+    2. Re-download from API if assetId_3D is available
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    local_downloads = os.path.join(script_dir, "asset_downloads")
+    
+    if _depth > 20:  # Prevent infinite recursion
+        return data
+    
+    if isinstance(data, str):
+        # Check if it looks like a local file path that doesn't exist
+        if (os.sep in data or '/' in data) and not data.startswith('http'):
+            # It's a local path — check common file extensions
+            ext = os.path.splitext(data)[1].lower()
+            if ext in ('.glb', '.obj', '.mtl', '.jpg', '.jpeg', '.png', '.exr', '.hdr'):
+                if not os.path.exists(data):
+                    filename = os.path.basename(data)
+                    local_candidate = os.path.join(local_downloads, filename)
+                    if os.path.exists(local_candidate):
+                        print(f"  🔄 Fixed broken path: {filename} (was: ...{data[-40:]})")
+                        return local_candidate
+                    else:
+                        print(f"  ⚠️ Missing asset (not in cache): {filename}")
+        return data
+    
+    elif isinstance(data, dict):
+        fixed = {}
+        for key, value in data.items():
+            fixed[key] = _fix_broken_local_paths(value, _depth + 1)
+        return fixed
+    
+    elif isinstance(data, list):
+        return [_fix_broken_local_paths(item, _depth + 1) for item in data]
+    
+    return data
 
 def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[RenderLogger] = None) -> str:
     """
@@ -2454,81 +2505,187 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
 
 def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger: Optional[RenderLogger] = None) -> str:
     """
-    Runs the Godot video rendering process.
+    Runs the Godot video rendering process using MovieWriter (--write-movie) for fast rendering.
+    Falls back to PNG frame-by-frame if MovieWriter is not available.
     """
-    # 1. Localize assets (reuses the image payload localization logic)
-    if logger: logger.start_glb_creation() # Reusing this status step for "Asset Prep"
+    # 1. Localize assets (same pattern as image render)
+    if logger: logger.start_glb_creation()
     
     print(f"🎬 Starting Godot Video Render for Job {job_id}")
     
-    # We need to localize assets in floor_plan_data
+    localized_geometry = None
     if payload.floor_plan_data:
-        _download_and_localize_assets(payload.floor_plan_data, use_high_res=True, logger=logger)
+        # Parse floor_plan_data string → dict if needed
+        floor_plan_data = payload.floor_plan_data
+        scene_data = json.loads(floor_plan_data) if isinstance(floor_plan_data, str) else floor_plan_data
+        # Download and localize all asset paths to absolute local paths
+        localized_geometry = _download_and_localize_assets(scene_data, use_high_res=True, logger=logger)
+        print(f"--- Finalizing floor plan data with all local asset paths ---")
     
     if logger: logger.end_glb_creation()
 
-    # 2. Save Input JSON
+    # 2. Build Godot input JSON with localized paths
+    # Exclude floor_plan_data since we replace it with localized version
+    godot_input = payload.dict(exclude={'floor_plan_data'}, exclude_unset=False)
+    if localized_geometry:
+        godot_input['floor_plan_data'] = localized_geometry
+    elif payload.floor_plan_data:
+        # If localization failed, try to use raw data
+        if isinstance(payload.floor_plan_data, str):
+            try:
+                godot_input['floor_plan_data'] = json.loads(payload.floor_plan_data)
+            except:
+                godot_input['floor_plan_data'] = payload.floor_plan_data
+        else:
+            godot_input['floor_plan_data'] = payload.floor_plan_data
+
+    # Remove None values to prevent GDScript null issues (has() returns true but value is null)
+    godot_input = {k: v for k, v in godot_input.items() if v is not None}
+
+    # Save the properly assembled input JSON
     input_json_path = os.path.join(RUNTIME_DIR, f"{job_id}_video_input.json")
     try:
         with open(input_json_path, 'w', encoding='utf-8') as f:
-            f.write(payload.json(exclude_unset=False))
+            json.dump(godot_input, f, ensure_ascii=False, default=str)
         print(f"📄 Saved video input JSON to: {input_json_path}")
     except Exception as e:
         print(f"❌ Failed to save video input JSON: {e}")
         raise e
 
     # 3. Prepare Output Directory
-    output_dir = os.path.join(RENDER_OUTPUT_DIR, job_id)
+    output_dir = os.path.abspath(os.path.join(RENDER_OUTPUT_DIR, job_id))
     os.makedirs(output_dir, exist_ok=True)
     
-    # Godot output pattern (frame.png -> frame_0000.png)
-    temp_img_base = os.path.join(output_dir, "frame.png")
-    
-    # 4. Run Godot
+    # Output paths
+    # MovieWriter saves AVI relative to the Godot project directory
+    # Use a simple filename (no spaces/absolute paths) to avoid Godot file handle issues
     godot_exe = r"c:/Zlendo2026/4k_Unreal_Engine_v1 - godot/godot/bin/godot.windows.editor.x86_64.console.exe"
     project_path = r"c:/Zlendo2026/4k_Unreal_Engine_v1 - godot/godot_project"
     
+    avi_filename = f"{job_id}_render.avi"
+    avi_godot_output = os.path.join(project_path, avi_filename)  # Where Godot will save it
+    output_video_path = os.path.abspath(os.path.join(RENDER_OUTPUT_DIR, f"{job_id}_render.mp4"))
+    temp_img_base = os.path.join(output_dir, "frame.png")  # PNG fallback
+    
+    fps = payload.video_animation.fps if payload.video_animation else 30
+    
+    # 4. Run Godot with MovieWriter
     cmd = [
         godot_exe,
         "--path", project_path,
-        "res://main.tscn",
+        "--write-movie", avi_filename,  # Simple filename — Godot saves in project dir
+        "--fixed-fps", str(fps),
+        "res://video_main.tscn",
         "--",
         input_json_path,
-        temp_img_base
+        temp_img_base  # passed so GDScript knows where to save PNGs if MovieWriter fails
     ]
     
-    print(f"🚀 Running Godot Command: {' '.join(cmd)}")
+    print(f"🚀 Running Godot MovieWriter Command: {' '.join(cmd)}")
     
-    # Video rendering takes longer
     timeout = int(os.getenv("VIDEO_RENDER_TIMEOUT_SECONDS", "1800"))
     
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
-        if "Error:" in res.stdout or "ERROR:" in res.stdout:
-             print(f"⚠️  Godot Output contains errors:\n{res.stdout[-1000:]}")
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Godot execution failed: {e}")
-        print(f"Stdout: {e.stdout}")
-        print(f"Stderr: {e.stderr}")
-        raise e
+        # NOTE: check=False because Godot MovieWriter always exits with code 1 even on success
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+        if res.stdout:
+            print(f"📋 Godot Output:\n{res.stdout[-2000:]}")
+        if res.stderr:
+            print(f"⚠️  Godot Stderr:\n{res.stderr[-1000:]}")
+        
+        # Check if MovieWriter actually produced the AVI file
+        if not os.path.exists(avi_godot_output) or os.path.getsize(avi_godot_output) == 0:
+            # Only fail if no AVI was produced AND no meaningful output
+            if "VIDEO RENDER COMPLETE" not in (res.stdout or ""):
+                print(f"❌ Godot failed to produce video (exit code {res.returncode})")
+                raise Exception(f"Godot render failed with exit code {res.returncode}")
     except subprocess.TimeoutExpired:
         print(f"❌ Godot execution timed out after {timeout}s")
         raise Exception("Godot render timed out")
 
-    print(f"✅ Godot PNG sequence generation complete.")
-
-    # 5. Encode to MP4
-    output_video_path = os.path.join(RENDER_OUTPUT_DIR, f"{job_id}_render.mp4")
-    fps = payload.video_animation.fps if payload.video_animation else 30
-    
-    print(f"🎞️ Encoding PNG sequence to MP4 (FPS: {fps})...")
-    success = _encode_png_sequence_to_mp4(output_dir, "frame", output_video_path, fps=fps, delete_frames=True)
-    
-    if success:
-        print(f"✅ Video output saved: {output_video_path}")
-        return output_video_path
+    # 5. Check what was produced and convert to MP4
+    if os.path.exists(avi_godot_output) and os.path.getsize(avi_godot_output) > 0:
+        # MovieWriter produced an AVI — convert to MP4
+        avi_size_mb = os.path.getsize(avi_godot_output) / (1024 * 1024)
+        print(f"✅ MovieWriter AVI created: {avi_godot_output} ({avi_size_mb:.1f} MB)")
+        print(f"🎞️ Converting AVI to MP4...")
+        
+        ffmpeg_path = _find_ffmpeg_path()
+        if not ffmpeg_path:
+            print("❌ FFmpeg not found! Cannot convert AVI to MP4.")
+            raise Exception("FFmpeg not found")
+        
+        # Find audio file
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        audio_path = os.path.join(script_dir, "audio", "audio.mp3")
+        has_audio = os.path.exists(audio_path)
+        
+        # Build FFmpeg command: AVI → MP4
+        # MovieWriter AVI includes a silent audio track — we must explicitly ignore it
+        ffmpeg_cmd = [
+            ffmpeg_path,
+            '-y',
+            '-i', avi_godot_output,
+        ]
+        
+        if has_audio:
+            ffmpeg_cmd.extend(['-i', audio_path])
+            ffmpeg_cmd.extend([
+                '-map', '0:v',     # Video from AVI (input 0)
+                '-map', '1:a',     # Audio from external MP3 (input 1)
+                '-c:v', 'libx264',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-shortest',
+            ])
+            print(f"🎵 Adding audio: {audio_path}")
+        else:
+            ffmpeg_cmd.extend([
+                '-map', '0:v',     # Video only, no audio
+                '-c:v', 'libx264',
+                '-an',             # Explicitly no audio
+            ])
+        
+        ffmpeg_cmd.extend([
+            '-pix_fmt', 'yuv420p',
+            '-crf', '18',
+            '-preset', 'medium',
+            output_video_path
+        ])
+        
+        print(f"📹 FFmpeg command: {' '.join(ffmpeg_cmd)}")
+        
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=600)
+        
+        if result.returncode != 0:
+            print(f"❌ FFmpeg conversion failed: {result.stderr[:500] if result.stderr else 'No error output'}")
+            raise Exception("FFmpeg AVI to MP4 conversion failed")
+        
+        # Clean up AVI
+        try:
+            os.remove(avi_godot_output)
+            print(f"🧹 Cleaned up AVI file")
+        except:
+            pass
+        
+        if os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 0:
+            mp4_size_mb = os.path.getsize(output_video_path) / (1024 * 1024)
+            print(f"✅ Video output saved: {output_video_path} ({mp4_size_mb:.1f} MB)")
+            return output_video_path
+        else:
+            raise Exception("MP4 output file was not created")
     else:
-        raise Exception("Video encoding failed")
+        # Fallback: check for PNG sequence (MovieWriter might not have been available)
+        print("⚠️  MovieWriter AVI not found — checking for PNG fallback frames...")
+        
+        print(f"🎞️ Encoding PNG sequence to MP4 (FPS: {fps})...")
+        success = _encode_png_sequence_to_mp4(output_dir, "frame", output_video_path, fps=fps, delete_frames=True)
+        
+        if success:
+            print(f"✅ Video output saved: {output_video_path}")
+            return output_video_path
+        else:
+            raise Exception("Video encoding failed — no AVI or PNG frames produced")
 
 def _background_video_render_task(project_id: int, gallery_id: int, payload: VideoGenerationPayload, job_id: str, user_id: int = 0):
     """The main function that runs in the background to perform the full video render and upload pipeline."""
@@ -2544,8 +2701,8 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
     try:
         start_time = time.monotonic()
         video_animation = payload.video_animation
-        duration_seconds = video_animation.duration_seconds
-        fps = video_animation.fps
+        duration_seconds = video_animation.duration_seconds if video_animation else 5.0
+        fps = video_animation.fps if video_animation else 30
         print(f"\n{'='*80}\n🎬 BACKGROUND VIDEO RENDER TASK STARTED (GODOT)\n{'='*80}\nJob ID: {job_id}\nProject ID: {project_id}\nGallery ID: {gallery_id}\nUser ID: {user_id}\nDuration: {duration_seconds}s @ {fps}fps\nStatus Updates: {'ENABLED' if enable_status_updates else 'DISABLED'}\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*80}\n")
         
         # STEP 0: Validate payload JSON
@@ -2782,8 +2939,8 @@ async def generate_4k_video_async(
     """
     job_id = job_id_param if job_id_param else str(uuid.uuid4())
     video_animation = payload.video_animation
-    duration_seconds = video_animation.duration_seconds
-    fps = video_animation.fps
+    duration_seconds = video_animation.duration_seconds if video_animation else 5.0
+    fps = video_animation.fps if video_animation else 30
     
     print(f"\n{'='*80}\n[VIDEO] NEW VIDEO RENDER REQUEST RECEIVED\n{'='*80}")
     print(f"Job ID: {job_id}\nAuthenticated User: {current_user.email}\nProject ID: {project_id}\nGallery ID: {id}\nUser ID: {user_id}\nDuration: {duration_seconds}s @ {fps}fps\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*80}")

@@ -63,16 +63,31 @@ func set_resolution(data):
 	var h = 1080
 	
 	if data.has("render_quality"):
-		var quality = str(data["render_quality"]).to_upper()
-		if quality == "4K":
+		var quality = str(data["render_quality"]).to_upper().strip_edges()
+		if quality == "12K":
+			w = 12288
+			h = 6642
+		elif quality == "8K":
+			w = 7680
+			h = 4320
+		elif quality == "6K":
+			w = 6144
+			h = 3321
+		elif quality == "4K":
 			w = 3840
 			h = 2160
 		elif quality == "2K":
 			w = 2560
 			h = 1440
-		elif quality == "1080P" or quality == "FHD":
+		elif quality == "QUAD HD":
+			w = 2048
+			h = 1080
+		elif quality == "1080P" or quality == "FHD" or quality == "FULL HD":
 			w = 1920
 			h = 1080
+		elif quality == "HD":
+			w = 1280
+			h = 720
 	
 	if data.has("width"): w = int(data["width"])
 	if data.has("height"): h = int(data["height"])

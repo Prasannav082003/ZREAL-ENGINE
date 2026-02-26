@@ -3,8 +3,11 @@ extends Node3D
 # image_glb_creation.gd
 # Handles the construction of the scene: Architecture (Walls, Floors, Ceilings) and Asset Loading.
 var _tracked_assets = []
+var day_render = true
 
 func build_scene(data):
+	if data.has("day_render"):
+		day_render = data["day_render"]
 	setup_lighting(data)
 	
 	var geom_data = data
@@ -42,7 +45,35 @@ func setup_lighting(data):
 	var env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	env.sky = Sky.new()
-	env.sky.sky_material = ProceduralSkyMaterial.new()
+	
+	var sky_mat = ProceduralSkyMaterial.new()
+	if day_render:
+		sky_mat.sky_top_color = Color(0.35, 0.46, 0.71)
+		sky_mat.sky_horizon_color = Color(0.64, 0.65, 0.67)
+		sky_mat.ground_bottom_color = Color(0.12, 0.12, 0.13)
+		sky_mat.ground_horizon_color = Color(0.64, 0.65, 0.67)
+		env.ambient_light_energy = 1.0
+		
+		# If no light is provided, default to day light
+		if not data.has("directional_light"):
+			dir_light.light_energy = 1.0
+			dir_light.position = Vector3(10, 20, 10)
+			dir_light.look_at(Vector3.ZERO)
+	else:
+		sky_mat.sky_top_color = Color(0.02, 0.03, 0.05)
+		sky_mat.sky_horizon_color = Color(0.05, 0.07, 0.1)
+		sky_mat.ground_bottom_color = Color(0.01, 0.01, 0.02)
+		sky_mat.ground_horizon_color = Color(0.05, 0.07, 0.1)
+		env.ambient_light_energy = 0.1
+		
+		# If no light is provided, default to moonlight
+		if not data.has("directional_light"):
+			dir_light.light_energy = 0.1
+			dir_light.light_color = Color(0.6, 0.7, 0.9)
+			dir_light.position = Vector3(10, 20, 10)
+			dir_light.look_at(Vector3.ZERO)
+
+	env.sky.sky_material = sky_mat
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	
@@ -492,6 +523,73 @@ func _load_layer_items(items, layer_altitude):
 					
 					node.scale = final_scale
 					
+					# Asset Material Override (Color and Scale/Repeat)
+					if item.has("materials") and typeof(item["materials"]) == TYPE_DICTIONARY:
+						var item_mats = item["materials"]
+						var meshes = _get_all_meshes(node)
+						for m in meshes:
+							if not m.mesh: continue
+							for i in range(m.mesh.get_surface_count()):
+								var mat = m.get_active_material(i)
+								if mat and mat is StandardMaterial3D:
+									var m_name = mat.resource_name
+									if m_name == null or m_name == "": continue
+									
+									for key in item_mats:
+										if key in m_name or m_name in key:
+											var mat_opt = item_mats[key]
+											if typeof(mat_opt) == TYPE_DICTIONARY:
+												var new_mat = mat.duplicate()
+												var modified = false
+												
+												if mat_opt.get("isColorEdited", false):
+													var c_str = str(mat_opt.get("color", "ffffff")).strip_edges()
+													if c_str.length() >= 3 and not c_str.begins_with("#"):
+														c_str = "#" + c_str
+													if c_str.is_valid_html_color():
+														new_mat.albedo_color = Color(c_str)
+													new_mat.albedo_texture = null
+													modified = true
+													print("Overrode color for material: ", m_name, " in asset: ", item_id, " to color: ", c_str)
+												
+												var scale_u = new_mat.uv1_scale.x
+												var scale_v = new_mat.uv1_scale.y
+												var changed_scale = false
+												
+												if mat_opt.has("repeat"):
+													var r = mat_opt["repeat"]
+													if typeof(r) == TYPE_ARRAY and r.size() >= 2:
+														scale_u = float(r[0]) if float(r[0]) > 0 else 1.0
+														scale_v = float(r[1]) if float(r[1]) > 0 else 1.0
+														changed_scale = true
+														
+												if mat_opt.has("scale"):
+													var s = mat_opt["scale"]
+													if typeof(s) == TYPE_ARRAY and s.size() >= 2:
+														scale_u = float(s[0]) if float(s[0]) > 0 else scale_u
+														scale_v = float(s[1]) if float(s[1]) > 0 else scale_v
+														changed_scale = true
+													elif typeof(s) == TYPE_FLOAT or typeof(s) == TYPE_INT:
+														var sf = float(s)
+														if sf > 0:
+															scale_u = sf
+															scale_v = sf
+															changed_scale = true
+													elif typeof(s) == TYPE_STRING and s.is_valid_float():
+														var sf = float(s)
+														if sf > 0:
+															scale_u = sf
+															scale_v = sf
+															changed_scale = true
+															
+												if changed_scale:
+													new_mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+													modified = true
+													print("Overrode UV scale for material: ", m_name, " in asset: ", item_id, " to: ", new_mat.uv1_scale)
+													
+												if modified:
+													m.set_surface_override_material(i, new_mat)
+					
 					print("Loaded asset: ", model_path, " final scale: ", final_scale)
 			else:
 				print("Failed to load GLTF: ", model_path, " Error: ", error)
@@ -568,38 +666,63 @@ func create_material(mat_data):
 	mat.albedo_color = base_color
 	
 	# --- Textures ---
-	var map_url = ""
-	if mat_data.has("mapUrl") and mat_data["mapUrl"] != null and str(mat_data["mapUrl"]) != "":
-		map_url = str(mat_data["mapUrl"])
+	var is_color_edited = mat_data.get("isColorEdited", false)
 	
-	if map_url != "":
-		var tex = load_texture_from_path(map_url)
-		if tex:
-			mat.albedo_texture = tex
-			# print("  Material Texture Applied: ", map_url.get_file())
-		else:
-			# print("  Material Texture Missing: ", map_url.get_file(), " (Using color ", base_color, ")")
-			pass
+	if not is_color_edited:
+		var map_url = ""
+		if mat_data.has("mapUrl") and mat_data["mapUrl"] != null and str(mat_data["mapUrl"]) != "":
+			map_url = str(mat_data["mapUrl"])
+		
+		if map_url != "":
+			var tex = load_texture_from_path(map_url)
+			if tex:
+				mat.albedo_texture = tex
+				# Enable triplanar to ensure proper scaling on CSG walls/floors
+				mat.uv1_triplanar = true
+				# print("  Material Texture Applied: ", map_url.get_file())
+			else:
+				# print("  Material Texture Missing: ", map_url.get_file(), " (Using color ", base_color, ")")
+				pass
+		
+		if mat_data.has("normalUrl") and mat_data["normalUrl"] != null and str(mat_data["normalUrl"]) != "":
+			var tex = load_texture_from_path(str(mat_data["normalUrl"]))
+			if tex:
+				mat.normal_enabled = true
+				mat.normal_texture = tex
+				
+		if mat_data.has("roughnessUrl") and mat_data["roughnessUrl"] != null and str(mat_data["roughnessUrl"]) != "":
+			var tex = load_texture_from_path(str(mat_data["roughnessUrl"]))
+			if tex:
+				mat.roughness_texture = tex
+				mat.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GREEN
 	
-	if mat_data.has("normalUrl") and mat_data["normalUrl"] != null and str(mat_data["normalUrl"]) != "":
-		var tex = load_texture_from_path(str(mat_data["normalUrl"]))
-		if tex:
-			mat.normal_enabled = true
-			mat.normal_texture = tex
-			
-	if mat_data.has("roughnessUrl") and mat_data["roughnessUrl"] != null and str(mat_data["roughnessUrl"]) != "":
-		var tex = load_texture_from_path(str(mat_data["roughnessUrl"]))
-		if tex:
-			mat.roughness_texture = tex
-			mat.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GREEN
+	# --- UV Scale / Repeat ---
+	var scale_u = 1.0
+	var scale_v = 1.0
 	
-	# --- UV Repeat ---
 	if mat_data.has("repeat"):
 		var r = mat_data["repeat"]
 		if typeof(r) == TYPE_ARRAY and r.size() >= 2:
-			var su = float(r[0]) if float(r[0]) > 0 else 1.0
-			var sv = float(r[1]) if float(r[1]) > 0 else 1.0
-			mat.uv1_scale = Vector3(su, sv, 1.0)
+			scale_u = float(r[0]) if float(r[0]) > 0 else 1.0
+			scale_v = float(r[1]) if float(r[1]) > 0 else 1.0
+			
+	if mat_data.has("scale"):
+		var s = mat_data["scale"]
+		if typeof(s) == TYPE_ARRAY and s.size() >= 2:
+			scale_u = float(s[0]) if float(s[0]) > 0 else scale_u
+			scale_v = float(s[1]) if float(s[1]) > 0 else scale_v
+		elif typeof(s) == TYPE_FLOAT or typeof(s) == TYPE_INT:
+			var sf = float(s)
+			if sf > 0:
+				scale_u = sf
+				scale_v = sf
+		elif typeof(s) == TYPE_STRING and s.is_valid_float():
+			var sf = float(s)
+			if sf > 0:
+				scale_u = sf
+				scale_v = sf
+
+	mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
 		
 	return mat
 

@@ -60,3 +60,6 @@ audio/
 asset_downloads/
 godot/
 
+# Video render artifacts
+*.avi
+*.mp4
