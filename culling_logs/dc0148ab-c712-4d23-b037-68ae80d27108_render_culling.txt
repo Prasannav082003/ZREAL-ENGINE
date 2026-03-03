@@ -1,0 +1,27 @@
+--- Video Scene Culling Log ---
+🎬 Video Animation detected. Analyzing full camera path...
+   Collected 151 points from video path.
+ℹ️ No 'layers' found. Checking for flat structure...
+   Checking 151 path points against 12 rooms...
+   ✅ Path Point 0 inside: Room (a-1771834337085-rxiqmm8v)
+✅ Identified 1 unique active rooms along path.
+  ➕ Adding Neighbor of Room: Room (a-1772516811013-gkwt1gms)
+  ➕ Adding Neighbor of Room: Room (a-1772516841880-impwiodc)
+  ➕ Adding Neighbor of Room: Room (a-1772516857140-jitn88gz)
+  ➕ Adding Neighbor of Room: Room (a-1772516868291-9rvpy1kn)
+  ➕ Adding Neighbor of Room: Room (a-1772516877246-xxppo50v)
+  ➕ Adding Neighbor of Room: Room (a-1772516893094-83c4tk38)
+  ➕ Adding Neighbor of Room: Room (a-1772516903843-ey6sctvu)
+  ➕ Adding Neighbor of Room: Room (a-1772516929768-z2o0pbcv)
+🎯 Total kept rooms: 9
+
+============================================================
+📊 VIDEO CULLING SUMMARY
+============================================================
+  Camera path points analyzed: 151
+  Active rooms (camera enters): 1
+  Kept rooms (+ neighbors):     9
+  Areas:  12 -> 9  (removed 3)
+  Items:  18 -> 18  (removed 0)
+  Lines:  31 -> 24  (removed 7)
+============================================================

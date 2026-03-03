@@ -731,8 +731,6 @@ app.add_middleware(
 # --- STATUS MONITORING API ---
 # Read-only endpoints for external monitoring system
 from api_status import create_status_router
-from scene_optimizer import SceneOptimizer, CULLING_LOGS_DIR
-from scene_optimizer_video import VideoSceneOptimizer
 
 status_router = create_status_router(active_jobs, render_queue, queue_lock, CURRENT_STATUS)
 app.include_router(status_router)
@@ -1284,18 +1282,9 @@ def _download_and_localize_assets(plan: dict, use_high_res: bool = True, logger:
     # NEW: Store input_url -> resolved_hp_url mapping
     input_url_to_hp = {}
     
-    # If plan is a string, parse it first so we can scan the object structure
-    is_json_string = False
-    if isinstance(plan, str):
-        try:
-            plan_data = json.loads(plan)
-            is_json_string = True
-        except Exception:
-            plan_data = plan # Fallback
-    else:
-        plan_data = plan
-
-    layer_to_scan = plan_data
+    # Handle both traditional (layers > layer-1) and video (direct) structures
+    # Handle both traditional (layers) and video (direct) structures
+    layer_to_scan = plan
 
     # Helper to recursively find all URLs in a data structure
     def collect_urls_recursive(data_obj, url_set):
@@ -1348,7 +1337,6 @@ def _download_and_localize_assets(plan: dict, use_high_res: bool = True, logger:
                  # Convert relative texture path to full URL
                  full_url = f"https://zrealtystoragedev.blob.core.windows.net/{data_obj}"
                  url_set.add(full_url)
-                 input_url_to_hp[data_obj] = full_url # CRITICAL: Map relative path to full URL for replacement
                  if logger:
                      print(f"  Found relative texture path: {data_obj} -> {full_url}")
 
@@ -1671,15 +1659,11 @@ def _download_and_localize_assets(plan: dict, use_high_res: bool = True, logger:
     if logger:
         logger.end_asset_download()
     
-    localized_plan = replace_urls_in_plan(plan_data)
+    localized_plan = replace_urls_in_plan(plan)
     
-    # Post-processing: fix any broken local paths
+    # Post-processing: fix any broken local paths (e.g., from r&d or other project folders)
     localized_plan = _fix_broken_local_paths(localized_plan)
     
-    # If original input was a string, return string (for Godot input compatibility)
-    if is_json_string:
-        return json.dumps(localized_plan)
-        
     return localized_plan
 
 
@@ -1747,16 +1731,6 @@ def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[
     godot_input = payload.dict(exclude={'floor_plan_data', 'video_animation'}, exclude_unset=True)
     # Inject localized geometry
     godot_input['floor_plan_data'] = localized_geometry
-    
-    # 2.5 Scene Culling — remove rooms/items not visible from camera
-    output_basename = f"{job_id}_render"
-    culling_log_path = os.path.join(CULLING_LOGS_DIR, f"{output_basename}_culling.txt")
-    try:
-        optimizer = SceneOptimizer(log_path=culling_log_path)
-        godot_input = optimizer.cull_scene(godot_input)
-        print(f"✅ Scene culling complete. Log: {culling_log_path}")
-    except Exception as e:
-        print(f"⚠️ Scene culling failed (continuing without culling): {e}")
     
     # 3. Save Input JSON
     input_json_path = os.path.abspath(os.path.join(RUNTIME_DIR, f"{job_id}_godot_input.json"))
@@ -2567,16 +2541,6 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
 
     # Remove None values to prevent GDScript null issues (has() returns true but value is null)
     godot_input = {k: v for k, v in godot_input.items() if v is not None}
-    
-    # 2.5 Video Scene Culling — remove rooms/items not visible along camera path
-    output_basename = f"{job_id}_render"
-    culling_log_path = os.path.join(CULLING_LOGS_DIR, f"{output_basename}_culling.txt")
-    try:
-        video_optimizer = VideoSceneOptimizer(log_path=culling_log_path)
-        godot_input = video_optimizer.cull_scene(godot_input)
-        print(f"✅ Video scene culling complete. Log: {culling_log_path}")
-    except Exception as e:
-        print(f"⚠️ Video scene culling failed (continuing without culling): {e}")
 
     # Save the properly assembled input JSON
     input_json_path = os.path.join(RUNTIME_DIR, f"{job_id}_video_input.json")
@@ -2707,13 +2671,6 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
         if os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 0:
             mp4_size_mb = os.path.getsize(output_video_path) / (1024 * 1024)
             print(f"✅ Video output saved: {output_video_path} ({mp4_size_mb:.1f} MB)")
-            # Clean up the temp frames folder (no longer needed after MP4 is saved)
-            try:
-                import shutil
-                shutil.rmtree(output_dir, ignore_errors=True)
-                print(f"🧹 Cleaned up temp folder: {output_dir}")
-            except Exception:
-                pass
             return output_video_path
         else:
             raise Exception("MP4 output file was not created")
@@ -2726,14 +2683,6 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
         
         if success:
             print(f"✅ Video output saved: {output_video_path}")
-            # Clean up the temp frames folder (PNG frames already deleted by encoder,
-            # but the folder itself still remains — remove it)
-            try:
-                import shutil
-                shutil.rmtree(output_dir, ignore_errors=True)
-                print(f"🧹 Cleaned up temp folder: {output_dir}")
-            except Exception:
-                pass
             return output_video_path
         else:
             raise Exception("Video encoding failed — no AVI or PNG frames produced")

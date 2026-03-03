@@ -165,63 +165,57 @@ func _build_layer_geometry(layer_data, layer_altitude):
 		var wall_angle = -atan2(diff.z, diff.x)
 		var wall_pos  = Vector3(center.x, layer_altitude + height / 2.0, center.z)
 		
-		# ── Extend wall length at both ends to fill corner gaps ────────────────
-		# Without this, walls meeting at 90° leave a gap equal to wall_thickness×wall_thickness
-		# at each corner. Extending by wall_thickness/2 at each end makes the CSG union
-		# fill the corners into clean solid joints (like a proper wall miter).
-		var corner_length = length + wall_thickness
-
-
-		# ── Structural wall in CSGCombiner gets OUTER material ─────────────────
-		# The structural wall is inside the CSGCombiner so holes (doors/windows)
-		# get cut through it correctly. From outside the building, the exterior
-		# face of this wall is what's visible → apply outer_properties here.
+		# ── Structural wall (used for CSG hole cutting, no material needed) ────
 		var wall = CSGBox3D.new()
-		wall.size = Vector3(corner_length, height, wall_thickness)  # extended to fill corners
+		wall.size = Vector3(length, height, wall_thickness)
 		wall.position = wall_pos
 		wall.rotation.y = wall_angle
+		csg.add_child(wall)
 		
-		# Outer material on the structural wall (exterior face)
-		if line.has("outer_properties") and line["outer_properties"].has("material"):
-			wall.material = create_material(line["outer_properties"]["material"])
-		elif line.has("inner_properties") and line["inner_properties"].has("material"):
-			wall.material = create_material(line["inner_properties"]["material"])
+		# ── Face panel thickness: 1 cm so it sits snugly on the wall surface ──
+		var face_t = max(wall_thickness * 0.05, 0.005)  # 5% of wall, min 5 mm
+		
+		# ── INNER face panel (visible from inside the room) ───────────────────
+		# Offset half-thickness toward the inner side (+Z in local wall space)
+		var inner_offset = (wall_thickness / 2.0 - face_t / 2.0)
+		var inner_local  = Vector3(0, 0, inner_offset)
+		var wall_basis   = Basis(Vector3.UP, wall_angle)
+		var inner_world  = wall_pos + wall_basis * inner_local
+		
+		var inner_panel = CSGBox3D.new()
+		inner_panel.size = Vector3(length, height, face_t)
+		inner_panel.position = inner_world
+		inner_panel.rotation.y = wall_angle
+		
+		if line.has("inner_properties") and line["inner_properties"].has("material"):
+			inner_panel.material = create_material(line["inner_properties"]["material"])
 		else:
 			var def_mat = StandardMaterial3D.new()
 			def_mat.albedo_color = Color(0.9, 0.9, 0.9)
-			def_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-			wall.material = def_mat
+			inner_panel.material = def_mat
+		csg.add_child(inner_panel)
 		
-		csg.add_child(wall)
+		# ── OUTER face panel (visible from outside the building) ──────────────
+		# Offset half-thickness toward the outer side (-Z in local wall space)
+		var outer_offset = -(wall_thickness / 2.0 - face_t / 2.0)
+		var outer_local  = Vector3(0, 0, outer_offset)
+		var outer_world  = wall_pos + wall_basis * outer_local
 		
-		# ── Inner face panel as MeshInstance3D at scene root ───────────────────
-		# This is NOT a CSGBox3D child of the combiner - it is a standalone mesh
-		# added directly to the scene. It never participates in CSG operations so
-		# its faces are never removed. Sits on the inner face of the wall and
-		# shows the inner_properties material (visible from inside the room).
-		# Thickness is 1 mm — just enough to beat z-fighting.
-		var inner_mat_data = null
-		if line.has("inner_properties") and line["inner_properties"].has("material"):
-			inner_mat_data = line["inner_properties"]["material"]
-		elif line.has("outer_properties") and line["outer_properties"].has("material"):
-			inner_mat_data = line["outer_properties"]["material"]
-			
-		if inner_mat_data != null:
-			var face_t = 0.001  # 1 mm — purely visual overlay
-			# Offset inward by half wall thickness so the panel sits on the inner face
-			var inner_offset = wall_thickness / 2.0 + face_t / 2.0
-			var wall_basis   = Basis(Vector3.UP, wall_angle)
-			var inner_world  = wall_pos + wall_basis * Vector3(0, 0, inner_offset)
-			
-			var inner_mesh = MeshInstance3D.new()
-			var bm = BoxMesh.new()
-			bm.size = Vector3(corner_length, height, face_t)  # match wall corner extension
-			inner_mesh.mesh = bm
-			inner_mesh.position = inner_world
-			inner_mesh.rotation.y = wall_angle
-			inner_mesh.material_override = create_material(inner_mat_data)
-			add_child(inner_mesh)  # Add to scene root, NOT to csg combiner
-
+		var outer_panel = CSGBox3D.new()
+		outer_panel.size = Vector3(length, height, face_t)
+		outer_panel.position = outer_world
+		outer_panel.rotation.y = wall_angle
+		
+		if line.has("outer_properties") and line["outer_properties"].has("material"):
+			outer_panel.material = create_material(line["outer_properties"]["material"])
+		elif line.has("inner_properties") and line["inner_properties"].has("material"):
+			# Fall back to inner material if no outer defined
+			outer_panel.material = create_material(line["inner_properties"]["material"])
+		else:
+			var def_mat = StandardMaterial3D.new()
+			def_mat.albedo_color = Color(0.9, 0.9, 0.9)
+			outer_panel.material = def_mat
+		csg.add_child(outer_panel)
 
 		# 1b. Build Holes (Doors/Windows) AND INSTANTIATE ASSETS
 		if line.has("holes"):
@@ -712,20 +706,16 @@ func create_material(mat_data):
 			# print("  Material Color Parsed: ", c_str, " -> ", base_color)
 		else:
 			print("  Warning: Invalid color string: ", c_str)
-		
+			
 	mat.albedo_color = base_color
 	
 	# --- Textures ---
-	# If the user has explicitly set a color (isColorEdited), skip loading the texture
-	# so the custom color is preserved and not overridden by the texture map.
 	var is_color_edited = mat_data.get("isColorEdited", false)
 	
 	if not is_color_edited:
 		var map_url = ""
 		if mat_data.has("mapUrl") and mat_data["mapUrl"] != null and str(mat_data["mapUrl"]) != "":
 			map_url = str(mat_data["mapUrl"])
-		elif mat_data.has("texture_urls") and typeof(mat_data["texture_urls"]) == TYPE_ARRAY and mat_data["texture_urls"].size() > 0:
-			map_url = str(mat_data["texture_urls"][0])
 		
 		if map_url != "":
 			var tex = load_texture_from_path(map_url)
@@ -784,24 +774,15 @@ func _resolve_local_texture(url: String) -> String:
 	# Try to find a locally downloaded texture corresponding to a URL.
 	if url == "" or url == "null": return ""
 	
-	# Normalize Windows backslashes to forward slashes (Godot FileAccess requires /)
-	var normalized = url.replace("\\", "/")
-	
 	# If already a local path and exists - use it directly
-	if FileAccess.file_exists(normalized): return normalized
+	if FileAccess.file_exists(url): return url
 	
 	# Extract filename from URL
-	var filename = normalized.get_file()
+	var filename = url.get_file()
 	if filename == "": return ""
 	
 	# Search in common texture directories
-	# asset_downloads is the primary location for locally cached textures
-	var project_root = ProjectSettings.globalize_path("res://")
-	var parent_dir = project_root.get_base_dir()  # one level up from godot_project/
-	var asset_downloads = parent_dir.path_join("asset_downloads")
-	
 	var search_dirs = [
-		asset_downloads,
 		"textures",
 		"res://textures",
 		"./textures",
@@ -821,23 +802,20 @@ func _resolve_local_texture(url: String) -> String:
 func load_texture_from_path(path):
 	if path == "" or path == "null" or path == "None": return null
 	
-	# Normalize Windows backslashes to forward slashes (Godot FileAccess requires /)
-	var norm_path = str(path).replace("\\", "/")
+	# Direct file check
+	if FileAccess.file_exists(path):
+		return load_image_texture(path)
 	
-	# Direct file check with normalized path
-	if FileAccess.file_exists(norm_path):
-		return load_image_texture(norm_path)
-	
-	# Resolve via helper (URL -> local filename search / asset_downloads lookup)
-	var local = _resolve_local_texture(norm_path)
+	# Resolve via helper (URL -> local filename search)
+	var local = _resolve_local_texture(path)
 	if local != "":
 		return load_image_texture(local)
 		
 	# If it's an HTTP URL that isn't downloaded yet, skip silently (color fallback is already set)
-	if norm_path.begins_with("http"):
+	if path.begins_with("http"):
 		return null
 		
-	print("Texture not found (skipped): ", norm_path)
+	print("Texture not found (skipped): ", path)
 	return null
 
 func load_image_texture(path):

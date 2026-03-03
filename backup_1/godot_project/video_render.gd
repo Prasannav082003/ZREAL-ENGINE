@@ -20,8 +20,6 @@ var _warmup_frames: int = 0
 var _use_movie_writer: bool = false
 var _use_png_fallback: bool = false
 var _needs_auto_pan: bool = false
-var _render_data = {}    # Full parsed JSON — used by setup_fixed_fill_lights()
-var _output_path: String = ""  # Stored for save_logs at completion
 
 func _ready():
 	print("Godot VIDEO Renderer Started")
@@ -78,13 +76,8 @@ func _ready():
 	var data = json.data
 	
 	# Build the 3D scene
-	_render_data = data   # Cache for later use by setup_fixed_fill_lights()
-	_output_path = output_path  # Store for save_logs at completion
 	set_resolution(data)
 	build_scene(data)
-	# Set up fill lights IMMEDIATELY so they exist from frame 0.
-	# If done during warmup, the first few frames captured by MovieWriter are dark.
-	setup_fixed_fill_lights()
 	setup_camera(data)
 	
 	# Extract keyframes
@@ -122,9 +115,8 @@ func _ready():
 	if _total_frames > 0 and _keyframes.size() > 0:
 		_apply_keyframe(0)
 	
-	# Warmup: give Godot's renderer (shadow maps, ambient cache, GI) time to settle
-	# before the first frame is captured. 10 frames is safe even at 4K.
-	_warmup_frames = 10
+	# We need a few warmup frames for the scene to settle
+	_warmup_frames = 4
 	_current_frame = 0
 	_rendering = false
 
@@ -142,7 +134,10 @@ func _process(_delta):
 			
 			_rendering = true
 			print("Scene settled. Starting video render...")
-			# Fill lights were already set up in _ready() - no need to call again here
+			# Set up smart lights for first frame
+			var cam = get_node_or_null("MainCamera")
+			if cam:
+				setup_smart_point_lights(cam)
 		return
 	
 	if not _rendering:
@@ -153,7 +148,6 @@ func _process(_delta):
 		print("============================================================")
 		print("VIDEO RENDER COMPLETE - ", _total_frames, " frames rendered.")
 		print("============================================================")
-		save_logs(_render_data, _output_path)
 		get_tree().quit(0)
 		return
 	
@@ -254,92 +248,9 @@ func _apply_keyframe(frame_idx: int):
 	if kf.has("fov") and kf["fov"] != null:
 		cam.fov = float(kf["fov"])
 
-	# ── Smooth interpolation toward this frame's target ──────────────────
-	# After hard-setting position/rotation above, we blend the camera
-	# gently toward the NEXT keyframe so movement is fluid (no snap/jitter).
-	if frame_idx < _keyframes.size() - 1:
-		var next_kf = _keyframes[frame_idx + 1]
-		var smooth_t = _smooth_step(0.15)   # blend 15% toward next frame each tick
-		# Smooth position
-		var next_pos = _extract_kf_position(next_kf)
-		if next_pos != null:
-			cam.position = cam.position.lerp(next_pos, smooth_t)
-		# Smooth rotation (slerp quaternion so gimbal-lock cannot occur)
-		var next_quat = _extract_kf_quaternion(next_kf, cam)
-		if next_quat != null:
-			var cur_q = cam.basis.get_rotation_quaternion().normalized()
-			var blended = cur_q.slerp(next_quat.normalized(), smooth_t)
-			cam.basis = Basis(blended)
-
-	# Fixed lights are set up once — no per-frame update needed
-
-# ─────────────────────────────────────────────────────────────────
-# Smooth Camera Helpers
-# ─────────────────────────────────────────────────────────────────
-
-# Cubic ease-in-out smoothstep for the given blend factor
-func _smooth_step(t: float) -> float:
-	return t * t * (3.0 - 2.0 * t)
-
-# Extract world position (metres) from any keyframe format, or return null
-func _extract_kf_position(kf: Dictionary):
-	var CM = 0.01
-	if kf.has("threejs_camera_data") and kf["threejs_camera_data"] != null:
-		var tjs = kf["threejs_camera_data"]
-		if tjs.has("position") and tjs["position"] != null:
-			var p = tjs["position"]
-			return Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
-	elif kf.has("position") and kf["position"] != null:
-		var p = kf["position"]
-		return Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
-	return null
-
-# Extract rotation as Quaternion from any keyframe format.
-# If only a lookAt / target is provided, compute it from cam's current position.
-func _extract_kf_quaternion(kf: Dictionary, cam: Camera3D):
-	var CM = 0.01
-	if kf.has("threejs_camera_data") and kf["threejs_camera_data"] != null:
-		var tjs = kf["threejs_camera_data"]
-		# Quaternion field
-		if tjs.has("quaternion") and tjs["quaternion"] != null:
-			var q = tjs["quaternion"]
-			return Quaternion(float(q["x"]), float(q["y"]), float(q["z"]), float(q["w"]))
-		# lookAt → derive quaternion from direction
-		if tjs.has("lookAt") and tjs["lookAt"] != null:
-			var la = tjs["lookAt"]
-			var look_target = Vector3(float(la["x"]) * CM, float(la["y"]) * CM, float(la["z"]) * CM)
-			var next_pos = _extract_kf_position(kf)
-			var origin = next_pos if next_pos != null else cam.global_position
-			if origin.distance_to(look_target) > 0.001:
-				var dir = (look_target - origin).normalized()
-				var up = Vector3.UP
-				if abs(dir.dot(Vector3.UP)) > 0.999: up = Vector3.BACK
-				var tmp = Camera3D.new()  # temp node to use look_at math
-				tmp.position = origin
-				tmp.look_at(look_target, up)
-				var q = tmp.basis.get_rotation_quaternion()
-				tmp.free()
-				return q
-		# Euler fallback
-		if tjs.has("euler") and tjs["euler"] != null:
-			var e = tjs["euler"]
-			return Basis.from_euler(Vector3(float(e["x"]), float(e["y"]), float(e["z"])), EULER_ORDER_XYZ).get_rotation_quaternion()
-	elif kf.has("target") and kf["target"] != null:
-		var t = kf["target"]
-		var tgt = Vector3(float(t["x"]) * CM, float(t["y"]) * CM, float(t["z"]) * CM)
-		var next_pos = _extract_kf_position(kf)
-		var origin = next_pos if next_pos != null else cam.global_position
-		if origin.distance_to(tgt) > 0.001:
-			var dir = (tgt - origin).normalized()
-			var up = Vector3.UP
-			if abs(dir.dot(Vector3.UP)) > 0.999: up = Vector3.BACK
-			var tmp = Camera3D.new()
-			tmp.position = origin
-			tmp.look_at(tgt, up)
-			var q = tmp.basis.get_rotation_quaternion()
-			tmp.free()
-			return q
-	return null
+	# Update smart lights every 5 frames
+	if frame_idx % 5 == 0:
+		setup_smart_point_lights(cam)
 
 func _generate_lerp_keyframes(anim_data, total_frames: int):
 	var cam = get_node_or_null("MainCamera")
@@ -448,14 +359,10 @@ func set_resolution(data):
 			
 	print("Setting Resolution to: ", w, "x", h)
 	get_viewport().size = Vector2i(w, h)
-
-	# Anti-aliasing for video:
-	# TAA is intentionally DISABLED — it accumulates frames over time and causes
-	# strong ghosting/blur whenever the camera moves, making the video look smeared.
-	# MSAA_4X gives sharp per-frame quality without temporal artifacts.
+	
 	get_viewport().msaa_3d = Viewport.MSAA_4X
 	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
-	get_viewport().use_taa = false          # ← must stay OFF during animated renders
+	get_viewport().use_taa = true
 	get_viewport().use_debanding = true
 	get_viewport().mesh_lod_threshold = 0.0
 
@@ -465,7 +372,6 @@ func set_resolution(data):
 func setup_camera(data):
 	var cam = Camera3D.new()
 	cam.name = "MainCamera"
-	cam.far = 1000.0   # Far enough to render the procedural sky without clipping
 
 	# Coordinate scale: JSON positions are in centimetres; Godot uses metres
 	var CM = 0.01
@@ -557,244 +463,56 @@ func setup_camera(data):
 	add_child(cam)
 
 # ─────────────────────────────────────────────────────────────────
-# Fixed World-Space Room Lights
-# One OmniLight3D per room, placed at the polygon centroid, just
-# below that room's ceiling. Created ONCE — never repositioned.
+# Smart Point Lights
 # ─────────────────────────────────────────────────────────────────
-func setup_fixed_fill_lights():
-	# Safety: clear any lights from a previous call
-	for l in get_tree().get_nodes_in_group("fill_lights"):
+func setup_smart_point_lights(cam: Camera3D):
+	var existing = get_tree().get_nodes_in_group("smart_lights")
+	for l in existing:
 		l.queue_free()
-
-	var placed = 0
-
-	# ── 1. Try floor-plan area data (preferred — one light per room) ──
-	var areas = _get_floor_plan_areas()
-	var verts = _get_floor_plan_vertices()
-
-	if areas.size() > 0 and verts.size() > 0:
-		for area_id in areas:
-			var area = areas[area_id]
-			var v_ids = area.get("vertices", [])
-			if v_ids.size() < 3:
-				continue
-
-			# ── Centroid: average of all polygon vertex positions (cm → m) ──
-			var sum_x = 0.0
-			var sum_z = 0.0
-			var count = 0
-			for v_id in v_ids:
-				var vs = str(v_id)
-				if not verts.has(vs):
-					continue
-				var v = verts[vs]
-				sum_x += float(v.get("x", 0)) * 0.01
-				sum_z += float(v.get("y", 0)) * 0.01  # floor-plan Y → Godot Z
-				count += 1
-			if count == 0:
-				continue
-
-			var cx = sum_x / float(count)
-			var cz = sum_z / float(count)
-
-			# ── Ceiling height for THIS room ──
-			var ceil_h = 2.4  # default 240 cm → 2.4 m
-			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY:
-				var cp = area["ceiling_properties"]
-				if cp.has("height"):
-					var ch = cp["height"]
-					var hf = 0.0
-					if typeof(ch) == TYPE_DICTIONARY and ch.has("length"):
-						hf = float(ch["length"]) * 0.01
-					elif typeof(ch) == TYPE_INT or typeof(ch) == TYPE_FLOAT:
-						hf = float(ch) * 0.01
-					elif typeof(ch) == TYPE_STRING and ch.is_valid_float():
-						hf = float(ch) * 0.01
-					if hf > 0.5:
-						ceil_h = hf
-			elif area.has("properties") and typeof(area["properties"]) == TYPE_DICTIONARY:
-				var h_prop = area["properties"].get("height", null)
-				if h_prop != null:
-					var hf = get_dimension_value(h_prop) * 0.01
-					if hf > 0.5: ceil_h = hf
-
-			# Light hangs 30 cm below the ceiling — well inside the room
-			var light_y = ceil_h - 0.30
-			light_y = max(light_y, 1.4)  # never lower than 1.4 m
-
-			# ── Emit radius scaled to room size ──
-			#    Estimate room footprint from bounding box of polygon
-			var min_x = 1e9; var max_x = -1e9
-			var min_z = 1e9; var max_z = -1e9
-			for v_id in v_ids:
-				var vs = str(v_id)
-				if not verts.has(vs): continue
-				var v = verts[vs]
-				var vx = float(v.get("x", 0)) * 0.01
-				var vz = float(v.get("y", 0)) * 0.01
-				min_x = min(min_x, vx); max_x = max(max_x, vx)
-				min_z = min(min_z, vz); max_z = max(max_z, vz)
-			var room_w = max(max_x - min_x, 0.5)
-			var room_d = max(max_z - min_z, 0.5)
-			var diag   = sqrt(room_w * room_w + room_d * room_d)
-			# Range = diagonal + 1 m headroom, clamped between 6 m and 20 m
-			var omni_range = clamp(diag + 1.0, 6.0, 20.0)
-			# Energy scales gently with room size
-			var energy = clamp(0.8 + diag * 0.12, 0.8, 2.0)
-
-			var light = OmniLight3D.new()
-			light.name = "RoomLight_" + str(area_id)
-			light.position = Vector3(cx, light_y, cz)  # ← fixed world position
-			light.light_energy = energy
-			light.omni_range = omni_range
-			light.shadow_enabled = false   # sun handles primary shadows; fills add brightness
-			light.light_color = Color(1.0, 0.97, 0.90)  # warm white
-			light.add_to_group("fill_lights")
-			add_child(light)
-			placed += 1
-			print("[VideoRender] Room light '%s' at (%.2f, %.2f, %.2f)  range=%.1f  energy=%.2f" \
-				% [area_id, cx, light_y, cz, omni_range, energy])
-
-	# ── 2. Fallback: single centre light derived from mesh AABB ──
-	if placed == 0:
-		print("[VideoRender] No area data found — placing single fallback fill light at scene centre.")
-		var scene_center = Vector3.ZERO
-		var light_y = 2.1
-		var all_meshes = _get_all_meshes(self)
-		if all_meshes.size() > 0:
-			var combined = AABB()
-			var first_m = true
-			for m in all_meshes:
-				var world_aabb = m.global_transform * m.get_aabb()
-				if first_m: combined = world_aabb; first_m = false
-				else: combined = combined.merge(world_aabb)
-			scene_center = combined.get_center()
-			light_y = combined.position.y + combined.size.y - 0.15
-			light_y = max(light_y, scene_center.y + 1.8)
-
+	
+	var space_state = cam.get_world_3d().direct_space_state
+	if not space_state:
+		return
+		
+	var cam_pos = cam.global_position
+	var basis = cam.global_transform.basis
+	var forward = -basis.z
+	var right = basis.x
+	var up = basis.y
+	
+	var light_configs = [
+		{"offset": Vector3(0, 0.5, 0), "energy": 1.5, "range": 15.0, "name": "Near"},
+		{"offset": forward * 2.5 + up * 0.5, "energy": 1.2, "range": 12.0, "name": "Ahead"},
+		{"offset": right * 1.8 + up * 0.2, "energy": 0.8, "range": 10.0, "name": "Right"},
+		{"offset": -right * 1.8 + up * 0.2, "energy": 0.8, "range": 10.0, "name": "Left"},
+		{"offset": -forward * 1.2 + up * 1.0, "energy": 0.6, "range": 10.0, "name": "Behind"}
+	]
+	
+	for config in light_configs:
+		var target_pos = cam_pos + config["offset"]
+		var safe_pos = _get_safe_pos(cam_pos, target_pos, space_state)
+		
 		var light = OmniLight3D.new()
-		light.name = "RoomLight_Fallback"
-		light.position = Vector3(scene_center.x, light_y, scene_center.z)
-		light.light_energy = 1.5
-		light.omni_range = 18.0
-		light.shadow_enabled = false
-		light.light_color = Color(1.0, 0.97, 0.90)
-		light.add_to_group("fill_lights")
+		light.name = "SmartLight_" + config["name"]
+		light.position = safe_pos
+		light.light_energy = config["energy"]
+		light.omni_range = config["range"]
+		light.shadow_enabled = true
+		light.light_color = Color(1.0, 0.98, 0.92)
+		light.add_to_group("smart_lights")
 		add_child(light)
-		placed = 1
 
-	print("[VideoRender] %d room light(s) placed — all fixed, shadows will NOT travel with camera." % placed)
-
-# ── Helpers: extract areas / vertices from cached floor-plan data ──
-func _get_floor_plan_areas() -> Dictionary:
-	var src = _render_data
-	if src.has("floor_plan_data"):
-		var fp = src["floor_plan_data"]
-		if typeof(fp) == TYPE_STRING:
-			var j = JSON.new()
-			if j.parse(fp) == OK: src = j.data
-		elif typeof(fp) == TYPE_DICTIONARY:
-			src = fp
-
-	var raw = src.get("areas", null)
-	if raw == null: return {}
-	if typeof(raw) == TYPE_DICTIONARY: return raw
-	# Array format — convert to id-keyed dict
-	var d = {}
-	for a in raw:
-		if typeof(a) == TYPE_DICTIONARY and a.has("id"):
-			d[str(a["id"])] = a
-	return d
-
-func _get_floor_plan_vertices() -> Dictionary:
-	var src = _render_data
-	if src.has("floor_plan_data"):
-		var fp = src["floor_plan_data"]
-		if typeof(fp) == TYPE_STRING:
-			var j = JSON.new()
-			if j.parse(fp) == OK: src = j.data
-		elif typeof(fp) == TYPE_DICTIONARY:
-			src = fp
-
-	var raw = src.get("vertices", null)
-	if raw == null: return {}
-	if typeof(raw) == TYPE_DICTIONARY: return raw
-	var d = {}
-	for v in raw:
-		if typeof(v) == TYPE_DICTIONARY and v.has("id"):
-			d[str(v["id"])] = v
-	return d
-
-# ─────────────────────────────────────────────────────────────────
-# Logging — save input JSON copy & render log to sibling directories
-# ─────────────────────────────────────────────────────────────────
-func save_logs(input_data, output_video_path):
-	print("Saving video render logs...")
+func _get_safe_pos(start: Vector3, end: Vector3, space_state: PhysicsDirectSpaceState3D) -> Vector3:
+	var query = PhysicsRayQueryParameters3D.create(start, end)
+	query.collide_with_bodies = true
+	query.collide_with_areas = false
 	
-	# Save logs and input_json to sibling directories (one level above godot_project)
-	var project_root = ProjectSettings.globalize_path("res://")
-	var parent_dir = project_root.get_base_dir()  # Go up from godot_project/
-	var logs_abs = parent_dir.path_join("logs")
-	var input_abs = parent_dir.path_join("input_json")
-	
-	# Use absolute paths for both DirAccess and FileAccess
-	var logs_dir = logs_abs
-	var input_save_dir = input_abs
-	
-	if not DirAccess.dir_exists_absolute(logs_abs):
-		DirAccess.make_dir_recursive_absolute(logs_abs)
-	if not DirAccess.dir_exists_absolute(input_abs):
-		DirAccess.make_dir_recursive_absolute(input_abs)
-	
-	var timestamp = str(Time.get_unix_time_from_system())
-	
-	# Use the output render filename as the base for log/input filenames
-	var output_basename = output_video_path.get_file().get_basename()
-	
-	# 1. Save Input JSON copy
-	var input_filename = output_basename + "_input.json"
-	var input_save_path = input_save_dir.path_join(input_filename)
-	
-	var json_string = JSON.stringify(input_data, "\t")
-	var file_input = FileAccess.open(input_save_path, FileAccess.WRITE)
-	if file_input:
-		file_input.store_string(json_string)
-		file_input.close()
-		print("Saved copy of input JSON to: ", input_save_path)
-	else:
-		print("Error saving input JSON copy to ", input_save_path)
-	
-	# 2. Detailed Log JSON
-	var log_data = {}
-	log_data["timestamp"] = timestamp
-	log_data["input_file_saved"] = input_save_path
-	log_data["output_video"] = output_video_path
-	log_data["total_frames"] = _total_frames
-	log_data["fps"] = _fps
-	log_data["duration_seconds"] = float(_total_frames) / float(_fps) if _fps > 0 else 0.0
-	
-	# Camera Info (final frame position)
-	var cam = get_node_or_null("MainCamera")
-	var cam_info = {}
-	if cam:
-		cam_info["position"] = { "x": cam.position.x, "y": cam.position.y, "z": cam.position.z }
-		cam_info["rotation_degrees"] = { "x": cam.rotation_degrees.x, "y": cam.rotation_degrees.y, "z": cam.rotation_degrees.z }
-		cam_info["fov"] = cam.fov
-		var forward = -cam.global_transform.basis.z.normalized()
-		cam_info["look_direction_vector"] = { "x": forward.x, "y": forward.y, "z": forward.z }
-	log_data["camera_final"] = cam_info
-	
-	log_data["camera_input_threejs"] = input_data.get("threejs_camera", {})
-	log_data["camera_input_blender"] = input_data.get("blender_camera", {})
-	
-	var log_filename = output_basename + "_render_log.json"
-	var log_path = logs_dir.path_join(log_filename)
-	
-	var log_json_str = JSON.stringify(log_data, "\t")
-	var file_log = FileAccess.open(log_path, FileAccess.WRITE)
-	if file_log:
-		file_log.store_string(log_json_str)
-		file_log.close()
-		print("Saved video render log to: ", log_path)
-	else:
-		print("Error saving video render log to ", log_path)
+	var result = space_state.intersect_ray(query)
+	if result:
+		var hit_pos = result.position
+		var dir = (hit_pos - start).normalized()
+		var dist = (hit_pos - start).length()
+		var back_off = min(0.25, dist * 0.4)
+		return hit_pos - dir * back_off
+		
+	return end

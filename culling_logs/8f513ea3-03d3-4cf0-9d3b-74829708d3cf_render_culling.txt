@@ -1,0 +1,25 @@
+--- Scene Culling Log ---
+📍 Camera (Blender): [2.8521218452065242, 2.731074602585246, 1.2951299590426348] -> Plan: (285.2, -273.1)
+🔍 Inspecting Layer: layer-1
+  ✅ Camera (285.2, -273.1) found in Active Room: Room (a-1771834337085-rxiqmm8v)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516811013-gkwt1gms)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516841880-impwiodc)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516857140-jitn88gz)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516868291-9rvpy1kn)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516877246-xxppo50v)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516893094-83c4tk38)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516903843-ey6sctvu)
+  ➕ Adding Neighbor Room (Shared Vertices): Room (a-1772516929768-z2o0pbcv)
+  🎯 Total kept rooms on layer-1: 9
+  ✂️  Optimization Results for layer-1:
+     Areas: 12 -> 9
+     Lines: 31 -> 24
+     Items: 18 -> 18
+
+============================================================
+📊 CULLING SUMMARY
+============================================================
+  Areas:  12 -> 9  (removed 3)
+  Items:  18 -> 18  (removed 0)
+  Lines:  31 -> 24  (removed 7)
+============================================================

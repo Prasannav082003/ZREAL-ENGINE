@@ -21,7 +21,6 @@ var _use_movie_writer: bool = false
 var _use_png_fallback: bool = false
 var _needs_auto_pan: bool = false
 var _render_data = {}    # Full parsed JSON — used by setup_fixed_fill_lights()
-var _output_path: String = ""  # Stored for save_logs at completion
 
 func _ready():
 	print("Godot VIDEO Renderer Started")
@@ -79,12 +78,8 @@ func _ready():
 	
 	# Build the 3D scene
 	_render_data = data   # Cache for later use by setup_fixed_fill_lights()
-	_output_path = output_path  # Store for save_logs at completion
 	set_resolution(data)
 	build_scene(data)
-	# Set up fill lights IMMEDIATELY so they exist from frame 0.
-	# If done during warmup, the first few frames captured by MovieWriter are dark.
-	setup_fixed_fill_lights()
 	setup_camera(data)
 	
 	# Extract keyframes
@@ -122,9 +117,8 @@ func _ready():
 	if _total_frames > 0 and _keyframes.size() > 0:
 		_apply_keyframe(0)
 	
-	# Warmup: give Godot's renderer (shadow maps, ambient cache, GI) time to settle
-	# before the first frame is captured. 10 frames is safe even at 4K.
-	_warmup_frames = 10
+	# We need a few warmup frames for the scene to settle
+	_warmup_frames = 4
 	_current_frame = 0
 	_rendering = false
 
@@ -142,7 +136,8 @@ func _process(_delta):
 			
 			_rendering = true
 			print("Scene settled. Starting video render...")
-			# Fill lights were already set up in _ready() - no need to call again here
+			# Set up FIXED world-space fill lights (do this ONCE — lights never move)
+			setup_fixed_fill_lights()
 		return
 	
 	if not _rendering:
@@ -153,7 +148,6 @@ func _process(_delta):
 		print("============================================================")
 		print("VIDEO RENDER COMPLETE - ", _total_frames, " frames rendered.")
 		print("============================================================")
-		save_logs(_render_data, _output_path)
 		get_tree().quit(0)
 		return
 	
@@ -724,77 +718,3 @@ func _get_floor_plan_vertices() -> Dictionary:
 		if typeof(v) == TYPE_DICTIONARY and v.has("id"):
 			d[str(v["id"])] = v
 	return d
-
-# ─────────────────────────────────────────────────────────────────
-# Logging — save input JSON copy & render log to sibling directories
-# ─────────────────────────────────────────────────────────────────
-func save_logs(input_data, output_video_path):
-	print("Saving video render logs...")
-	
-	# Save logs and input_json to sibling directories (one level above godot_project)
-	var project_root = ProjectSettings.globalize_path("res://")
-	var parent_dir = project_root.get_base_dir()  # Go up from godot_project/
-	var logs_abs = parent_dir.path_join("logs")
-	var input_abs = parent_dir.path_join("input_json")
-	
-	# Use absolute paths for both DirAccess and FileAccess
-	var logs_dir = logs_abs
-	var input_save_dir = input_abs
-	
-	if not DirAccess.dir_exists_absolute(logs_abs):
-		DirAccess.make_dir_recursive_absolute(logs_abs)
-	if not DirAccess.dir_exists_absolute(input_abs):
-		DirAccess.make_dir_recursive_absolute(input_abs)
-	
-	var timestamp = str(Time.get_unix_time_from_system())
-	
-	# Use the output render filename as the base for log/input filenames
-	var output_basename = output_video_path.get_file().get_basename()
-	
-	# 1. Save Input JSON copy
-	var input_filename = output_basename + "_input.json"
-	var input_save_path = input_save_dir.path_join(input_filename)
-	
-	var json_string = JSON.stringify(input_data, "\t")
-	var file_input = FileAccess.open(input_save_path, FileAccess.WRITE)
-	if file_input:
-		file_input.store_string(json_string)
-		file_input.close()
-		print("Saved copy of input JSON to: ", input_save_path)
-	else:
-		print("Error saving input JSON copy to ", input_save_path)
-	
-	# 2. Detailed Log JSON
-	var log_data = {}
-	log_data["timestamp"] = timestamp
-	log_data["input_file_saved"] = input_save_path
-	log_data["output_video"] = output_video_path
-	log_data["total_frames"] = _total_frames
-	log_data["fps"] = _fps
-	log_data["duration_seconds"] = float(_total_frames) / float(_fps) if _fps > 0 else 0.0
-	
-	# Camera Info (final frame position)
-	var cam = get_node_or_null("MainCamera")
-	var cam_info = {}
-	if cam:
-		cam_info["position"] = { "x": cam.position.x, "y": cam.position.y, "z": cam.position.z }
-		cam_info["rotation_degrees"] = { "x": cam.rotation_degrees.x, "y": cam.rotation_degrees.y, "z": cam.rotation_degrees.z }
-		cam_info["fov"] = cam.fov
-		var forward = -cam.global_transform.basis.z.normalized()
-		cam_info["look_direction_vector"] = { "x": forward.x, "y": forward.y, "z": forward.z }
-	log_data["camera_final"] = cam_info
-	
-	log_data["camera_input_threejs"] = input_data.get("threejs_camera", {})
-	log_data["camera_input_blender"] = input_data.get("blender_camera", {})
-	
-	var log_filename = output_basename + "_render_log.json"
-	var log_path = logs_dir.path_join(log_filename)
-	
-	var log_json_str = JSON.stringify(log_data, "\t")
-	var file_log = FileAccess.open(log_path, FileAccess.WRITE)
-	if file_log:
-		file_log.store_string(log_json_str)
-		file_log.close()
-		print("Saved video render log to: ", log_path)
-	else:
-		print("Error saving video render log to ", log_path)

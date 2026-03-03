@@ -218,15 +218,13 @@ func render_image(data, output_path):
 func save_logs(input_data, output_image_path):
 	print("Saving logs...")
 	
-	# Save logs and input_json to sibling directories (one level above godot_project)
-	var project_root = ProjectSettings.globalize_path("res://")
-	var parent_dir = project_root.get_base_dir()  # Go up from godot_project/
-	var logs_abs = parent_dir.path_join("logs")
-	var input_abs = parent_dir.path_join("input_json")
+	# Use res:// paths to ensure we are in the project folder
+	var logs_dir = "res://logs"
+	var input_save_dir = "res://input_json"
 	
-	# Use absolute paths for both DirAccess and FileAccess
-	var logs_dir = logs_abs
-	var input_save_dir = input_abs
+	# Convert to absolute paths for DirAccess
+	var logs_abs = ProjectSettings.globalize_path(logs_dir)
+	var input_abs = ProjectSettings.globalize_path(input_save_dir)
 	
 	if not DirAccess.dir_exists_absolute(logs_abs):
 		DirAccess.make_dir_recursive_absolute(logs_abs)
@@ -234,13 +232,12 @@ func save_logs(input_data, output_image_path):
 		DirAccess.make_dir_recursive_absolute(input_abs)
 		
 	var timestamp = str(Time.get_unix_time_from_system())
-	
-	# Use the output render filename as the base for log/input filenames
-	var output_basename = output_image_path.get_file().get_basename()
+	var timestamp_str = timestamp.replace(".", "_") # Safe filename
 	
 	# 1. Save Input JSON copy
-	var input_filename = output_basename + "_input.json"
-	var input_save_path = input_save_dir.path_join(input_filename)
+	var input_filename = timestamp_str + "_input.json"
+	# FileAccess.open works with res://
+	var input_save_path = input_save_dir + "/" + input_filename
 	
 	var json_string = JSON.stringify(input_data, "\t")
 	var file_input = FileAccess.open(input_save_path, FileAccess.WRITE)
@@ -278,8 +275,8 @@ func save_logs(input_data, output_image_path):
 	# Assets Used
 	log_data["assets_used"] = _tracked_assets
 	
-	var log_filename = output_basename + "_render_log.json"
-	var log_path = logs_dir.path_join(log_filename)
+	var log_filename = timestamp_str + "_render_log.json"
+	var log_path = logs_dir + "/" + log_filename
 	
 	var log_json_str = JSON.stringify(log_data, "\t")
 	var file_log = FileAccess.open(log_path, FileAccess.WRITE)

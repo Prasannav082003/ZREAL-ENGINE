@@ -1,0 +1,92 @@
+{
+    "blender_camera": {
+        "location": [
+            13.01469734167151,
+            8.959337884742034,
+            6.5149828044564595
+        ],
+        "rotation_euler": [
+            0.5938443916416395,
+            0,
+            -2.083931463828911
+        ],
+        "rotation_mode": "XYZ",
+        "type": "PERSP",
+        "lens_unit": "FOV",
+        "lens": 60,
+        "clip_start": 0.1,
+        "clip_end": 450,
+        "sensor_width": 32,
+        "sensor_height": 18,
+        "sensor_fit": "AUTO",
+        "shift_x": 0,
+        "shift_y": 0
+    },
+    "blender_target": {
+        "location": [
+            5.79414888080997,
+            3.3638242334992867,
+            2.446333531896081
+        ],
+        "rotation_euler": [
+            0,
+            0,
+            0
+        ],
+        "rotation_mode": "XYZ",
+        "type": "EMPTY",
+        "empty_display_type": "PLAIN_AXES",
+        "empty_display_size": 1
+    },
+    "threejs_camera": {
+        "position": {
+            "x": 13.01469734167151,
+            "y": 6.5149828044564595,
+            "z": -8.959337884742034
+        },
+        "rotation": {
+            "x": -2.5128916618245603,
+            "y": 0.8067678694148377,
+            "z": 2.658125581927499
+        },
+        "target": {
+            "x": 5.79414888080997,
+            "y": 2.446333531896081,
+            "z": -3.3638242334992867
+        },
+        "fov": 60,
+        "near": 0.1,
+        "far": 450
+    },
+    "coordinate_system": "right_handed_y_up",
+    "target_coordinate_system": "right_handed_z_up",
+    "blender_script": "\nimport bpy\nimport bmesh\nfrom mathutils import Vector, Euler\n\n# Clear existing camera and target\nif \"Camera\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"Camera\"], do_unlink=True)\nif \"CameraTarget\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"CameraTarget\"], do_unlink=True)\n\n# Create camera\nbpy.ops.object.camera_add()\ncamera = bpy.context.object\ncamera.name = \"Camera\"\n\n# Set camera properties\ncamera.location = (13.01469734167151, 8.959337884742034, 6.5149828044564595)\ncamera.rotation_euler = (0.5938443916416395, 0, -2.083931463828911)\ncamera.rotation_mode = 'XYZ'\ncamera.data.type = 'PERSP'\ncamera.data.lens_unit = 'FOV'\ncamera.data.lens = 60\ncamera.data.clip_start = 0.1\ncamera.data.clip_end = 450\ncamera.data.sensor_width = 32\ncamera.data.sensor_height = 18\ncamera.data.sensor_fit = 'AUTO'\ncamera.data.shift_x = 0\ncamera.data.shift_y = 0\n\n# Create camera target (Empty object)\nbpy.ops.object.empty_add(type='PLAIN_AXES')\ntarget = bpy.context.object\ntarget.name = \"CameraTarget\"\ntarget.location = (5.79414888080997, 3.3638242334992867, 2.446333531896081)\ntarget.rotation_euler = (0, 0, 0)\ntarget.empty_display_size = 1\n\n# Set camera to track target\ncamera.constraints.new(type='TRACK_TO')\ncamera.constraints[\"Track To\"].target = target\ncamera.constraints[\"Track To\"].track_axis = 'TRACK_NEGATIVE_Z'\ncamera.constraints[\"Track To\"].up_axis = 'UP_Y'\n\n# Set camera as active camera\nbpy.context.scene.camera = camera\n\nprint(\"Camera setup complete!\")\nprint(f\"Camera location: {camera.location}\")\nprint(f\"Camera rotation: {camera.rotation_euler}\")\nprint(f\"Target location: {target.location}\")\nprint(f\"Camera FOV: {camera.data.lens}\")\n",
+    "ambient_light": {
+        "intensity": 0.1
+    },
+    "directional_light": {
+        "intensity": 2.5,
+        "position": {
+            "x": 13.007812500000009,
+            "y": 70.71067811865474,
+            "z": -79.67552186865476
+        },
+        "color": {
+            "r": 1,
+            "g": 0.9386857284565036,
+            "b": 0.7991027380100881
+        },
+        "target": {
+            "x": 13.0078125,
+            "y": 0,
+            "z": -8.96484375
+        },
+        "cast_shadow": true,
+        "shadow_map_size": 1024,
+        "shadow_bias": -0.0001
+    },
+    "floor_plan_data": "{\"unit\":\"m\",\"direction\":\"n\",\"directionangle\":0,\"layers\":{\"layer-1\":{\"id\":\"layer-1\",\"altitude\":0,\"order\":0,\"opacity\":1,\"name\":\"Ground Floor\",\"visible\":true,\"vertices\":{\"v-1771834331609-0\":{\"id\":\"v-1771834331609-0\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":-500,\"y\":-453,\"lines\":[\"l-1771834331608-0dkzs8ae\",\"l-1771834337082-h4rzf8ah\"],\"areas\":[\"a-1771834337085-rxiqmm8v\"]},\"v-1771834331609-1\":{\"id\":\"v-1771834331609-1\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":-500,\"y\":453,\"lines\":[\"l-1771834331608-0dkzs8ae\",\"l-1771834333599-4psiggwc\"],\"areas\":[\"a-1771834337085-rxiqmm8v\"]},\"v-1771834333600-1\":{\"id\":\"v-1771834333600-1\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":790,\"y\":453,\"lines\":[\"l-1771834333599-4psiggwc\",\"l-1771834335312-ngg6rgd4\"],\"areas\":[\"a-1771834337085-rxiqmm8v\"]},\"v-1771834335313-1\":{\"id\":\"v-1771834335313-1\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":790,\"y\":-453,\"lines\":[\"l-1771834335312-ngg6rgd4\",\"l-1771834337082-h4rzf8ah\"],\"areas\":[\"a-1771834337085-rxiqmm8v\"]}},\"lines\":{\"l-1771834331608-0dkzs8ae\":{\"id\":\"l-1771834331608-0dkzs8ae\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1771834331609-0\",\"v-1771834331609-1\"],\"holes\":[],\"inner_properties\":{\"material\":{\"color\":\"#999999\",\"repeat\":[1,1]}},\"outer_properties\":{\"material\":{\"color\":\"ffffff\",\"repeat\":[1,1],\"mapUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_basecolor.png\",\"normalUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_normal.png\",\"roughnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_roughness.png\",\"metalnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_ambientocclusion.png\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}},\"l-1771834333599-4psiggwc\":{\"id\":\"l-1771834333599-4psiggwc\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1771834331609-1\",\"v-1771834333600-1\"],\"holes\":[],\"inner_properties\":{\"material\":{\"color\":\"f10e0e\",\"isColorEdited\":true,\"mapUrl\":\"\",\"normalUrl\":\"\",\"roughnessUrl\":\"\",\"metalnessUrl\":\"\",\"repeat\":[0.04,0.04]}},\"outer_properties\":{\"material\":{\"color\":\"ffffff\",\"repeat\":[1,1],\"mapUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_basecolor.png\",\"normalUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_normal.png\",\"roughnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_roughness.png\",\"metalnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_ambientocclusion.png\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}},\"l-1771834335312-ngg6rgd4\":{\"id\":\"l-1771834335312-ngg6rgd4\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1771834333600-1\",\"v-1771834335313-1\"],\"holes\":[],\"inner_properties\":{\"material\":{\"color\":\"#999999\",\"repeat\":[1,1]}},\"outer_properties\":{\"material\":{\"color\":\"ffffff\",\"repeat\":[1,1],\"mapUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_basecolor.png\",\"normalUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_normal.png\",\"roughnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_roughness.png\",\"metalnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_ambientocclusion.png\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}},\"l-1771834337082-h4rzf8ah\":{\"id\":\"l-1771834337082-h4rzf8ah\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1771834335313-1\",\"v-1771834331609-0\"],\"holes\":[\"h-1772428987801-9vl4gbd7\"],\"inner_properties\":{\"material\":{\"color\":\"#999999\",\"repeat\":[1,1]}},\"outer_properties\":{\"material\":{\"color\":\"ffffff\",\"repeat\":[1,1],\"mapUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_basecolor.png\",\"normalUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_normal.png\",\"roughnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_roughness.png\",\"metalnessUrl\":\"textures/LowResolution/Wood/MetalFrame/4K_metal_frame_4_LR_ambientocclusion.png\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}}},\"holes\":{\"h-1772428987801-9vl4gbd7\":{\"id\":\"h-1772428987801-9vl4gbd7\",\"type\":\"Furniture\",\"prototype\":\"holes\",\"name\":\"Minimalist_Window\",\"misc\":{},\"selected\":false,\"properties\":{\"width\":{\"length\":220},\"height\":{\"length\":150},\"thickness\":{\"length\":15.4},\"altitude\":{\"length\":50}},\"visible\":true,\"offset\":0.5387596899224806,\"line\":\"l-1771834337082-h4rzf8ah\",\"asset_urls\":{\"assetId_3D\":135,\"SVG_URL\":\"asset-library/Triple_Door_Window/Minimalist_Window/MinimalistWindow.svg\",\"OBJ_File_URL\":\"\",\"MTL_File_URL\":\"\",\"GLB_File_URL\":\"glb-assets/Window/Windows/Minimalistic_Window_LP.glb\"},\"materials\":{},\"flipX\":false,\"flipZ\":false}},\"areas\":{\"a-1771834337085-rxiqmm8v\":{\"id\":\"a-1771834337085-rxiqmm8v\",\"type\":\"area\",\"prototype\":\"areas\",\"name\":\"Room\",\"misc\":{},\"selected\":false,\"properties\":{\"texture\":\"none\",\"height\":{\"length\":0}},\"visible\":true,\"vertices\":[\"v-1771834331609-0\",\"v-1771834331609-1\",\"v-1771834333600-1\",\"v-1771834335313-1\"],\"holes\":[],\"ceiling_properties\":{\"isvisible\":true,\"height\":300,\"thickness\":1,\"material\":{\"color\":\"ffffff\",\"repeat\":[1,1],\"rotation\":0,\"flipY\":false}},\"floor_properties\":{\"isvisible\":true,\"height\":0,\"thickness\":10,\"material\":{\"mapUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Wood/Wood floor /Wood091A_4K-PNG_LR_Color.jpg\",\"normalUrl\":\"\",\"roughnessUrl\":\"\",\"metalnessUrl\":\"\",\"color\":\"ffffff\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\",\"repeat\":[1,1],\"rotation\":0,\"flipY\":false}}}},\"items\":{},\"externalAreas\":{},\"structures\":{},\"selected\":{\"vertices\":[],\"lines\":[],\"holes\":[],\"areas\":[],\"items\":[],\"externalAreas\":[],\"structures\":[]}},\"layer-2\":{\"id\":\"layer-2\",\"name\":\"First Floor\",\"altitude\":300,\"order\":1,\"opacity\":1,\"visible\":true,\"vertices\":{\"v-1772171020019-0\":{\"id\":\"v-1772171020019-0\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":-502.0036363636367,\"y\":-450.5246974583573,\"lines\":[\"l-1772171020018-9h7u0e4i\",\"l-1772171025836-2af02iho\"],\"areas\":[\"a-1772171025838-y5sackps\"]},\"v-1772171020020-1\":{\"id\":\"v-1772171020020-1\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":792.5418181818178,\"y\":-450.5246974583573,\"lines\":[\"l-1772171020018-9h7u0e4i\",\"l-1772171022534-x1mlx3ip\"],\"areas\":[\"a-1772171025838-y5sackps\"]},\"v-1772171022535-1\":{\"id\":\"v-1772171022535-1\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":792.5418181818178,\"y\":453.11166617800626,\"lines\":[\"l-1772171022534-x1mlx3ip\",\"l-1772171024357-xs0ade5z\"],\"areas\":[\"a-1772171025838-y5sackps\"]},\"v-1772171024358-1\":{\"id\":\"v-1772171024358-1\",\"type\":\"vertex\",\"prototype\":\"vertices\",\"name\":\"Vertex\",\"misc\":{},\"selected\":false,\"properties\":{},\"visible\":true,\"x\":-502.0036363636367,\"y\":453.11166617800626,\"lines\":[\"l-1772171024357-xs0ade5z\",\"l-1772171025836-2af02iho\"],\"areas\":[\"a-1772171025838-y5sackps\"]}},\"lines\":{\"l-1772171020018-9h7u0e4i\":{\"id\":\"l-1772171020018-9h7u0e4i\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1772171020019-0\",\"v-1772171020020-1\"],\"holes\":[],\"inner_properties\":{\"material\":{\"color\":\"#999999\",\"repeat\":[1,1]}},\"outer_properties\":{\"material\":{\"color\":\"#8E83B8\",\"repeat\":[1,1],\"mapUrl\":\"\",\"normalUrl\":\"\",\"roughnessUrl\":\"\",\"metalnessUrl\":\"\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}},\"l-1772171022534-x1mlx3ip\":{\"id\":\"l-1772171022534-x1mlx3ip\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1772171020020-1\",\"v-1772171022535-1\"],\"holes\":[],\"inner_properties\":{\"material\":{\"color\":\"#999999\",\"repeat\":[1,1]}},\"outer_properties\":{\"material\":{\"color\":\"#8E83B8\",\"repeat\":[1,1],\"mapUrl\":\"\",\"normalUrl\":\"\",\"roughnessUrl\":\"\",\"metalnessUrl\":\"\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}},\"l-1772171024357-xs0ade5z\":{\"id\":\"l-1772171024357-xs0ade5z\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1772171022535-1\",\"v-1772171024358-1\"],\"holes\":[],\"inner_properties\":{\"material\":{\"color\":\"#999999\",\"repeat\":[1,1]}},\"outer_properties\":{\"material\":{\"color\":\"#8E83B8\",\"repeat\":[1,1],\"mapUrl\":\"\",\"normalUrl\":\"\",\"roughnessUrl\":\"\",\"metalnessUrl\":\"\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}},\"l-1772171025836-2af02iho\":{\"id\":\"l-1772171025836-2af02iho\",\"type\":\"wall\",\"prototype\":\"lines\",\"name\":\"Wall\",\"misc\":{\"_unitLength\":\"m\"},\"selected\":false,\"properties\":{\"height\":{\"length\":304.8},\"thickness\":{\"length\":22.86},\"textureA\":\"Brick\",\"textureB\":\"Brick\"},\"visible\":true,\"vertices\":[\"v-1772171024358-1\",\"v-1772171020019-0\"],\"holes\":[],\"inner_properties\":{\"material\":{\"color\":\"#999999\",\"repeat\":[1,1]}},\"outer_properties\":{\"material\":{\"color\":\"#8E83B8\",\"repeat\":[1,1],\"mapUrl\":\"\",\"normalUrl\":\"\",\"roughnessUrl\":\"\",\"metalnessUrl\":\"\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}}},\"holes\":{},\"areas\":{\"a-1772171025838-y5sackps\":{\"id\":\"a-1772171025838-y5sackps\",\"type\":\"area\",\"prototype\":\"areas\",\"name\":\"Room\",\"misc\":{},\"selected\":false,\"properties\":{\"texture\":\"none\",\"height\":{\"length\":0}},\"visible\":true,\"vertices\":[\"v-1772171020019-0\",\"v-1772171020020-1\",\"v-1772171022535-1\",\"v-1772171024358-1\"],\"holes\":[],\"ceiling_properties\":{\"isvisible\":true,\"height\":300,\"thickness\":1,\"material\":{\"color\":\"ffffff\",\"repeat\":[1,1],\"rotation\":0,\"flipY\":false}},\"floor_properties\":{\"isvisible\":true,\"height\":0,\"thickness\":10,\"material\":{\"mapUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Wood/Wood floor /Wood091A_4K-PNG_LR_Color.jpg\",\"normalUrl\":\"\",\"roughnessUrl\":\"\",\"metalnessUrl\":\"\",\"color\":\"ffffff\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\",\"repeat\":[1,1],\"rotation\":0,\"flipY\":false}}}},\"items\":{},\"externalAreas\":{},\"structures\":{},\"selected\":{\"vertices\":[],\"lines\":[],\"holes\":[],\"areas\":[],\"items\":[],\"externalAreas\":[],\"structures\":[]}}},\"grids\":{},\"selectedLayer\":\"layer-1\",\"groups\":{},\"width\":1293.1575071568188,\"height\":1293.1575071568188,\"meta\":{\"export_timestamp\":\"2026-02-17T06:42:28.550Z\",\"format_version\":\"2.1\",\"generated_by\":\"Site_Area_Generator\",\"session_id\":1771310548550},\"guides\":{\"horizontal\":{},\"vertical\":{},\"circular\":{}},\"undoStack\":[],\"redoStack\":[],\"showAllFloors\":true,\"suspendUndo\":false,\"pendingSnapshot\":null}",
+    "timestamp": 1772438930295,
+    "aspect_ratio": "16:9",
+    "render_quality": "4K"
+}

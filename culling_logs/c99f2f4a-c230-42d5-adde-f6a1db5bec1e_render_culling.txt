@@ -1,0 +1,12 @@
+--- Scene Culling Log ---
+📍 Camera (Blender): [6.168263114198115, 5.036188238446044, 2.6834223940533164] -> Plan: (616.8, -503.6)
+🔍 Inspecting Layer: layer-1
+  ⚠️ Camera NOT inside any room on layer-1. Keeping layer INTACT (No Culling).
+
+============================================================
+📊 CULLING SUMMARY
+============================================================
+  Areas:  1 -> 1  (removed 0)
+  Items:  7 -> 7  (removed 0)
+  Lines:  4 -> 4  (removed 0)
+============================================================
