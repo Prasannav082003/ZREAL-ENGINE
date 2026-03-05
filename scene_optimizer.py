@@ -157,24 +157,92 @@ class SceneOptimizer:
                     total_lines_after += len(lines)
                     continue # Skip optimization for this layer, keep it full
 
-                # 5. Find Neighbors (Robust Vertex-Based)
-                kept_area_ids = {active_area_id}
+                # 5. Find ALL connected neighbors (BFS flood-fill)
+                #    IMPORTANT: Rooms often use DIFFERENT vertex IDs for the same physical
+                #    position, so we must match by position proximity, not just ID.
+                POSITION_TOLERANCE = 1.0  # cm — vertices within 1cm are "same position"
                 
-                # Get vertices of active room
-                active_area_verts = set(areas[active_area_id].get("vertices", []))
-                
-                # Find all areas that share vertices with the active room (connected rooms)
+                # Pre-compute area vertex positions for fast lookup
+                area_positions = {}  # area_id -> list of (x, y)
                 for a_id, area in areas.items():
-                    if a_id == active_area_id: continue
+                    positions = []
+                    for v_id in area.get("vertices", []):
+                        v = vertices.get(v_id)
+                        if v:
+                            positions.append((v["x"], v["y"]))
+                    area_positions[a_id] = positions
+                
+                def areas_are_neighbors(aid1, aid2):
+                    """Check if two areas share a vertex at the same position (within tolerance)."""
+                    for (x1, y1) in area_positions.get(aid1, []):
+                        for (x2, y2) in area_positions.get(aid2, []):
+                            if abs(x1 - x2) < POSITION_TOLERANCE and abs(y1 - y2) < POSITION_TOLERANCE:
+                                return True
+                    return False
+                
+                kept_area_ids = {active_area_id}
+                changed = True
+                
+                while changed:
+                    changed = False
                     
-                    area_verts = set(area.get("vertices", []))
-                    # If they share at least 1 vertex (corner), they are neighbors
-                    shared_count = len(active_area_verts.intersection(area_verts))
+                    # a) Position-based proximity: rooms with vertices at the same position
+                    for a_id in list(areas.keys()):
+                        if a_id in kept_area_ids:
+                            continue
+                        for kept_id in list(kept_area_ids):
+                            if areas_are_neighbors(kept_id, a_id):
+                                kept_area_ids.add(a_id)
+                                changed = True
+                                self.log(f"  ➕ Adding Neighbor Room (Position Match): {areas[a_id].get('name')} ({a_id})")
+                                break
                     
-                    if shared_count >= 1: 
-                        if a_id not in kept_area_ids:
-                            kept_area_ids.add(a_id)
-                            self.log(f"  ➕ Adding Neighbor Room (Shared Vertices): {area.get('name')} ({a_id})")
+                    # b) Hole/Hidden-wall connections
+                    all_kept_verts = set()
+                    for aid in kept_area_ids:
+                        all_kept_verts.update(areas[aid].get("vertices", []))
+                    
+                    for lid, line in lines.items():
+                        line_holes = line.get("holes", [])
+                        line_hidden = (line.get("visible") == False)
+                        if not line_holes and not line_hidden:
+                            continue
+                        
+                        v_ids = line.get("vertices", [])
+                        if len(v_ids) < 2:
+                            continue
+                        v1, v2 = v_ids[0], v_ids[1]
+                        
+                        # Check if wall vertices are near any kept area vertex
+                        v1_pos = (vertices[v1]["x"], vertices[v1]["y"]) if v1 in vertices else None
+                        v2_pos = (vertices[v2]["x"], vertices[v2]["y"]) if v2 in vertices else None
+                        
+                        touches_kept = False
+                        if v1 in all_kept_verts or v2 in all_kept_verts:
+                            touches_kept = True
+                        else:
+                            # Also check by position proximity
+                            for aid in kept_area_ids:
+                                for (px, py) in area_positions.get(aid, []):
+                                    if v1_pos and abs(v1_pos[0]-px) < POSITION_TOLERANCE and abs(v1_pos[1]-py) < POSITION_TOLERANCE:
+                                        touches_kept = True
+                                        break
+                                    if v2_pos and abs(v2_pos[0]-px) < POSITION_TOLERANCE and abs(v2_pos[1]-py) < POSITION_TOLERANCE:
+                                        touches_kept = True
+                                        break
+                                if touches_kept:
+                                    break
+                        
+                        if touches_kept:
+                            for a_id, area in areas.items():
+                                if a_id in kept_area_ids:
+                                    continue
+                                area_verts = set(area.get("vertices", []))
+                                if v1 in area_verts or v2 in area_verts:
+                                    kept_area_ids.add(a_id)
+                                    changed = True
+                                    reason = "Hole-Connected" if line_holes else "Hidden-Wall-Connected"
+                                    self.log(f"  ➕ Adding Neighbor Room ({reason}): {area.get('name')} ({a_id})")
 
                 self.log(f"  🎯 Total kept rooms on {layer_id}: {len(kept_area_ids)}")
 
@@ -190,19 +258,44 @@ class SceneOptimizer:
                 for area in new_areas.values():
                     kept_vertex_ids.update(area.get("vertices", []))
                 
+                # Build set of kept positions for position-based matching
+                kept_positions = set()
+                for vid in kept_vertex_ids:
+                    v = vertices.get(vid)
+                    if v:
+                        # Round to nearest cm for matching
+                        kept_positions.add((round(v["x"], 0), round(v["y"], 0)))
+                
+                def vertex_is_near_kept(vid):
+                    """Check if a vertex is in the kept set by ID or by position proximity."""
+                    if vid in kept_vertex_ids:
+                        return True
+                    v = vertices.get(vid)
+                    if v:
+                        pos = (round(v["x"], 0), round(v["y"], 0))
+                        return pos in kept_positions
+                    return False
+                
                 new_vertices = {}
                 for vid in kept_vertex_ids:
                     if vid in vertices:
                         new_vertices[vid] = vertices[vid]
 
-                # 3. Lines: Keep lines if BOTH their vertices are in the kept set
+                # 3. Lines: Keep lines if BOTH their vertices are in or near the kept set
                 new_lines = {}
                 for lid, line in lines.items():
                     v_ids = line.get("vertices", [])
                     if len(v_ids) >= 2:
                         v1, v2 = v_ids[0], v_ids[1]
-                        if v1 in kept_vertex_ids and v2 in kept_vertex_ids:
-                             new_lines[lid] = line
+                        if vertex_is_near_kept(v1) and vertex_is_near_kept(v2):
+                            new_lines[lid] = line
+                            # Also add these vertices to kept set (they may have different IDs)
+                            if v1 not in new_vertices and v1 in vertices:
+                                new_vertices[v1] = vertices[v1]
+                                kept_vertex_ids.add(v1)
+                            if v2 not in new_vertices and v2 in vertices:
+                                new_vertices[v2] = vertices[v2]
+                                kept_vertex_ids.add(v2)
                 
                 # 4. Holes: Keep holes associated with kept lines
                 new_holes = {}

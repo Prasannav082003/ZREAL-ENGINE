@@ -694,6 +694,31 @@ UNREAL_SCRIPT_HISTORY_DIR = os.path.join(tempfile.gettempdir(), "zrealty_unreal_
 RUNTIME_DIR = os.path.join(tempfile.gettempdir(), "zrealty_backend_runtime")
 ASSET_URL_MAP_FILE = os.path.join(ASSET_DOWNLOAD_DIR, "asset_url_map.json")
 
+# --- GODOT CONFIGURATION ---
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Check for both mono and non-mono versions
+# Only use mono exe if GodotSharp assemblies directory actually exists
+GODOT_BIN_DIR = os.path.join(SCRIPT_DIR, "godot", "bin")
+GODOT_SHARP_DIR = os.path.join(GODOT_BIN_DIR, "GodotSharp")
+DEFAULT_GODOT_EXE_MONO = os.path.join(GODOT_BIN_DIR, "godot.windows.editor.x86_64.mono.console.exe")
+DEFAULT_GODOT_EXE_PLAIN = os.path.join(GODOT_BIN_DIR, "godot.windows.editor.x86_64.console.exe")
+
+# Prefer plain (non-mono) exe first; only use mono if GodotSharp assemblies are present
+if os.path.exists(DEFAULT_GODOT_EXE_PLAIN):
+    DEFAULT_GODOT_EXE = DEFAULT_GODOT_EXE_PLAIN
+elif os.path.exists(DEFAULT_GODOT_EXE_MONO) and os.path.isdir(GODOT_SHARP_DIR):
+    DEFAULT_GODOT_EXE = DEFAULT_GODOT_EXE_MONO
+elif os.path.exists(DEFAULT_GODOT_EXE_MONO):
+    # Mono exe exists but GodotSharp is missing - use it anyway but warn
+    print(f"{COLOR_YELLOW}⚠️  WARNING: Mono Godot exe found but GodotSharp directory is missing at: {GODOT_SHARP_DIR}")
+    print(f"   This may cause '.NET assemblies not found' errors.{COLOR_RESET}")
+    DEFAULT_GODOT_EXE = DEFAULT_GODOT_EXE_MONO
+else:
+    DEFAULT_GODOT_EXE = DEFAULT_GODOT_EXE_PLAIN  # Will fail later with a clear "file not found"
+
+GODOT_EXE = os.getenv("GODOT_EXE", DEFAULT_GODOT_EXE)
+GODOT_PROJECT_PATH = os.getenv("GODOT_PROJECT_PATH", os.path.join(SCRIPT_DIR, "godot_project"))
+
 # --- CREATE DIRECTORIES ---
 os.makedirs(ASSET_DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(GLB_OUTPUT_DIR, exist_ok=True)
@@ -1765,10 +1790,9 @@ def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[
         
     output_image_path = os.path.abspath(os.path.join(RENDER_OUTPUT_DIR, f"{job_id}_render.png"))
     
-    # 3. Call Godot
-    # Hardcoded path as per environment analysis, ideally move to env var
-    godot_exe = r"c:/Zlendo2026/4k_Unreal_Engine_v1 - godot/godot/bin/godot.windows.editor.x86_64.console.exe"
-    project_path = r"c:/Zlendo2026/4k_Unreal_Engine_v1 - godot/godot_project"
+    # Call Godot
+    godot_exe = GODOT_EXE
+    project_path = GODOT_PROJECT_PATH
     
     # Arguments: --headless --path <project> "res://main.tscn" -- <input> <output>
     cmd = [
@@ -2399,7 +2423,7 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
                 status="error",
                 step="upload_binary",
                 progress=0,
-                message="Render failed: Could not upload output file to storage.",
+                message="Something went wrong. Please try again.",
                 render_type=render_type,
                 logger=logger
             )
@@ -2425,9 +2449,9 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
             user_id=user_id,
             job_id=job_id,
             status="completed",
-            step="upload_binary",
+            step="completed",
             progress=100,
-            message="Complete: Your masterpiece has been awakened.",
+            message="Your render is ready!" if render_type == "IMAGE" else "Your video is ready!",
             render_type=render_type,
             blob_url=blob_url,  # Send blob URL in ImageUrl field
             logger=logger,
@@ -2471,8 +2495,11 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
         start_time = time.monotonic()
         print(f"\n{'='*80}\n🚀 BACKGROUND RENDER TASK STARTED (GODOT)\n{'='*80}\nJob ID: {job_id}\nProject ID: {project_id}\nGallery ID: {gallery_id}\nUser ID: {user_id}\nStatus Updates: {'ENABLED' if enable_status_updates else 'DISABLED'}\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*80}\n")
         
-        # STEP 0: Validate payload JSON
-        print(f"🔍 STEP 0/3: Validating input payload...\n{'─'*60}")
+        # Step 1/5: Preparing your scene
+        if enable_status_updates:
+            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "preparing", 10, "Preparing your scene...", render_type="IMAGE", logger=logger)
+        
+        print(f"🔍 STEP 1/5: Validating input payload...\n{'─'*60}")
         is_valid, validation_error = _validate_image_payload(payload)
         if not is_valid:
             error_msg = f"Invalid payload: {validation_error}"
@@ -2481,7 +2508,7 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
                 _send_status_update(
                     project_id, gallery_id, user_id, job_id, 
                     "rejected", "validation", 0, 
-                    f"Payload validation failed: {validation_error}", 
+                    "Something went wrong. Please try again.", 
                     render_type="IMAGE", logger=logger
                 )
             logger.add_interrupt("validation_failed", error_msg)
@@ -2489,11 +2516,15 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
             return
         print(f"✅ Payload validation passed\n")
         
-        # Step 1: Render with Godot (Progress: 0-90%)
+        # Step 2/5: Setting up your space
         if enable_status_updates:
-            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "rendering", 10, "Starting Godot Render Engine...", render_type="IMAGE", logger=logger)
+            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "loading", 30, "Setting up your space...", render_type="IMAGE", logger=logger)
+        
+        # Step 3/5: Rendering your design
+        if enable_status_updates:
+            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "rendering", 50, "Rendering your design...", render_type="IMAGE", logger=logger)
             
-        print(f"🎬 STEP 1/2: Running Godot Render...\n{'─'*60}")
+        print(f"🎬 STEP 3/5: Running Render...\n{'─'*60}")
         
         output_image_path = _run_godot_render(job_id, payload, logger=logger)
         
@@ -2502,10 +2533,11 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
             
         print(f"✅ Render completed successfully: {output_image_path}\n")
 
-        # Step 2: Upload to API (Progress: 90-100%)
-        print(f"📤 STEP 2/2: Uploading to external API...\n{'─'*60}")
+        # Step 4/5: Adding final touches
         if enable_status_updates:
-             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "uploading", 90, "Uploading render...", render_type="IMAGE", logger=logger)
+             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "finalizing", 80, "Adding final touches...", render_type="IMAGE", logger=logger)
+        
+        print(f"📤 STEP 4/5: Uploading to external API...\n{'─'*60}")
              
         upload_success = _upload_render_to_api(project_id, gallery_id, output_image_path, user_id, logger=logger, job_id=job_id)
         
@@ -2523,7 +2555,7 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
         import traceback
         traceback.print_exc()
         if enable_status_updates:
-            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, f"Error: {error_msg}", render_type="IMAGE", logger=logger)
+            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, "Something went wrong. Please try again.", render_type="IMAGE", logger=logger)
         logger.add_interrupt("error", error_msg)
         logger.end_process(success=False, error=error_msg)
     finally:
@@ -2594,9 +2626,9 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
     
     # Output paths
     # MovieWriter saves AVI relative to the Godot project directory
-    # Use a simple filename (no spaces/absolute paths) to avoid Godot file handle issues
-    godot_exe = r"c:/Zlendo2026/4k_Unreal_Engine_v1 - godot/godot/bin/godot.windows.editor.x86_64.console.exe"
-    project_path = r"c:/Zlendo2026/4k_Unreal_Engine_v1 - godot/godot_project"
+    # Use global paths configured at start
+    godot_exe = GODOT_EXE
+    project_path = GODOT_PROJECT_PATH
     
     avi_filename = f"{job_id}_render.avi"
     avi_godot_output = os.path.join(project_path, avi_filename)  # Where Godot will save it
@@ -2756,8 +2788,11 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
         fps = video_animation.fps if video_animation else 30
         print(f"\n{'='*80}\n🎬 BACKGROUND VIDEO RENDER TASK STARTED (GODOT)\n{'='*80}\nJob ID: {job_id}\nProject ID: {project_id}\nGallery ID: {gallery_id}\nUser ID: {user_id}\nDuration: {duration_seconds}s @ {fps}fps\nStatus Updates: {'ENABLED' if enable_status_updates else 'DISABLED'}\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*80}\n")
         
-        # STEP 0: Validate payload JSON
-        print(f"🔍 STEP 0/3: Validating input payload...\n{'─'*60}")
+        # Step 1/5: Preparing your scene
+        if enable_status_updates:
+            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "preparing", 10, "Preparing your scene...", render_type="VIDEO", logger=logger)
+        
+        print(f"🔍 STEP 1/5: Validating input payload...\n{'─'*60}")
         is_valid, validation_error = _validate_video_payload(payload)
         if not is_valid:
             error_msg = f"Invalid payload: {validation_error}"
@@ -2766,7 +2801,7 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
                 _send_status_update(
                     project_id, gallery_id, user_id, job_id, 
                     "rejected", "validation", 0, 
-                    f"Payload validation failed: {validation_error}", 
+                    "Something went wrong. Please try again.", 
                     render_type="VIDEO", logger=logger
                 )
             logger.add_interrupt("validation_failed", error_msg)
@@ -2774,11 +2809,15 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
             return
         print(f"✅ Payload validation passed\n")
         
-        # Step 1: Render with Godot (Progress: 0-90%)
+        # Step 2/5: Setting up your space
         if enable_status_updates:
-            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "rendering", 10, "Starting Godot Video Render...", render_type="VIDEO", logger=logger)
+            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "loading", 30, "Setting up your space...", render_type="VIDEO", logger=logger)
+        
+        # Step 3/5: Creating your video
+        if enable_status_updates:
+            _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "rendering", 50, "Creating your video...", render_type="VIDEO", logger=logger)
             
-        print(f"🎬 STEP 1/2: Running Godot Video Render...\n{'─'*60}")
+        print(f"🎬 STEP 3/5: Running Video Render...\n{'─'*60}")
         
         # Optimization (Optional, kept from original logic if needed, but handled by Godot's throughput mostly)
         # Note: Godot can handle unoptimized scenes better than Unreal in some aspects, but culling is always good.
@@ -2792,10 +2831,11 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
             
         print(f"✅ Video Render completed successfully: {output_video_path}\n")
 
-        # Step 2: Upload to API (Progress: 90-100%)
-        print(f"📤 STEP 2/2: Uploading to external API...\n{'─'*60}")
+        # Step 4/5: Processing your video
         if enable_status_updates:
-             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "uploading", 90, "Uploading video...", render_type="VIDEO", logger=logger)
+             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "finalizing", 80, "Processing your video...", render_type="VIDEO", logger=logger)
+        
+        print(f"📤 STEP 4/5: Uploading to external API...\n{'─'*60}")
              
         upload_success = _upload_render_to_api(project_id, gallery_id, output_video_path, user_id, logger=logger, job_id=job_id)
         
@@ -2813,7 +2853,7 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
         import traceback
         traceback.print_exc()
         if enable_status_updates:
-            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, f"Error: {error_msg}", render_type="VIDEO", logger=logger)
+            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, "Something went wrong. Please try again.", render_type="VIDEO", logger=logger)
         logger.add_interrupt("error", error_msg)
         logger.end_process(success=False, error=error_msg)
     finally:

@@ -1,0 +1,67 @@
+--- Scene Culling Log ---
+📍 Camera (Blender): [-3.9214415995223484, -3.4599026484749817, 1.5] -> Plan: (-392.1, 346.0)
+🔍 Inspecting Layer: layer-1
+  ✅ Camera (-392.1, 346.0) found in Active Room: Hall (a-1767705443606-w45sjwvx)
+  ➕ Adding Neighbor Room (Position Match): Bedroom (a-1767706125325-ctuki33q)
+  ➕ Adding Neighbor Room (Position Match): Kitchen (a-1767761668346-cl4b4kbt)
+  ➕ Adding Neighbor Room (Position Match): Sitout (a-1767762336179-0qkbatc2)
+  🎯 Total kept rooms on layer-1: 4
+  ✨ Rescuing item 'Minimalist_Wardrobe ' (ID: i-1767779642267-81u0r4x8) - Dist: 67.5cm <= 85.0cm
+  ✨ Rescuing item 'WallMounting_Light' (ID: i-1767785259076-tboplidm) - Dist: 16.2cm <= 85.0cm
+  ✨ Rescuing item 'WallMounting_Light' (ID: i-1767785409386-ukl3du2r) - Dist: 17.7cm <= 85.0cm
+  ✨ Rescuing item 'Country_Plant' (ID: i-1767791010059-4r5sscmj) - Dist: 24.7cm <= 85.0cm
+  ✨ Rescuing item 'Country_Plant' (ID: i-1767804225225-23gn3irs) - Dist: 25.4cm <= 85.0cm
+
+  🗑️  Culled 40 items from layer-1:
+     - Modern Western Toilet (i-1767773711484-jutqmyrz)
+     - Nordic_Washbasin (i-1767773809932-d9m9k69d)
+     - Minimalist_Shower (i-1767774090100-vzl7skh4)
+     - Modern Western Toilet (i-1767774587850-rdy0ojec)
+     - Minimalist_Shower (i-1767774597469-x9ax2e79)
+     - Nordic_Washbasin (i-1767774635070-buz2883i)
+     - Nordic_Bed (i-1767779412812-ln4auped)
+     - Minimalist_BedSideTable (i-1767779438539-nqx5amno)
+     - Minimalist_BedSideTable (i-1767779516397-nnfuqwte)
+     - Classic_Rug (i-1767779564171-qs5asa8d)
+     - Minimalist_Wardrobe  (i-1767779662055-ld4dkz3s)
+     - Country_Frame (i-1767781781772-muky8icl)
+     - Wooden Gate (i-1767786794824-zjrqn2aa)
+     - Country_Lamp (i-1767789602979-z6ik4myx)
+     - WallMounting_Light (i-1767803396952-syou8umd)
+     - WallMounting_Light (i-1767803440461-s7bw5pbh)
+     - Outdoor Table 2 (i-1767976704980-dkderyzj)
+     - Modern Rug (i-1767976774276-hiz92fod)
+     - Stone Planter with Bush (i-1768031377528-z38wu492)
+     - Stone Planter with Bush (i-1768031486927-7c43h61f)
+     - Stone Planter with Bush (i-1768031511321-e0zyt2v2)
+     - Stone Planter with Bush (i-1768031524336-i485223i)
+     - Stone Planter with Bush (i-1768031534637-lqlfh3kj)
+     - Stone Planter with Bush (i-1768031555390-iu7a97tp)
+     - Stone Planter with Bush (i-1768031565385-ghndf4pf)
+     - Stone Planter with Bush (i-1768031572294-mip571gp)
+     - Stone Planter with Bush (i-1768031582358-7vwme8rs)
+     - Stone Planter with Bush (i-1768031589766-n8lchvme)
+     - Stone Planter with Bush (i-1768031640475-8lr67d93)
+     - Stone Planter with Bush (i-1768031687618-ts3vpszt)
+     - Stone Planter with Bush (i-1768031711766-rr6acxfj)
+     - Stone Planter with Bush (i-1768031719910-090nxy87)
+     - Stone Planter with Bush (i-1768031738150-thuev5iz)
+     - Stone Planter with Bush (i-1768031754343-60qed0yu)
+     - Stone Planter with Bush (i-1768031784800-f27rv8v9)
+     - Stone Planter with Bush (i-1768031792298-qscq3omb)
+     - Stone Planter with Bush (i-1768031804113-y2m0y6gs)
+     - Stone Planter with Bush (i-1768031819305-436kw2fu)
+     - Stone Planter with Bush (i-1768031846303-dvp6dhwd)
+     - Exterior Tree (i-1769926773328-rknipx80)
+  ✂️  Optimization Results for layer-1:
+     Areas: 7 -> 4
+     Lines: 38 -> 21
+     Items: 100 -> 60
+
+============================================================
+📊 CULLING SUMMARY
+============================================================
+  Areas:  7 -> 4  (removed 3)
+  Items:  100 -> 60  (removed 40)
+  Lines:  38 -> 21  (removed 17)
+============================================================

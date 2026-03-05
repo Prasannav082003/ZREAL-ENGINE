@@ -129,6 +129,8 @@ func _build_layer_geometry(layer_data, layer_altitude):
 	# 1. Build Walls
 	for line_id in lines:
 		var line = lines[line_id]
+		# Skip walls marked as hidden in the floor plan
+		if line.has("visible") and line["visible"] == false: continue
 		# Check if vertices exist
 		if not line.has("vertices") or line["vertices"].size() < 2: continue
 		
@@ -194,33 +196,35 @@ func _build_layer_geometry(layer_data, layer_altitude):
 		
 		csg.add_child(wall)
 		
-		# ── Inner face panel as MeshInstance3D at scene root ───────────────────
-		# This is NOT a CSGBox3D child of the combiner - it is a standalone mesh
-		# added directly to the scene. It never participates in CSG operations so
-		# its faces are never removed. Sits on the inner face of the wall and
-		# shows the inner_properties material (visible from inside the room).
-		# Thickness is 1 mm — just enough to beat z-fighting.
+		# ── Inner face panel via a per-wall CSGCombiner3D ──────────────────────
+		# Using a dedicated CSG combiner lets us punch the same door/window holes
+		# through the inner face panel, so openings are not covered by the solid
+		# inner surface (which would make the exterior invisible through the hole).
 		var inner_mat_data = null
 		if line.has("inner_properties") and line["inner_properties"].has("material"):
 			inner_mat_data = line["inner_properties"]["material"]
 		elif line.has("outer_properties") and line["outer_properties"].has("material"):
 			inner_mat_data = line["outer_properties"]["material"]
-			
+		
+		# inner_csg is created only when there is a material to show.
+		# Holes added further below will subtract from this combiner too.
+		var inner_csg: CSGCombiner3D = null
 		if inner_mat_data != null:
 			var face_t = 0.001  # 1 mm — purely visual overlay
-			# Offset inward by half wall thickness so the panel sits on the inner face
 			var inner_offset = wall_thickness / 2.0 + face_t / 2.0
 			var wall_basis   = Basis(Vector3.UP, wall_angle)
 			var inner_world  = wall_pos + wall_basis * Vector3(0, 0, inner_offset)
 			
-			var inner_mesh = MeshInstance3D.new()
-			var bm = BoxMesh.new()
-			bm.size = Vector3(corner_length, height, face_t)  # match wall corner extension
-			inner_mesh.mesh = bm
-			inner_mesh.position = inner_world
-			inner_mesh.rotation.y = wall_angle
-			inner_mesh.material_override = create_material(inner_mat_data)
-			add_child(inner_mesh)  # Add to scene root, NOT to csg combiner
+			inner_csg = CSGCombiner3D.new()
+			inner_csg.position = inner_world
+			inner_csg.rotation.y = wall_angle
+			add_child(inner_csg)  # at scene root so CSG operates independently
+			
+			# Main panel (UNION — the default operation)
+			var inner_box = CSGBox3D.new()
+			inner_box.size = Vector3(corner_length, height, face_t)
+			inner_box.material = create_material(inner_mat_data)
+			inner_csg.add_child(inner_box)
 
 
 		# 1b. Build Holes (Doors/Windows) AND INSTANTIATE ASSETS
@@ -251,8 +255,7 @@ func _build_layer_geometry(layer_data, layer_altitude):
 				elif hole.has("properties") and hole["properties"].has("offset"):
 					offset_ratio = float(hole["properties"]["offset"])
 					
-				# Calculate Position
-				# Linear interpolation between p1 and p2
+				# Calculate Position — linear interpolation between p1 and p2
 				var hole_pos_xz = p1.lerp(p2, offset_ratio)
 				
 				var h_center_pos = hole_pos_xz
@@ -261,7 +264,7 @@ func _build_layer_geometry(layer_data, layer_altitude):
 				# Ensure valid dimensions
 				if h_width < 0.01 or h_height < 0.01: continue
 				
-				# Create Hole Cutter (Subtractive CSG)
+				# ── 1. Cut through the structural wall (CSGCombiner csg) ───────────
 				var hole_csg = CSGBox3D.new()
 				hole_csg.operation = CSGBox3D.OPERATION_SUBTRACTION
 				hole_csg.size = Vector3(h_width, h_height, wall_thickness + 0.2) # Thicker than wall to ensure cut
@@ -269,6 +272,25 @@ func _build_layer_geometry(layer_data, layer_altitude):
 				hole_csg.rotation.y = wall_angle
 				csg.add_child(hole_csg)
 				print("Added hole cutter at: ", h_center_pos)
+				
+				# ── 2. Cut through the inner face panel (inner_csg) ───────────────
+				# Without this the inner overlay panel covers the opening and makes
+				# the exterior invisible when looking through the hole.
+				# NOTE: we cannot use inner_csg.to_local() here because global_transform
+				# is not propagated until after the first physics frame. Instead we
+				# manually invert inner_csg's transform:
+				#   step 1 – translate: subtract inner_csg origin (= inner_world)
+				#   step 2 – inverse-rotate: multiply by transposed rotation basis
+				if inner_csg != null:
+					var inner_hole = CSGBox3D.new()
+					inner_hole.operation = CSGBox3D.OPERATION_SUBTRACTION
+					# Generous depth – punches cleanly through the 1 mm panel in both directions
+					inner_hole.size = Vector3(h_width, h_height, 0.5)
+					# Manual inverse transform (world → inner_csg local)
+					var delta_w   = h_center_pos - inner_csg.position
+					var local_pos = Basis(Vector3.UP, wall_angle).transposed() * delta_w
+					inner_hole.position = local_pos
+					inner_csg.add_child(inner_hole)
 				
 				# Instantiate Asset (if available)
 				if hole.has("asset_urls"):
@@ -340,6 +362,24 @@ func _build_layer_geometry(layer_data, layer_altitude):
 
 
 	# 2. Build Floors and Ceilings from Areas
+	# First, determine the max wall height across all lines in this layer
+	# so ceilings don't float above the walls (ceiling_properties.height may differ)
+	var max_wall_height = 0.0
+	for lid in lines:
+		var l = lines[lid]
+		if l.has("visible") and l["visible"] == false: continue
+		if l.has("properties") and l["properties"].has("height"):
+			var h_prop = l["properties"]["height"]
+			var wh = 0.0
+			if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
+				wh = float(h_prop["length"]) * scale_factor
+			else:
+				wh = float(h_prop) * scale_factor
+			if wh > max_wall_height:
+				max_wall_height = wh
+	if max_wall_height < 0.1:
+		max_wall_height = 280.0 * scale_factor  # fallback default
+	
 	if layer_data.has("areas"):
 		print("Building Floors/Ceilings for ", layer_data["areas"].size(), " areas.")
 		for area_id in layer_data["areas"]:
@@ -359,10 +399,14 @@ func _build_layer_geometry(layer_data, layer_altitude):
 			
 			if polygon.size() < 3: continue
 			
-			# Create Floor
+			# Create Floor — enforce minimum depth to prevent zero-volume CSG glitches
 			var floor_depth = 0.1
 			if area.has("floor_properties") and area["floor_properties"].has("thickness"):
-				floor_depth = float(area["floor_properties"]["thickness"]) * scale_factor
+				var t = float(area["floor_properties"]["thickness"]) * scale_factor
+				if t > 0.001:
+					floor_depth = t
+			if floor_depth < 0.05:
+				floor_depth = 0.05
 			
 			var floor_poly = CSGPolygon3D.new()
 			floor_poly.polygon = polygon
@@ -382,19 +426,26 @@ func _build_layer_geometry(layer_data, layer_altitude):
 			csg.add_child(floor_poly)
 			
 			# Create Ceiling
-			var ceil_height = 280.0 * scale_factor # Default ceiling height
+			var ceil_height = max_wall_height  # Default to wall height so ceiling is flush
 			
-			# Determine height
+			# Determine height from properties
 			if area.has("ceiling_properties"):
 				var cp = area["ceiling_properties"]
 				if cp.has("height"):
-					ceil_height = float(cp["height"]) * scale_factor
+					var ch = float(cp["height"]) * scale_factor
+					# Use the smaller of ceiling_properties.height and wall height
+					# to prevent the ceiling from floating above the walls
+					if ch > 0.1:
+						ceil_height = min(ch, max_wall_height)
 			elif area.has("properties") and area["properties"].has("height"):
 				var h_prop = area["properties"]["height"]
+				var ch = 0.0
 				if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
-					ceil_height = float(h_prop["length"]) * scale_factor
+					ch = float(h_prop["length"]) * scale_factor
 				else:
-					ceil_height = float(h_prop) * scale_factor
+					ch = float(h_prop) * scale_factor
+				if ch > 0.1:
+					ceil_height = min(ch, max_wall_height)
 			
 			var ceil_poly = CSGPolygon3D.new()
 			ceil_poly.polygon = polygon
@@ -402,7 +453,11 @@ func _build_layer_geometry(layer_data, layer_altitude):
 			
 			var ceil_depth = 0.1
 			if area.has("ceiling_properties") and area["ceiling_properties"].has("thickness"):
-				ceil_depth = float(area["ceiling_properties"]["thickness"]) * scale_factor
+				var t = float(area["ceiling_properties"]["thickness"]) * scale_factor
+				if t > 0.001:
+					ceil_depth = t
+			if ceil_depth < 0.05:
+				ceil_depth = 0.05
 
 			ceil_poly.depth = ceil_depth
 			ceil_poly.rotation.x = PI / 2 

@@ -206,21 +206,89 @@ class VideoSceneOptimizer:
             
             self.log(f"✅ Identified {len(active_area_ids)} unique active rooms along path.")
 
-            # 5. Find Neighbors (Robust Vertex-Based)
-            kept_area_ids = set(active_area_ids)
+            # 5. Find ALL connected neighbors (BFS flood-fill)
+            #    IMPORTANT: Rooms often use DIFFERENT vertex IDs for the same physical
+            #    position, so we must match by position proximity, not just ID.
+            POSITION_TOLERANCE = 1.0  # cm
             
-            for active_id in active_area_ids:
-                active_area_verts = set(areas[active_id].get("vertices", []))
-                for a_id, area in areas.items():
-                    if a_id == active_id: continue
-                    if a_id in kept_area_ids: continue
+            # Pre-compute area vertex positions
+            area_positions = {}  # area_id -> list of (x, y)
+            for a_id, area in areas.items():
+                positions = []
+                for v_id in area.get("vertices", []):
+                    v = vertices.get(v_id)
+                    if v:
+                        positions.append((v.get("x", 0), v.get("y", 0)))
+                area_positions[a_id] = positions
+            
+            def areas_are_neighbors(aid1, aid2):
+                """Check if two areas share a vertex at the same position."""
+                for (x1, y1) in area_positions.get(aid1, []):
+                    for (x2, y2) in area_positions.get(aid2, []):
+                        if abs(x1 - x2) < POSITION_TOLERANCE and abs(y1 - y2) < POSITION_TOLERANCE:
+                            return True
+                return False
+            
+            kept_area_ids = set(active_area_ids)
+            changed = True
+            
+            while changed:
+                changed = False
+                
+                # a) Position-based proximity: rooms with vertices at the same position
+                for a_id in list(areas.keys()):
+                    if a_id in kept_area_ids:
+                        continue
+                    for kept_id in list(kept_area_ids):
+                        if areas_are_neighbors(kept_id, a_id):
+                            kept_area_ids.add(a_id)
+                            changed = True
+                            self.log(f"  ➕ Adding Neighbor Room (Position Match): {areas[a_id].get('name')} ({a_id})")
+                            break
+                
+                # b) Hole/Hidden-wall connections
+                all_kept_verts = set()
+                for aid in kept_area_ids:
+                    all_kept_verts.update(areas[aid].get("vertices", []))
+                
+                for lid, line in lines.items():
+                    line_holes = line.get("holes", [])
+                    line_hidden = (line.get("visible") == False)
+                    if not line_holes and not line_hidden:
+                        continue
                     
-                    area_verts = set(area.get("vertices", []))
-                    shared_count = len(active_area_verts.intersection(area_verts))
+                    v_ids = line.get("vertices", [])
+                    if len(v_ids) < 2:
+                        continue
+                    v1, v2 = v_ids[0], v_ids[1]
                     
-                    if shared_count >= 1: 
-                        kept_area_ids.add(a_id)
-                        self.log(f"  ➕ Adding Neighbor of {areas[active_id].get('name')}: {area.get('name')} ({a_id})")
+                    # Check by ID or position proximity
+                    v1_pos = (vertices[v1].get("x",0), vertices[v1].get("y",0)) if v1 in vertices else None
+                    v2_pos = (vertices[v2].get("x",0), vertices[v2].get("y",0)) if v2 in vertices else None
+                    
+                    touches_kept = v1 in all_kept_verts or v2 in all_kept_verts
+                    if not touches_kept:
+                        for aid in kept_area_ids:
+                            for (px, py) in area_positions.get(aid, []):
+                                if v1_pos and abs(v1_pos[0]-px) < POSITION_TOLERANCE and abs(v1_pos[1]-py) < POSITION_TOLERANCE:
+                                    touches_kept = True
+                                    break
+                                if v2_pos and abs(v2_pos[0]-px) < POSITION_TOLERANCE and abs(v2_pos[1]-py) < POSITION_TOLERANCE:
+                                    touches_kept = True
+                                    break
+                            if touches_kept:
+                                break
+                    
+                    if touches_kept:
+                        for a_id, area in areas.items():
+                            if a_id in kept_area_ids:
+                                continue
+                            area_verts = set(area.get("vertices", []))
+                            if v1 in area_verts or v2 in area_verts:
+                                kept_area_ids.add(a_id)
+                                changed = True
+                                reason = "Hole-Connected" if line_holes else "Hidden-Wall-Connected"
+                                self.log(f"  ➕ Adding Neighbor Room ({reason}): {area.get('name')} ({a_id})")
 
             self.log(f"🎯 Total kept rooms: {len(kept_area_ids)}")
 
@@ -230,6 +298,22 @@ class VideoSceneOptimizer:
             kept_vertex_ids = set()
             for area in new_areas.values():
                 kept_vertex_ids.update(area.get("vertices", []))
+            
+            # Build set of kept positions for position-based line matching
+            kept_positions = set()
+            for vid in kept_vertex_ids:
+                v = vertices.get(vid)
+                if v:
+                    kept_positions.add((round(v.get("x",0), 0), round(v.get("y",0), 0)))
+            
+            def vertex_is_near_kept(vid):
+                if vid in kept_vertex_ids:
+                    return True
+                v = vertices.get(vid)
+                if v:
+                    pos = (round(v.get("x",0), 0), round(v.get("y",0), 0))
+                    return pos in kept_positions
+                return False
             
             new_vertices = {}
             for vid in kept_vertex_ids:
@@ -241,8 +325,14 @@ class VideoSceneOptimizer:
                 v_ids = line.get("vertices", [])
                 if len(v_ids) >= 2:
                     v1, v2 = v_ids[0], v_ids[1]
-                    if v1 in kept_vertex_ids and v2 in kept_vertex_ids:
-                         new_lines[lid] = line
+                    if vertex_is_near_kept(v1) and vertex_is_near_kept(v2):
+                        new_lines[lid] = line
+                        if v1 not in new_vertices and v1 in vertices:
+                            new_vertices[v1] = vertices[v1]
+                            kept_vertex_ids.add(v1)
+                        if v2 not in new_vertices and v2 in vertices:
+                            new_vertices[v2] = vertices[v2]
+                            kept_vertex_ids.add(v2)
             
             new_holes = {}
             for hid, hole in holes.items():
