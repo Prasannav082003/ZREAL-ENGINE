@@ -110,17 +110,12 @@ func build_architecture(data):
 			var layer = data["layers"][layer_id]
 			print("Processing layer: ", layer_id)
 			var layer_alt = 0.0
-			# When rendering a single layer (showAllFloors=false), place it at
-			# ground level so it doesn't float at its original altitude.
-			if show_all_floors:
-				if layer.has("altitude"):
-					var alt_val = layer["altitude"]
-					if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
-						layer_alt = float(alt_val["length"]) * 0.01
-					else:
-						layer_alt = float(alt_val) * 0.01
-			else:
-				print("Single-layer mode: placing layer '", layer_id, "' at ground level (altitude 0)")
+			if layer.has("altitude"):
+				var alt_val = layer["altitude"]
+				if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
+					layer_alt = float(alt_val["length"]) * 0.01
+				else:
+					layer_alt = float(alt_val) * 0.01
 					
 			if layer.has("lines") and layer.has("vertices"):
 				_build_layer_geometry(layer, layer_alt)
@@ -144,27 +139,7 @@ func _build_layer_geometry(layer_data, layer_altitude):
 	if layer_data.has("holes"):
 		all_holes = layer_data["holes"]
 	
-	# ── Compute room centroid from area vertices ────────────────────────────
-	# Used to determine which side of each wall faces the room interior.
-	# Without this, vertex winding differences between layers cause inner/outer
-	# textures to swap on layers > 1.
-	var room_centroid = Vector3.ZERO
-	var centroid_count = 0
-	if layer_data.has("areas"):
-		for area_id in layer_data["areas"]:
-			var area = layer_data["areas"][area_id]
-			if not area.has("vertices"): continue
-			for v_id in area["vertices"]:
-				var vs = str(v_id)
-				if vertices.has(vs):
-					var v = vertices[vs]
-					room_centroid += Vector3(float(v["x"]), 0.0, float(v["y"])) * scale_factor
-					centroid_count += 1
-	if centroid_count > 0:
-		room_centroid /= centroid_count
-	var has_centroid = centroid_count > 0
-	
-	print("Layer has ", lines.size(), " lines. Room centroid: ", room_centroid)
+	print("Layer has ", lines.size(), " lines.")
 	
 	# 1. Build Walls
 	for line_id in lines:
@@ -206,21 +181,6 @@ func _build_layer_geometry(layer_data, layer_altitude):
 		
 		var wall_angle = -atan2(diff.z, diff.x)
 		var wall_pos  = Vector3(center.x, layer_altitude + height / 2.0, center.z)
-		
-		# ── Determine which side of the wall faces the room interior ──────────
-		# The wall normal in +Z local space (after rotation by wall_angle) may point
-		# toward or away from the room centroid depending on vertex winding.
-		# We compute the perpendicular (normal) of the wall segment, check if 
-		# the centroid is on that side, and flip if needed.
-		var wall_basis = Basis(Vector3.UP, wall_angle)
-		var wall_normal_world = wall_basis * Vector3(0, 0, 1)  # +Z local = default "inner" direction
-		var inner_sign = 1.0  # +1 means +Z is inner, -1 means -Z is inner
-		if has_centroid:
-			var to_centroid = room_centroid - center
-			to_centroid.y = 0.0  # only care about XZ plane
-			var dot = to_centroid.dot(wall_normal_world)
-			if dot < 0:
-				inner_sign = -1.0  # centroid is on -Z side, so flip inner direction
 		
 		# ── Extend wall length at both ends to fill corner gaps ────────────────
 		# Without this, walls meeting at 90° leave a gap equal to wall_thickness×wall_thickness
@@ -267,8 +227,8 @@ func _build_layer_geometry(layer_data, layer_altitude):
 		if inner_mat_data != null:
 			var face_t = 0.001  # 1 mm — purely visual overlay
 			var inner_offset = wall_thickness / 2.0 + face_t / 2.0
-			# Use inner_sign to place the panel on the correct (room-facing) side
-			var inner_world  = wall_pos + wall_basis * Vector3(0, 0, inner_offset * inner_sign)
+			var wall_basis   = Basis(Vector3.UP, wall_angle)
+			var inner_world  = wall_pos + wall_basis * Vector3(0, 0, inner_offset)
 			
 			inner_csg = CSGCombiner3D.new()
 			inner_csg.position = inner_world
@@ -420,7 +380,6 @@ func _build_layer_geometry(layer_data, layer_altitude):
 	# First, determine the max wall height across all lines in this layer
 	# so ceilings don't float above the walls (ceiling_properties.height may differ)
 	var max_wall_height = 0.0
-	var max_wall_thickness = 0.2 * scale_factor  # fallback default
 	for lid in lines:
 		var l = lines[lid]
 		if l.has("visible") and l["visible"] == false: continue
@@ -433,10 +392,6 @@ func _build_layer_geometry(layer_data, layer_altitude):
 				wh = float(h_prop) * scale_factor
 			if wh > max_wall_height:
 				max_wall_height = wh
-		if l.has("properties") and l["properties"].has("thickness"):
-			var wt = get_dimension_value(l["properties"]["thickness"], 20.0) * scale_factor
-			if wt > max_wall_thickness:
-				max_wall_thickness = wt
 	if max_wall_height < 0.1:
 		max_wall_height = 280.0 * scale_factor  # fallback default
 	
@@ -458,29 +413,6 @@ func _build_layer_geometry(layer_data, layer_altitude):
 					polygon.append(Vector2(x, y))
 			
 			if polygon.size() < 3: continue
-			
-			# ── Enforce consistent polygon winding (CCW) ──────────────────────
-			# CSGPolygon3D extrudes along +Y in its local space. After rotating
-			# 90° around X, +Y becomes +Z. The "front" face of the polygon
-			# depends on winding order. We enforce counter-clockwise winding
-			# so the geometry faces the same direction for all layers regardless
-			# of how vertices were ordered in the JSON.
-			var signed_area = 0.0
-			for pi in range(polygon.size()):
-				var pa = polygon[pi]
-				var pb = polygon[(pi + 1) % polygon.size()]
-				signed_area += (pa.x * pb.y - pb.x * pa.y)
-			signed_area *= 0.5
-			# If signed_area < 0, polygon is clockwise → reverse to make CCW
-			if signed_area < 0:
-				polygon.reverse()
-			
-			# ── Expand polygon outward to cover full wall thickness ──────────
-			# The area vertices sit at the wall centerline. Walls extend outward
-			# by wall_thickness/2 on each side, plus corner_length adds another
-			# wall_thickness/2 at each end. Expand the floor/ceiling polygon so
-			# it reaches the outer edges of the walls (no gaps at corners).
-			polygon = _expand_polygon_outward(polygon, max_wall_thickness / 2.0)
 			
 			# Create Floor — enforce minimum depth to prevent zero-volume CSG glitches
 			var floor_depth = 0.1
@@ -581,17 +513,12 @@ func load_assets(data):
 			var layer = layers_dict[layer_id]
 			var layer_alt = 0.0
 			
-			# When rendering a single layer (showAllFloors=false), place it at
-			# ground level so assets don't float at the original altitude.
-			if show_all_floors:
-				if layer.has("altitude"):
-					var alt_val = layer["altitude"]
-					if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
-						layer_alt = float(alt_val["length"]) * 0.01
-					else:
-						layer_alt = float(alt_val) * 0.01
-			else:
-				print("load_assets: Single-layer mode — placing assets at ground level")
+			if layer.has("altitude"):
+				var alt_val = layer["altitude"]
+				if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
+					layer_alt = float(alt_val["length"]) * 0.01
+				else:
+					layer_alt = float(alt_val) * 0.01
 
 			if layer.has("items"):
 				_load_layer_items(layer["items"], layer_alt)
@@ -812,49 +739,6 @@ func _load_layer_items(items, layer_altitude):
 			})
 		else:
 			pass
-
-func _expand_polygon_outward(polygon: PackedVector2Array, offset: float) -> PackedVector2Array:
-	# Expands a CCW polygon outward by 'offset' distance.
-	# For each vertex, computes the bisector of the two adjacent outward edge normals,
-	# then moves the vertex along the bisector by offset / cos(half_angle) so that
-	# each edge is displaced exactly 'offset' units outward.
-	var n = polygon.size()
-	if n < 3 or offset < 0.0001:
-		return polygon
-	
-	var expanded = PackedVector2Array()
-	
-	for i in range(n):
-		var prev_pt = polygon[(i - 1 + n) % n]
-		var curr_pt = polygon[i]
-		var next_pt = polygon[(i + 1) % n]
-		
-		# Edge vectors
-		var e1 = curr_pt - prev_pt  # incoming edge direction
-		var e2 = next_pt - curr_pt  # outgoing edge direction
-		
-		# Outward normals for a CCW polygon: right-hand normal (dy, -dx)
-		var n1 = Vector2(e1.y, -e1.x).normalized()
-		var n2 = Vector2(e2.y, -e2.x).normalized()
-		
-		# Bisector direction
-		var bisector = (n1 + n2)
-		if bisector.length() < 0.0001:
-			# Edges are nearly parallel (180° turn) — just use one normal
-			bisector = n1
-		else:
-			bisector = bisector.normalized()
-		
-		# The perpendicular offset along the bisector to achieve 'offset' distance
-		# from each edge: offset / cos(angle_between_normal_and_bisector)
-		var cos_half = n1.dot(bisector)
-		if abs(cos_half) < 0.1:
-			cos_half = 0.1  # clamp to prevent extreme offsets at acute angles
-		
-		var move_dist = offset / cos_half
-		expanded.append(curr_pt + bisector * move_dist)
-	
-	return expanded
 
 func get_dimension_value(prop_value, default_val = 100.0) -> float:
 	if typeof(prop_value) == TYPE_ARRAY and prop_value.size() > 0:

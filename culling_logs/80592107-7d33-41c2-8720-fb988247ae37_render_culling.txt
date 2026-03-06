@@ -1,0 +1,17 @@
+--- Scene Culling Log ---
+📍 Camera (Blender): [-0.45500000000000007, -2.099499999880791, 1.5] -> Plan: (-45.5, 209.9)
+🔍 Inspecting Layer: layer-1
+  ✅ Camera (-45.5, 209.9) found in Active Room: Room (a-1772781878533-u8h5h15s)
+  🎯 Total kept rooms on layer-1: 1
+  ✂️  Optimization Results for layer-1:
+     Areas: 1 -> 1
+     Lines: 4 -> 4
+     Items: 7 -> 7
+
+============================================================
+📊 CULLING SUMMARY
+============================================================
+  Areas:  1 -> 1  (removed 0)
+  Items:  7 -> 7  (removed 0)
+  Lines:  4 -> 4  (removed 0)
+============================================================
