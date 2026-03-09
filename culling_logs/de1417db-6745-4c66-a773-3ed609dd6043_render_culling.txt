@@ -1,0 +1,22 @@
+--- Scene Culling Log ---
+📍 Camera (Blender): [1.491466872206777, 2.8956058463169154, 5.037637875532203] -> Plan: (149.1, -289.6)
+🔍 Inspecting Layer: layer-1
+  ✅ Camera (149.1, -289.6) found in Active Room: Room (a-1772628274406-8pni2k7p)
+  ➕ Adding Neighbor Room (Position Match): Room (a-1772628292011-muktnm0d)
+  ➕ Adding Neighbor Room (Position Match): Room (a-1772628292011-pni9wg79)
+  🎯 Total kept rooms on layer-1: 3
+  ✨ Rescuing item 'Modern glass wall' (ID: i-1772619544692-zh6hf41w) - Dist: 1.4cm <= 85.0cm
+  ✨ Rescuing item 'Frosted Glass wall' (ID: i-1772619858252-zbk71ywl) - Dist: 1.4cm <= 85.0cm
+  ✨ Rescuing item 'Modern glass wall' (ID: i-1772619866805-6tcexuep) - Dist: 0.4cm <= 85.0cm
+  ✂️  Optimization Results for layer-1:
+     Areas: 5 -> 3
+     Lines: 19 -> 11
+     Items: 8 -> 8
+
+============================================================
+📊 CULLING SUMMARY
+============================================================
+  Areas:  5 -> 3  (removed 2)
+  Items:  8 -> 8  (removed 0)
+  Lines:  19 -> 11  (removed 8)
+============================================================

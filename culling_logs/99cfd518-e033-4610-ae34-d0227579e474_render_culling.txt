@@ -1,0 +1,22 @@
+--- Scene Culling Log ---
+📍 Camera (Blender): [0.5100015420044496, -4.590964622427522, 3.5938755700692644] -> Plan: (51.0, 459.1)
+🔍 Inspecting Layer: layer-1
+  ✅ Camera (51.0, 459.1) found in Active Room: Living Room (a-1770626576345-ok74h5yf)
+  ➕ Adding Neighbor Room (Position Match): Toilet (a-1770626550414-6cmcf0x0)
+  ➕ Adding Neighbor Room (Position Match): Dining Room (a-1770626562534-djl2mq97)
+  ➕ Adding Neighbor Room (Hidden-Wall-Connected): Kitchen (a-1770626430061-zl7hopy4)
+  ➕ Adding Neighbor Room (Hidden-Wall-Connected): Bedroom (a-1770626514967-z1sn3s2z)
+  ➕ Adding Neighbor Room (Hole-Connected): Toilet (a-1770626537830-93j0nmf9)
+  🎯 Total kept rooms on layer-1: 6
+  ✂️  Optimization Results for layer-1:
+     Areas: 6 -> 6
+     Lines: 20 -> 20
+     Items: 14 -> 14
+
+============================================================
+📊 CULLING SUMMARY
+============================================================
+  Areas:  6 -> 6  (removed 0)
+  Items:  14 -> 14  (removed 0)
+  Lines:  20 -> 20  (removed 0)
+============================================================

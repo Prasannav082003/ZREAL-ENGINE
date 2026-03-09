@@ -1,0 +1,24 @@
+--- Video Scene Culling Log ---
+🎬 Video Animation detected. Analyzing full camera path...
+   Collected 120 points from video path.
+ℹ️ No 'layers' found. Checking for flat structure...
+   Checking 120 path points against 6 rooms...
+   ✅ Path Point 0 inside: Dining Room (a-1770626562534-djl2mq97)
+✅ Identified 1 unique active rooms along path.
+  ➕ Adding Neighbor Room (Position Match): Kitchen (a-1770626430061-zl7hopy4)
+  ➕ Adding Neighbor Room (Position Match): Bedroom (a-1770626514967-z1sn3s2z)
+  ➕ Adding Neighbor Room (Position Match): Toilet (a-1770626537830-93j0nmf9)
+  ➕ Adding Neighbor Room (Position Match): Toilet (a-1770626550414-6cmcf0x0)
+  ➕ Adding Neighbor Room (Position Match): Living Room (a-1770626576345-ok74h5yf)
+🎯 Total kept rooms: 6
+
+============================================================
+📊 VIDEO CULLING SUMMARY
+============================================================
+  Camera path points analyzed: 120
+  Active rooms (camera enters): 1
+  Kept rooms (+ neighbors):     6
+  Areas:  6 -> 6  (removed 0)
+  Items:  14 -> 14  (removed 0)
+  Lines:  20 -> 20  (removed 0)
+============================================================

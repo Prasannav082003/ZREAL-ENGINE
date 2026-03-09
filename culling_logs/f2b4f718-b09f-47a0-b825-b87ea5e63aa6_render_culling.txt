@@ -1,0 +1,143 @@
+--- Video Scene Culling Log ---
+🎬 Video Animation detected. Analyzing full camera path...
+   Collected 151 points from video path.
+ℹ️ No 'layers' found. Checking for flat structure...
+   Checking 151 path points against 21 rooms...
+   ✅ Path Point 0 inside: Room (a-1771915464949-r8em77xc)
+✅ Identified 1 unique active rooms along path.
+  ➕ Adding Neighbor Room (Position Match): Guest Bedroom (a-1771322203682-cnk3fuqd)
+  ➕ Adding Neighbor Room (Position Match): Deck (a-1771324408006-3mr8aitj)
+  ➕ Adding Neighbor Room (Position Match): Bedroom (a-1771676173551-dqw9gwf4)
+  ➕ Adding Neighbor Room (Position Match): Bathroom (a-1771908569870-5e6gvkhc)
+  ➕ Adding Neighbor Room (Position Match): Kitchen (a-1771908718213-q2funyam)
+  ➕ Adding Neighbor Room (Position Match): Bathroom (a-1771908742927-malz0zl3)
+  ➕ Adding Neighbor Room (Position Match): Living Room (a-1771915464952-ddknpz4l)
+🎯 Total kept rooms: 8
+  ✨ Video: Rescuing item 'Window Elevation Horizontal' (ID: i-1771333029250-ai0sug2f) - Dist: 32.6cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771333480010-7lb66r00) - Dist: 40.3cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771333596565-mwludc1d) - Dist: 35.0cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771333624036-98xcpqc0) - Dist: 39.6cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771334644986-or1yq7j2) - Dist: 32.8cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771334652482-hofc2p52) - Dist: 39.4cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771334659387-pwdp8toz) - Dist: 36.7cm <= 85.0cm
+  ✨ Video: Rescuing item 'Duel Elevated Light' (ID: i-1771338339198-7oifz0my) - Dist: 28.4cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771412338233-1eb4etzx) - Dist: 34.1cm <= 85.0cm
+  ✨ Video: Rescuing item 'Short Pine Tree' (ID: i-1771412352971-gp935b5o) - Dist: 38.5cm <= 85.0cm
+  ✨ Video: Rescuing item 'WallMounting_Light' (ID: i-1771499700973-ypf9bh0k) - Dist: 24.1cm <= 85.0cm
+  ✨ Video: Rescuing item 'WallMounting_Light' (ID: i-1771499739561-n5bjqdp6) - Dist: 35.5cm <= 85.0cm
+  ✨ Video: Rescuing item 'Street Lamp 3' (ID: i-1771505355463-dwg12yii) - Dist: 42.2cm <= 85.0cm
+  ✨ Video: Rescuing item 'Street Lamp 3' (ID: i-1771505897735-n425p9c1) - Dist: 62.2cm <= 85.0cm
+  ✨ Video: Rescuing item 'Country_Plant' (ID: i-1771566928337-4h8ja7xq) - Dist: 46.3cm <= 85.0cm
+  ✨ Video: Rescuing item 'Country_Plant' (ID: i-1771566957607-ou8eqr9g) - Dist: 34.0cm <= 85.0cm
+  ✨ Video: Rescuing item 'Street Lamp 3' (ID: i-1771587366666-dgwhd80l) - Dist: 26.4cm <= 85.0cm
+
+🗑️  Culled 98 items:
+   - Duel Elevated Light (i-1771338350707-902zxwgh)
+   - Lawns - 1 (i-1771338542222-aolizegx)
+   - Lawns - 1 (i-1771338607035-tu8n3wl8)
+   - Lawns - 1 (i-1771338640356-qzkqr8sn)
+   - Lawns - 1 (i-1771345452670-c01u7cly)
+   - Lawns - 1 (i-1771390283873-azlq22z4)
+   - Lawns - 1 (i-1771390312151-9fhjvsxt)
+   - Lawns - 1 (i-1771390342848-eph7nu2t)
+   - Lawns - 1 (i-1771390370489-k1nj2s1h)
+   - Lawns - 1 (i-1771390442104-9tg0zpoh)
+   - Lawns - 1 (i-1771390524328-69zv6c4q)
+   - Lawns - 1 (i-1771390573019-n2yylaqs)
+   - Lawns - 1 (i-1771390587383-q19yre2i)
+   - Lawns - 1 (i-1771390608407-h4168q0y)
+   - Lawns - 1 (i-1771390727129-scr1g039)
+   - Lawns - 1 (i-1771390744541-t2z5lne2)
+   - Lawns - 1 (i-1771390790464-mqygizj5)
+   - Lawns - 1 (i-1771397824677-ve8yckjp)
+   - Lawns - 1 (i-1771397862751-b5mehp7k)
+   - Lawns - 1 (i-1771397901381-n4zgjec5)
+   - Lawns - 1 (i-1771397947756-tuh7mx7u)
+   - Lawns - 1 (i-1771397962849-nlr39n1z)
+   - Lawns - 1 (i-1771398007651-brveg4on)
+   - Lawns - 1 (i-1771398028303-97vekxb5)
+   - Lawns - 1 (i-1771398042020-hdoztvfj)
+   - Lawns - 1 (i-1771398211960-k0cujsxq)
+   - Lawns - 1 (i-1771430507665-l6k4cjqs)
+   - Lawns - 1 (i-1771430573188-l9k79hwc)
+   - Lawns - 1 (i-1771430624934-zvgf2slv)
+   - Lawns - 1 (i-1771430651430-day3dyzl)
+   - Lawns - 1 (i-1771430893982-r6kgj1k8)
+   - Lawns - 1 (i-1771465247055-n8kav5ej)
+   - Lawns - 1 (i-1771465277858-ulinkpsb)
+   - Lawns - 1 (i-1771465303284-17mpjsr8)
+   - Lawns - 1 (i-1771465311563-3yqd9woq)
+   - Lawns - 1 (i-1771465331113-pixj81qa)
+   - Lawns - 1 (i-1771465334439-gobn6q48)
+   - Lawns - 1 (i-1771465347903-ujk3zupg)
+   - Lawns - 1 (i-1771465353954-o4ercaxy)
+   - Iron Gate with Brick (i-1771471944828-ls7kq0nj)
+   - Wooden Gate (i-1771477511057-ue0q669g)
+   - Street Lamp 3 (i-1771505604607-59nra3pe)
+   - Street Lamp 3 (i-1771505628447-esfmd7ij)
+   - Grey Premium SUV Car (i-1771505732591-vmn3xc9i)
+   - WallMounting_Light (i-1771572069803-j9w9a6ui)
+   - WallMounting_Light (i-1771572088888-prb324s5)
+   - Lawns - 1 (i-1771573165482-f9okeb68)
+   - Lawns - 1 (i-1771574848676-eminz36e)
+   - Lawns - 1 (i-1771574946491-0eoj9gxk)
+   - Lawns - 1 (i-1771574986186-aabscjll)
+   - Lawns - 1 (i-1771575236533-688pnuam)
+   - Lawns - 1 (i-1771575254500-al2ok7vp)
+   - Window Elevation Horizontal (i-1771575789630-7jemk8u7)
+   - Lawns (i-1771576022487-i23qdr2p)
+   - Lawns (i-1771576242953-rzd0g70i)
+   - Lawns (i-1771576427389-6hccmfrz)
+   - Flowering Ornamental Tree (i-1771581057688-imwf0zuz)
+   - Flowering Ornamental Tree (i-1771581212797-94xv0dxf)
+   - Flowering Ornamental Tree (i-1771581240190-flcqdyds)
+   - Outdoor Table 2 (i-1771581775367-lduo9170)
+   - Wall Mounted Vertical Garden (i-1771582345379-n4fu6h3r)
+   - Wall Mounted Vertical Garden (i-1771582446062-l0487vdj)
+   - Wall Mounted Vertical Garden (i-1771582476879-o0ohau2g)
+   - Exterior Tree (i-1771583957398-vcygepgu)
+   - Exterior Tree (i-1771584062604-af4l4163)
+   - Duel Elevated Light (i-1771586117338-oxh61q06)
+   - Duel Elevated Light (i-1771586153584-ns6lfjm3)
+   - Duel Elevated Light (i-1771586182777-ao11xbgs)
+   - Duel Elevated Light (i-1771586230396-86ynxtua)
+   - Duel Elevated Light (i-1771586245607-hsznjrzf)
+   - Duel Elevated Light (i-1771586249355-xtout4hp)
+   - Duel Elevated Light (i-1771586249793-j2ykkvi8)
+   - Minimalist_Rug (i-1771587153489-4nun3n5k)
+   - Street Lamp 3 (i-1771587309401-84ia5xwa)
+   - Palm Tree (i-1771588569755-603o9v7p)
+   - Lawns - 1 (i-1771848676402-5s21sxwp)
+   - Lawns - 1 (i-1771848935535-iwjvl8t1)
+   - Lawns - 1 (i-1771848960351-7car6sl8)
+   - Lawns - 1 (i-1771848974663-ve6i1rut)
+   - Pine Tree (i-1771931429395-b0w1zti7)
+   - Pine Tree (i-1771931472933-qtiif28i)
+   - Pine Tree (i-1771931481598-7vzw6jik)
+   - Street Lamp 3 (i-1771931531668-ldifc0ss)
+   - Street Lamp 3 (i-1771931585229-iop0yida)
+   - BalconyRoof (i-1771931748924-vip7shvo)
+   - Pine Tree (i-1771932866146-0qf797ic)
+   - Pine Tree (i-1771932927855-xof6bms0)
+   - Lawns (i-1771932989049-6vkchvr9)
+   - Lawns (i-1771933091584-d46sfm7b)
+   - Street Lamp 3 (i-1771933149568-mtx83nwx)
+   - Street Lamp 3 (i-1771933163169-gsx4mq1z)
+   - Street Lamp 3 (i-1771933196859-jol58q23)
+   - Street Lamp 3 (i-1771933204692-uh3w3260)
+   - Street Lamp 3 (i-1771933482732-osf3ho7x)
+   - Street Lamp 3 (i-1771933502606-73r5s8tt)
+   - Street Lamp 3 (i-1771933524044-jjvw5yjj)
+   - Modern Wardrobe (i-1771395704318-h1xjg5nt)
+   - Modern Wardrobe (i-1771395731715-jnd6sqg3)
+
+============================================================
+📊 VIDEO CULLING SUMMARY
+============================================================
+  Camera path points analyzed: 151
+  Active rooms (camera enters): 1
+  Kept rooms (+ neighbors):     8
+  Areas:  21 -> 8  (removed 13)
+  Items:  365 -> 267  (removed 98)
+  Lines:  127 -> 51  (removed 76)
+============================================================
