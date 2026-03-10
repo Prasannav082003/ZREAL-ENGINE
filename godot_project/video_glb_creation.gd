@@ -16,7 +16,6 @@ var day_render = true
 func build_scene(data):
 	if data.has("day_render"):
 		day_render = data["day_render"]
-	setup_lighting(data)
 
 	# Unwrap floor_plan_data (may be a JSON string or already a dict)
 	var geom_data = data
@@ -33,7 +32,12 @@ func build_scene(data):
 		else:
 			geom_data = fp
 
-	build_architecture(geom_data)
+	var cam_pose = _extract_camera_pose(data)
+	setup_lighting(data)
+	var show_all_floors = data.get("showAllFloors", null)
+	if geom_data.has("showAllFloors"):
+		show_all_floors = geom_data["showAllFloors"]
+	build_architecture(geom_data, cam_pose.get("position", Vector3.ZERO), show_all_floors)
 	load_assets(geom_data)
 
 # ─────────────────────────────────────────────────────────────────
@@ -65,43 +69,72 @@ func setup_lighting(data):
 	env.background_mode = Environment.BG_SKY
 	env.sky = Sky.new()
 
-	# NOTE: SunSky (PhysicalSkyMaterial) is NOT used here.
-	# Both image and video renders use ProceduralSkyMaterial for full day/night control.
-	var sky_mat = ProceduralSkyMaterial.new()
+	var exr_path = ""
 	if day_render:
-		print("[VideoGLB] setup_lighting: DAY render")
-		sky_mat.sky_top_color         = Color(0.35, 0.46, 0.71)  # deep blue zenith
-		sky_mat.sky_horizon_color     = Color(0.64, 0.65, 0.67)  # light grey horizon
-		# Ground colours: rich grass green so the ground looks like a natural lawn.
-		sky_mat.ground_bottom_color   = Color(0.10, 0.35, 0.08)  # deep grass green
-		sky_mat.ground_horizon_color  = Color(0.30, 0.52, 0.18)  # lighter meadow green
-		sky_mat.sun_angle_max         = 30.0
-		sky_mat.sky_energy_multiplier = 1.0
-		env.ambient_light_energy      = 1.0
+		exr_path = ProjectSettings.globalize_path("res://day.exr")
+	else:
+		exr_path = ProjectSettings.globalize_path("res://night.exr")
 
-		# If no external light is provided, default to bright day light from upper-right
-		if not data.has("directional_light"):
+	var sky_material_set = false
+	if FileAccess.file_exists(exr_path):
+		var exr_image = Image.new()
+		var load_err = exr_image.load(exr_path)
+		if load_err == OK:
+			var sky_tex = ImageTexture.create_from_image(exr_image)
+			var panorama_mat = PanoramaSkyMaterial.new()
+			panorama_mat.panorama = sky_tex
+			env.sky.sky_material = panorama_mat
+			sky_material_set = true
+			print("[VideoGLB] Loaded EXR sky: ", exr_path)
+		else:
+			print("[VideoGLB] Warning: Failed to load EXR: ", exr_path)
+	else:
+		print("[VideoGLB] Warning: EXR sky file not found: ", exr_path)
+
+	if not sky_material_set:
+		# NOTE: SunSky (PhysicalSkyMaterial) is NOT used here.
+		# Both image and video renders use ProceduralSkyMaterial for full day/night control.
+		var sky_mat = ProceduralSkyMaterial.new()
+		if day_render:
+			print("[VideoGLB] setup_lighting: DAY render")
+			sky_mat.sky_top_color         = Color(0.35, 0.46, 0.71)  # deep blue zenith
+			sky_mat.sky_horizon_color     = Color(0.64, 0.65, 0.67)  # light grey horizon
+			# Ground colours: rich grass green so the ground looks like a natural lawn.
+			sky_mat.ground_bottom_color   = Color(0.10, 0.35, 0.08)  # deep grass green
+			sky_mat.ground_horizon_color  = Color(0.30, 0.52, 0.18)  # lighter meadow green
+			sky_mat.sun_angle_max         = 30.0
+			sky_mat.sky_energy_multiplier = 1.0
+			env.ambient_light_energy      = 1.0
+
+		else:
+			print("[VideoGLB] setup_lighting: NIGHT render")
+			sky_mat.sky_top_color         = Color(0.02, 0.03, 0.05)
+			sky_mat.sky_horizon_color     = Color(0.05, 0.07, 0.1)
+			sky_mat.ground_bottom_color   = Color(0.01, 0.01, 0.02)
+			sky_mat.ground_horizon_color  = Color(0.05, 0.07, 0.1)
+			sky_mat.sky_energy_multiplier = 0.15
+			env.ambient_light_energy      = 0.1
+
+
+		env.sky.sky_material = sky_mat
+
+	# Keep ambient energy consistent even when using EXR sky
+	if day_render:
+		env.ambient_light_energy = 1.0
+	else:
+		env.ambient_light_energy = 0.1
+
+	# If no external light is provided, default to day/night directional light
+	if not data.has("directional_light"):
+		if day_render:
 			dir_light.light_energy = 1.0
-			# position + look_at also works; rotation_degrees already set above as fallback
 			dir_light.position = Vector3(10, 20, 10)
 			dir_light.look_at(Vector3.ZERO)
-	else:
-		print("[VideoGLB] setup_lighting: NIGHT render")
-		sky_mat.sky_top_color         = Color(0.02, 0.03, 0.05)
-		sky_mat.sky_horizon_color     = Color(0.05, 0.07, 0.1)
-		sky_mat.ground_bottom_color   = Color(0.01, 0.01, 0.02)
-		sky_mat.ground_horizon_color  = Color(0.05, 0.07, 0.1)
-		sky_mat.sky_energy_multiplier = 0.15
-		env.ambient_light_energy      = 0.1
-
-		# If no external light is provided, default to dim moonlight
-		if not data.has("directional_light"):
+		else:
 			dir_light.light_energy = 0.1
 			dir_light.light_color  = Color(0.6, 0.7, 0.9)
 			dir_light.position = Vector3(10, 20, 10)
 			dir_light.look_at(Vector3.ZERO)
-
-	env.sky.sky_material     = sky_mat
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.tonemap_mode         = Environment.TONE_MAPPER_FILMIC
 	env.tonemap_exposure     = 1.0
@@ -119,9 +152,74 @@ func parse_vec3(d):
 	return Vector3.ZERO
 
 # ─────────────────────────────────────────────────────────────────
+# Camera pose extractor — used for ceiling visibility in single-floor mode
+# ─────────────────────────────────────────────────────────────────
+func _extract_camera_pose(data: Dictionary) -> Dictionary:
+	var cam_pos = Vector3(0, 1.6, 6)
+	var cam_target = Vector3.ZERO
+	var found = false
+
+	# Try video_animation first keyframe (threejs_camera_data is in cm)
+	if data.has("video_animation") and data["video_animation"] != null:
+		var anim = data["video_animation"]
+		var keyframes = anim.get("keyframes", [])
+		if keyframes.size() > 0:
+			var kf0 = keyframes[0]
+			var tjs = kf0.get("threejs_camera_data", null)
+			if tjs != null and typeof(tjs) == TYPE_DICTIONARY:
+				if tjs.has("position") and typeof(tjs["position"]) == TYPE_DICTIONARY:
+					var p = tjs["position"]
+					cam_pos = Vector3(float(p.get("x", 0)) * 0.01, float(p.get("y", 0)) * 0.01, float(p.get("z", 0)) * 0.01)
+					found = true
+				if tjs.has("lookAt") and typeof(tjs["lookAt"]) == TYPE_DICTIONARY:
+					var la = tjs["lookAt"]
+					cam_target = Vector3(float(la.get("x", 0)) * 0.01, float(la.get("y", 0)) * 0.01, float(la.get("z", 0)) * 0.01)
+
+	if not found and data.has("threejs_camera") and typeof(data["threejs_camera"]) == TYPE_DICTIONARY:
+		var tc = data["threejs_camera"]
+		if tc.has("position") and typeof(tc["position"]) == TYPE_DICTIONARY:
+			cam_pos = parse_vec3(tc["position"])
+			found = true
+		if tc.has("target") and typeof(tc["target"]) == TYPE_DICTIONARY:
+			cam_target = parse_vec3(tc["target"])
+
+	if not found:
+		cam_pos = Vector3(0, 1.6, 6)
+	if cam_target.distance_to(cam_pos) < 0.001:
+		cam_target = cam_pos + Vector3(0, 0, -1)
+
+	return {"position": cam_pos, "target": cam_target}
+
+func _camera_requires_ceiling(cam_pos: Vector3, layer_altitude: float, ceil_height: float, polygon: PackedVector2Array) -> bool:
+	if polygon.size() < 3:
+		return false
+	var ceiling_y = layer_altitude + ceil_height
+	if cam_pos.y > ceiling_y - 0.01:
+		return false
+	var p2 = Vector2(cam_pos.x, cam_pos.z)
+	return _point_in_polygon(p2, polygon)
+
+func _point_in_polygon(p: Vector2, poly: PackedVector2Array) -> bool:
+	var inside = false
+	var j = poly.size() - 1
+	for i in range(poly.size()):
+		var pi = poly[i]
+		var pj = poly[j]
+		var intersect = ((pi.y > p.y) != (pj.y > p.y))
+		if intersect:
+			var denom = pj.y - pi.y
+			if abs(denom) < 0.000001:
+				denom = 0.000001
+			var x_at = (pj.x - pi.x) * (p.y - pi.y) / denom + pi.x
+			if p.x < x_at:
+				inside = !inside
+		j = i
+	return inside
+
+# ─────────────────────────────────────────────────────────────────
 # Architecture — converts arrays to lookup dicts then calls shared builder
 # ─────────────────────────────────────────────────────────────────
-func build_architecture(data):
+func build_architecture(data, cam_pos = null, show_all_floors_override = null):
 	print("[VideoGLB] Building Architecture...")
 
 	# The video JSON has lines/vertices/holes/areas/items as FLAT ARRAYS
@@ -137,7 +235,14 @@ func build_architecture(data):
 		"  Holes: ", layer_data.get("holes", {}).size(),
 		"  Areas: ", layer_data.get("areas", {}).size())
 
-	_build_layer_geometry(layer_data, 0.0)
+	var show_all_floors = data.get("showAllFloors", true)
+	if show_all_floors_override != null:
+		show_all_floors = bool(show_all_floors_override)
+	if show_all_floors:
+		print("[VideoGLB] showAllFloors is true — building ceilings.")
+	else:
+		print("[VideoGLB] showAllFloors is false — ceilings hidden unless camera is inside.")
+	_build_layer_geometry(layer_data, 0.0, show_all_floors, cam_pos)
 
 # Convert list-format arrays to id-keyed dicts (matching image_glb_creation.gd layout)
 func _arrays_to_dicts(data: Dictionary) -> Dictionary:
@@ -199,7 +304,7 @@ func _arrays_to_dicts(data: Dictionary) -> Dictionary:
 # ─────────────────────────────────────────────────────────────────
 # Core geometry builder — identical logic to image_glb_creation.gd
 # ─────────────────────────────────────────────────────────────────
-func _build_layer_geometry(layer_data, layer_altitude):
+func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, cam_pos = null):
 	var csg = CSGCombiner3D.new()
 	csg.use_collision = true
 	add_child(csg)
@@ -557,6 +662,19 @@ func _build_layer_geometry(layer_data, layer_altitude):
 				var ceil_mat = StandardMaterial3D.new()
 				ceil_mat.albedo_color = Color(0.95, 0.95, 0.95)
 				ceil_poly.material = ceil_mat
+
+			# ── Ceiling visibility gate ───────────────────────────────────────
+			# If showAllFloors is false, hide ceilings by default UNLESS
+			# explicitly marked visible by scene_optimizer or camera is inside.
+			var is_visible = show_all_floors
+			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY and area["ceiling_properties"].has("isvisible"):
+				is_visible = bool(area["ceiling_properties"]["isvisible"])
+			elif not show_all_floors and cam_pos != null:
+				if _camera_requires_ceiling(cam_pos, layer_altitude, ceil_height, polygon):
+					is_visible = true
+
+			if not is_visible:
+				continue
 
 			csg.add_child(ceil_poly)
 			print("[VideoGLB] Floor/Ceiling area: ", area_id, " floor_depth=", floor_depth, " ceil_h=", ceil_height, " ceil_depth=", ceil_depth)

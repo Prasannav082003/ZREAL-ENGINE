@@ -1806,7 +1806,7 @@ def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[
     
     print(f"Executing Godot: {' '.join(cmd)}")
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=1500)
         print(res.stdout)
         if res.stderr:
             print("Godot Stderr:", res.stderr)
