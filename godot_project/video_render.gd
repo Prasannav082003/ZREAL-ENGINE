@@ -1,4 +1,4 @@
-extends "res://video_glb_creation.gd"
+﻿extends "res://video_glb_creation.gd"
 
 # video_render.gd
 # Fast video renderer using Godot's built-in MovieWriter (--write-movie).
