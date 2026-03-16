@@ -15,6 +15,10 @@ os.makedirs(CULLING_LOGS_DIR, exist_ok=True)
 # Floor-related items always kept
 FLOOR_ITEM_KEYWORDS = ["floor", "slab", "ground", "terrain", "level"]
 
+# Exterior-only items — kept ONLY in EXTERIOR mode, removed in INTERIOR mode
+# These are identified by name/type keywords (case-insensitive substring match)
+EXTERIOR_ITEM_KEYWORDS = ["roof", "grill", "balcony", "exterior", "facade", "chimney", "antenna", "gutter", "downspout"]
+
 # Item proximity rescue tolerance (cm) — catches items slightly outside polygon
 ITEM_RESCUE_TOLERANCE_CM = 85.0
 
@@ -186,6 +190,14 @@ def _flood_fill_connected_rooms(
 # INTERIOR CULLING  (video)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_exterior_asset_video(item: dict) -> bool:
+    """Check if an item is an exterior-only asset by its name/type keywords."""
+    item_type = str(item.get("type", "")).lower()
+    item_name = str(item.get("name", "")).lower()
+    full_desc = item_type + " " + item_name
+    return any(kw in full_desc for kw in EXTERIOR_ITEM_KEYWORDS)
+
+
 def _cull_interior_video(
     active_area_ids: Set[str],
     vertices: dict,
@@ -208,6 +220,7 @@ def _cull_interior_video(
     Remove:
       • All rooms not reachable from any active room
       • Walls, holes, items outside kept rooms
+      • Exterior-only items (roof, grill, balcony, etc.) — even if geometrically inside
     """
     log_fn(f"  ── Interior Culling (Video) ──")
 
@@ -276,6 +289,12 @@ def _cull_interior_video(
         if any(kw in item_type or kw in item_name for kw in FLOOR_ITEM_KEYWORDS):
             new_items[iid] = item
             log_fn(f"  🛡️ Preserving Floor Asset: '{item.get('name')}' ({iid})")
+            continue
+
+        # Remove exterior-only assets (roof, grill, balcony) in interior render
+        if _is_exterior_asset_video(item):
+            culled_items.append(f"{item.get('name', 'Unknown')} ({iid}) [exterior-only asset]")
+            log_fn(f"  🗑️ Removing exterior-only asset in interior render: '{item.get('name', 'Unknown')}' ({iid})")
             continue
 
         ix, iy = item.get("x", 0), item.get("y", 0)
@@ -349,37 +368,58 @@ def _cull_exterior_video(
     EXTERIOR MODE — entire camera path is outside all rooms.
 
     Keep:
-      • ALL walls, areas, holes (building shell + openings)
-      • Window/door openings appear BLACK — no interior geometry behind them
+      • ALL walls, areas (building shell)
+      • ALL holes (doors/windows) — marked with is_exterior_black=true
+        so the renderer fills openings with BLACK (no interior visible)
+      • Exterior-named items (roof, grill, balcony, etc.) — by keyword match
       • Items physically outside all room polygons (garden, trees, etc.)
       • Floor assets always
 
     Remove:
-      • ALL interior furniture/items inside room polygons
-      • Only exception: architectural wall fittings with explicit line/hole refs
+      • ALL interior items inside room polygons
+        (sofas, fridges, lights, frames, pictures, mirrors, etc.)
+      • Wall fittings are NOT preserved — in exterior mode, nothing inside
+        the building should be visible through the black windows
+
+    All holes (doors/windows/openings) are flagged is_exterior_black=true
+    so the Godot renderer places a black blocker in the opening. This is
+    purely geometry-based — no name matching is used for holes.
     """
     log_fn(f"  ── Exterior Culling (Video) ──")
 
     # Keep all architectural geometry intact
     new_areas    = dict(areas)
     new_lines    = dict(lines)
-    new_holes    = dict(holes)
     new_vertices = dict(vertices)
 
     log_fn(f"  ✓ Keeping ALL {len(new_areas)} areas  (structural mesh)")
     log_fn(f"  ✓ Keeping ALL {len(new_lines)} walls  (building shell)")
-    log_fn(f"  ✓ Keeping ALL {len(new_holes)} holes  (openings → black from outside)")
 
     for aid, area in new_areas.items():
         log_fn(f"     ✓ Area: {area.get('name', 'Unknown')} ({aid})")
-    for hid, hole in new_holes.items():
-        log_fn(f"     ✓ Hole ({hole.get('type','?')}): {hole.get('name', hid)}")
+
+    # ── Mark ALL holes as exterior-black ──────────────────────────────────────
+    # Every door/window/opening gets is_exterior_black=true so the renderer
+    # places a black plane in the opening. This uses geometry (holes dict),
+    # NOT name-based matching.
+    new_holes = {}
+    for hid, hole in holes.items():
+        hole_copy = dict(hole)
+        hole_copy["is_exterior_black"] = True
+        new_holes[hid] = hole_copy
+        log_fn(f"     ⚫ Hole marked BLACK: ({hole.get('type','?')}) {hole.get('name', hid)}")
+
+    log_fn(f"  ⚫ Marked ALL {len(new_holes)} holes as is_exterior_black=true")
 
     # ── Filter items ──────────────────────────────────────────────────────────
+    # In exterior mode:
+    #   - Keep: floor assets, exterior-named items (roof/grill/balcony),
+    #           items physically outside all room polygons
+    #   - Remove: EVERYTHING else (all interior items, wall fittings,
+    #             frames, pictures, mirrors, etc.)
     new_items:           Dict[str, Any] = {}
     culled_items:        List[str]      = []
     kept_exterior_items: List[str]      = []
-    kept_wall_items:     List[str]      = []
 
     for iid, item in items.items():
         item_type = str(item.get("type", "")).lower()
@@ -392,66 +432,35 @@ def _cull_exterior_video(
             log_fn(f"  🛡️ Preserving Floor Asset: '{item.get('name')}' ({iid})")
             continue
 
+        # Keep exterior-named assets (roof, grill, balcony, etc.) — by keyword
+        if _is_exterior_asset_video(item):
+            new_items[iid] = item
+            kept_exterior_items.append(f"{item.get('name', 'Unknown')} ({iid}) [exterior keyword]")
+            log_fn(
+                f"  🏠 Keeping exterior-named asset: "
+                f"'{item.get('name', 'Unknown')}' ({iid})"
+            )
+            continue
+
         # Item outside all room polygons → external → keep
         is_outside = not _point_in_any_area(ix, iy, areas, vertices)
         if is_outside:
             new_items[iid] = item
-            kept_exterior_items.append(f"{item.get('name', 'Unknown')} ({iid})")
+            kept_exterior_items.append(f"{item.get('name', 'Unknown')} ({iid}) [outside rooms]")
             log_fn(
                 f"  🌳 Keeping external item (outside all rooms): "
                 f"'{item.get('name', 'Unknown')}' ({iid}) at ({ix:.1f}, {iy:.1f})"
             )
             continue
 
-        # Item is inside a room — only keep if it is an architectural wall fitting
-        is_wall_fitting = bool(item.get("line") or item.get("hole"))
-
-        if not is_wall_fitting:
-            WALL_FITTING_PROXIMITY_CM = 30.0
-            for lid, line in lines.items():
-                if not line.get("holes"):
-                    continue
-                v_ids = line.get("vertices", [])
-                if len(v_ids) < 2:
-                    continue
-                v1d = vertices.get(v_ids[0])
-                v2d = vertices.get(v_ids[1])
-                if not v1d or not v2d:
-                    continue
-                x1 = v1d.get("x", 0); y1 = v1d.get("y", 0)
-                x2 = v2d.get("x", 0); y2 = v2d.get("y", 0)
-                dx, dy = x2 - x1, y2 - y1
-                if dx == 0 and dy == 0:
-                    dist = math.hypot(ix - x1, iy - y1)
-                else:
-                    t    = ((ix - x1) * dx + (iy - y1) * dy) / (dx * dx + dy * dy)
-                    t    = max(0.0, min(1.0, t))
-                    cx_p = x1 + t * dx
-                    cy_p = y1 + t * dy
-                    dist = math.hypot(ix - cx_p, iy - cy_p)
-                if dist <= WALL_FITTING_PROXIMITY_CM:
-                    is_wall_fitting = True
-                    break
-
-        if is_wall_fitting:
-            new_items[iid] = item
-            kept_wall_items.append(f"{item.get('name', 'Unknown')} ({iid})")
-            log_fn(f"  🚪 Keeping wall/door/window fitting: '{item.get('name', 'Unknown')}' ({iid})")
-            continue
-
-        # Interior furniture → cull
+        # Everything else inside rooms → cull (no wall-fitting exceptions)
         culled_items.append(f"{item.get('name', 'Unknown')} ({iid})")
         log_fn(f"  🗑️ Culling interior item: '{item.get('name', 'Unknown')}' ({iid})")
 
     if kept_exterior_items:
-        log_fn(f"\n  🌳 Kept {len(kept_exterior_items)} external items:")
+        log_fn(f"\n  🌳 Kept {len(kept_exterior_items)} exterior items:")
         for ei in kept_exterior_items:
             log_fn(f"     + {ei}")
-
-    if kept_wall_items:
-        log_fn(f"\n  🚪 Kept {len(kept_wall_items)} wall/door/window fittings:")
-        for wi in kept_wall_items:
-            log_fn(f"     + {wi}")
 
     if culled_items:
         log_fn(f"\n  🗑️  Culled {len(culled_items)} interior items:")
@@ -685,11 +694,12 @@ class VideoSceneOptimizer:
 
             # ── 8. Reconstruct data structure ─────────────────────────────────
             if not is_flat and layer is not None:
-                layer["vertices"] = new_vertices
-                layer["lines"]    = new_lines
-                layer["areas"]    = new_areas
-                layer["items"]    = new_items
-                layer["holes"]    = new_holes
+                layer["vertices"]    = new_vertices
+                layer["lines"]       = new_lines
+                layer["areas"]       = new_areas
+                layer["items"]       = new_items
+                layer["holes"]       = new_holes
+                layer["render_mode"] = render_mode  # Pass to Godot renderer
             else:
                 def dict_to_list_if_was_list(key, new_dict):
                     return (
