@@ -49,6 +49,7 @@ ASSETS_AND_TEXTURE_API_HEADER_NAME = "ZRealtyServiceApiKey"
 ASSET_ENDPOINT = "http://216.48.182.24:4050/api/v1/AssetMaster/GetAllAssets3D"
 TEXTURE_ENDPOINT = "http://216.48.182.24:4050/api/v1/TextureMaster/GetAllTextureLibraries"
 
+
 # Global Cache for Master Data
 _CACHED_ASSETS_MAP = {}
 _CACHED_TEXTURES_MAP = {}
@@ -507,12 +508,84 @@ def _graceful_shutdown(signum, frame):
     # Don't call sys.exit() - let the server shut down naturally
     # This prevents SystemExit from propagating through async operations
 
+FAILED_INPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "failed_inputs")
+os.makedirs(FAILED_INPUTS_DIR, exist_ok=True)
+
+# Maximum number of render attempts before marking a job as permanently failed
+MAX_RENDER_ATTEMPTS = 3
+
+def _save_failed_input(job_data: dict, error_msg: str, attempt: int):
+    """
+    Saves the failed render input JSON and error details to the failed_inputs/ folder.
+    Files are named based on user_id and project_id for easy identification.
+    """
+    try:
+        user_id = job_data.get('user_id', 'unknown')
+        project_id = job_data.get('project_id', 'unknown')
+        gallery_id = job_data.get('gallery_id', 'unknown')
+        job_id = job_data.get('job_id', 'unknown')
+        job_type = job_data.get('type', 'unknown')
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        # Base name: user_{user_id}_project_{project_id}_{timestamp}
+        base_name = f"user_{user_id}_project_{project_id}_{timestamp_str}"
+
+        # 1. Save the input JSON payload
+        input_json_path = os.path.join(FAILED_INPUTS_DIR, f"{base_name}_input.json")
+        payload_obj = job_data.get('payload')
+        if payload_obj is not None:
+            # Pydantic model → dict if possible
+            try:
+                payload_dict = payload_obj.dict() if hasattr(payload_obj, 'dict') else payload_obj
+            except Exception:
+                payload_dict = str(payload_obj)
+            with open(input_json_path, 'w', encoding='utf-8') as f:
+                json.dump(payload_dict, f, indent=2, ensure_ascii=False, default=str)
+        else:
+            with open(input_json_path, 'w', encoding='utf-8') as f:
+                json.dump({"error": "payload was None"}, f, indent=2)
+
+        # 2. Save the error details text file
+        error_txt_path = os.path.join(FAILED_INPUTS_DIR, f"{base_name}_error.txt")
+        with open(error_txt_path, 'w', encoding='utf-8') as f:
+            f.write(f"{'='*60}\n")
+            f.write(f"RENDER FAILURE REPORT\n")
+            f.write(f"{'='*60}\n\n")
+            f.write(f"Timestamp      : {datetime.now().isoformat()}\n")
+            f.write(f"Job ID         : {job_id}\n")
+            f.write(f"Job Type       : {job_type.upper()}\n")
+            f.write(f"User ID        : {user_id}\n")
+            f.write(f"Project ID     : {project_id}\n")
+            f.write(f"Gallery ID     : {gallery_id}\n")
+            f.write(f"Total Attempts : {attempt}/{MAX_RENDER_ATTEMPTS}\n")
+            f.write(f"\n{'─'*60}\n")
+            f.write(f"ERROR DETAILS:\n")
+            f.write(f"{'─'*60}\n")
+            f.write(f"{error_msg}\n")
+            f.write(f"\n{'='*60}\n")
+
+        print(f"{COLOR_YELLOW}📁 Failed input saved to: {FAILED_INPUTS_DIR}{COLOR_RESET}")
+        print(f"   📄 Input JSON : {os.path.basename(input_json_path)}")
+        print(f"   📄 Error File : {os.path.basename(error_txt_path)}")
+
+    except Exception as save_err:
+        print(f"{COLOR_RED}⚠️  Could not save failed input: {save_err}{COLOR_RESET}")
+
+
 def render_queue_worker():
     """
     Background worker thread that processes render jobs one at a time from the queue.
-    This prevents multiple Unreal Engine instances from running simultaneously.
+    This prevents multiple Godot/Unreal Engine instances from running simultaneously.
+
+    RETRY PIPELINE:
+      • Each job is attempted up to MAX_RENDER_ATTEMPTS (3) times.
+      • On attempts 1 and 2: failure is logged but NO error status is sent to
+        the external API. The job is silently retried.
+      • On the final attempt (3rd): if it still fails, the error status IS sent,
+        the input JSON and failure reason are saved to failed_inputs/, and
+        the worker moves on to the next job.
     """
-    print(f"\n{'='*80}\n🔄 RENDER QUEUE WORKER STARTED\n{'='*80}\n")
+    print(f"\n{'='*80}\n🔄 RENDER QUEUE WORKER STARTED (with retry pipeline: max {MAX_RENDER_ATTEMPTS} attempts)\n{'='*80}\n")
     
     while True:
         try:
@@ -558,61 +631,134 @@ def render_queue_worker():
             print(f"Job ID: {job_id}")
             print(f"Type: {job_type.upper()}")
             print(f"Queue Size: {render_queue.qsize()} remaining")
+            print(f"Max Attempts: {MAX_RENDER_ATTEMPTS}")
             print(f"{'='*80}\n")
             
-            try:
-                # Execute the appropriate render function
-                if job_type == 'image':
-                    _background_render_task(
-                        job_data['project_id'],
-                        job_data['gallery_id'],
-                        job_data['payload'],
-                        job_id,
-                        job_data['user_id']
-                    )
-                elif job_type == 'video':
-                    _background_video_render_task(
-                        job_data['project_id'],
-                        job_data['gallery_id'],
-                        job_data['payload'],
-                        job_id,
-                        job_data['user_id']
-                    )
-                
-                # Mark job as completed
-                with queue_lock:
-                    if job_id in active_jobs:
-                        active_jobs[job_id]['status'] = 'completed'
-                        active_jobs[job_id]['completed_at'] = datetime.now().isoformat()
-                        active_jobs[job_id]['progress'] = 100
-                        active_jobs[job_id]['current_step'] = 'completed'
-                        active_jobs[job_id]['message'] = 'Render completed successfully'
-                
-                # UPDATE GLOBAL STATUS - FINISHED
-                _update_global_status(job_id=job_id, status='completed')
-
-                print(f"\n{COLOR_GREEN}✅ Job {job_id} completed successfully{COLOR_RESET}\n")
-                
-            except Exception as e:
-                # Mark job as failed
-                with queue_lock:
-                    if job_id in active_jobs:
-                        active_jobs[job_id]['status'] = 'failed'
-                        active_jobs[job_id]['error'] = str(e)
-                        active_jobs[job_id]['failed_at'] = datetime.now().isoformat()
-                        active_jobs[job_id]['progress'] = 0
-                        active_jobs[job_id]['current_step'] = 'failed'
-                        active_jobs[job_id]['message'] = f'Render failed: {str(e)}'
-                
-                # UPDATE GLOBAL STATUS - FAILED
-                _update_global_status(job_id=job_id, status='failed')
-
-                print(f"\n{COLOR_RED}❌ Job {job_id} failed: {str(e)}{COLOR_RESET}\n")
+            # ── RETRY LOOP ──────────────────────────────────────────────
+            job_succeeded = False
+            last_error_msg = ""
             
-            finally:
-                # Mark task as done in queue
-                render_queue.task_done()
+            for attempt in range(1, MAX_RENDER_ATTEMPTS + 1):
+                is_final_attempt = (attempt == MAX_RENDER_ATTEMPTS)
+                
+                try:
+                    if attempt > 1:
+                        print(f"\n{'─'*60}")
+                        print(f"🔄 RETRY ATTEMPT {attempt}/{MAX_RENDER_ATTEMPTS} for Job {job_id}")
+                        print(f"{'─'*60}\n")
+                        
+                        # Brief pause before retry to let resources settle
+                        time.sleep(3)
+                        
+                        # Reset job status for retry
+                        with queue_lock:
+                            if job_id in active_jobs:
+                                active_jobs[job_id]['status'] = 'processing'
+                                active_jobs[job_id]['progress'] = 0
+                                active_jobs[job_id]['current_step'] = f'retry_{attempt}'
+                                active_jobs[job_id]['message'] = f'Retrying render (attempt {attempt}/{MAX_RENDER_ATTEMPTS})...'
+                        
+                        _update_global_status(
+                            job_id=job_id,
+                            status='processing',
+                            step=f'Retry attempt {attempt}/{MAX_RENDER_ATTEMPTS}',
+                            progress=0,
+                            message=f'Retrying render (attempt {attempt}/{MAX_RENDER_ATTEMPTS})...',
+                            project_id=job_data.get('project_id'),
+                            gallery_id=job_data.get('gallery_id'),
+                            job_type=job_type
+                        )
+                    
+                    # Execute the appropriate render function
+                    # suppress_error_status=True on non-final attempts:
+                    #   → prevents sending error status to API during retries
+                    #   → re-raises exception so retry loop can catch it
+                    # suppress_error_status=False on final attempt:
+                    #   → normal error handling (sends error status to API)
+                    suppress = not is_final_attempt
+                    
+                    if job_type == 'image':
+                        _background_render_task(
+                            job_data['project_id'],
+                            job_data['gallery_id'],
+                            job_data['payload'],
+                            job_id,
+                            job_data['user_id'],
+                            suppress_error_status=suppress
+                        )
+                    elif job_type == 'video':
+                        _background_video_render_task(
+                            job_data['project_id'],
+                            job_data['gallery_id'],
+                            job_data['payload'],
+                            job_id,
+                            job_data['user_id'],
+                            suppress_error_status=suppress
+                        )
+                    
+                    # If we reach here, the render succeeded
+                    job_succeeded = True
+                    
+                    # Mark job as completed
+                    with queue_lock:
+                        if job_id in active_jobs:
+                            active_jobs[job_id]['status'] = 'completed'
+                            active_jobs[job_id]['completed_at'] = datetime.now().isoformat()
+                            active_jobs[job_id]['progress'] = 100
+                            active_jobs[job_id]['current_step'] = 'completed'
+                            active_jobs[job_id]['message'] = 'Render completed successfully'
+                            if attempt > 1:
+                                active_jobs[job_id]['message'] = f'Render completed successfully (after {attempt} attempts)'
+                    
+                    # UPDATE GLOBAL STATUS - FINISHED
+                    _update_global_status(job_id=job_id, status='completed')
+
+                    if attempt > 1:
+                        print(f"\n{COLOR_GREEN}✅ Job {job_id} completed successfully on attempt {attempt}/{MAX_RENDER_ATTEMPTS}{COLOR_RESET}\n")
+                    else:
+                        print(f"\n{COLOR_GREEN}✅ Job {job_id} completed successfully{COLOR_RESET}\n")
+                    
+                    break  # Exit retry loop on success
+                    
+                except Exception as e:
+                    last_error_msg = str(e)
+                    
+                    if not is_final_attempt:
+                        # ── NOT THE FINAL ATTEMPT: log but DO NOT send fail status ──
+                        print(f"\n{COLOR_YELLOW}⚠️  Job {job_id} failed on attempt {attempt}/{MAX_RENDER_ATTEMPTS}: {last_error_msg}{COLOR_RESET}")
+                        print(f"{COLOR_YELLOW}   → Will retry ({MAX_RENDER_ATTEMPTS - attempt} attempt(s) remaining)...{COLOR_RESET}\n")
+                        # Do NOT send status update — silent retry
+                        continue
+                    else:
+                        # ── FINAL ATTEMPT FAILED: send fail status + save to failed_inputs ──
+                        print(f"\n{COLOR_RED}{'='*80}")
+                        print(f"❌ Job {job_id} PERMANENTLY FAILED after {MAX_RENDER_ATTEMPTS} attempts")
+                        print(f"   Last error: {last_error_msg}")
+                        print(f"{'='*80}{COLOR_RESET}\n")
+                        
+                        # Mark job as failed
+                        with queue_lock:
+                            if job_id in active_jobs:
+                                active_jobs[job_id]['status'] = 'failed'
+                                active_jobs[job_id]['error'] = last_error_msg
+                                active_jobs[job_id]['failed_at'] = datetime.now().isoformat()
+                                active_jobs[job_id]['progress'] = 0
+                                active_jobs[job_id]['current_step'] = 'failed'
+                                active_jobs[job_id]['message'] = f'Render failed after {MAX_RENDER_ATTEMPTS} attempts: {last_error_msg}'
+                                active_jobs[job_id]['total_attempts'] = MAX_RENDER_ATTEMPTS
+                        
+                        # UPDATE GLOBAL STATUS - FAILED (only on final attempt)
+                        _update_global_status(job_id=job_id, status='failed')
+                        
+                        # Save the failed input JSON + error details to failed_inputs/
+                        import traceback
+                        full_error_msg = f"{last_error_msg}\n\nFull Traceback:\n{traceback.format_exc()}"
+                        _save_failed_input(job_data, full_error_msg, attempt)
+                        
+                        print(f"{COLOR_RED}❌ Job {job_id} failed permanently. Moving to next job.{COLOR_RESET}\n")
             
+            # ── End of retry loop ────────────────────────────────────────
+            render_queue.task_done()
 
                 
         except Exception as e:
@@ -1794,19 +1940,21 @@ def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[
     godot_exe = GODOT_EXE
     project_path = GODOT_PROJECT_PATH
     
-    # Arguments: --headless --path <project> "res://main.tscn" -- <input> <output>
-    cmd = [
-        godot_exe,
+    # Arguments: --path <project> "res://main.tscn" -- <input> <output>
+    # NOTE: Do NOT use --headless for renders; headless disables rendering in Godot 4.x.
+    cmd = [godot_exe]
+    cmd.extend([
         "--path", project_path,
         "res://main.tscn",
         "--",
         input_json_path,
         output_image_path
-    ]
+    ])
     
     print(f"Executing Godot: {' '.join(cmd)}")
+    
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=1500)
         print(res.stdout)
         if res.stderr:
             print("Godot Stderr:", res.stderr)
@@ -2480,7 +2628,7 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
 
 # --- BACKGROUND RENDER TASK ---
 
-def _background_render_task(project_id: int, gallery_id: int, payload: GenerationPayload, job_id: str, user_id: int = 0):
+def _background_render_task(project_id: int, gallery_id: int, payload: GenerationPayload, job_id: str, user_id: int = 0, suppress_error_status: bool = False):
     """The main function that runs in the background to perform the full render and upload pipeline."""
     logger = RenderLogger(job_id)
     logger.start_process()
@@ -2554,10 +2702,18 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
         print(f"\n{'='*80}\n{COLOR_RED}❌ ERROR IN BACKGROUND TASK{COLOR_RESET}\n{'='*80}\nJob ID: {job_id}\nError: {error_msg}\n{'='*80}\n")
         import traceback
         traceback.print_exc()
+        
+        if suppress_error_status:
+            # Re-raise so the retry loop can catch it and retry
+            logger.add_interrupt("error", error_msg)
+            logger.end_process(success=False, error=error_msg)
+            raise
+        
         if enable_status_updates:
-            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, "Something went wrong. Please try again.", render_type="IMAGE", logger=logger)
+            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, "Scene is too large to render. Please try a different setup.", render_type="IMAGE", logger=logger)
         logger.add_interrupt("error", error_msg)
         logger.end_process(success=False, error=error_msg)
+        raise  # Always propagate so retry loop detects the failure
     finally:
         pass
 
@@ -2638,16 +2794,17 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
     fps = payload.video_animation.fps if payload.video_animation else 30
     
     # 4. Run Godot with MovieWriter
-    cmd = [
-        godot_exe,
+    # NOTE: Do NOT use --headless for renders; headless disables rendering in Godot 4.x.
+    cmd = [godot_exe]
+    cmd.extend([
         "--path", project_path,
-        "--write-movie", avi_filename,  # Simple filename — Godot saves in project dir
+        "--write-movie", avi_filename,  # Simple filename - Godot saves in project dir
         "--fixed-fps", str(fps),
         "res://video_main.tscn",
         "--",
         input_json_path,
         temp_img_base  # passed so GDScript knows where to save PNGs if MovieWriter fails
-    ]
+    ])
     
     print(f"🚀 Running Godot MovieWriter Command: {' '.join(cmd)}")
     
@@ -2770,7 +2927,7 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
         else:
             raise Exception("Video encoding failed — no AVI or PNG frames produced")
 
-def _background_video_render_task(project_id: int, gallery_id: int, payload: VideoGenerationPayload, job_id: str, user_id: int = 0):
+def _background_video_render_task(project_id: int, gallery_id: int, payload: VideoGenerationPayload, job_id: str, user_id: int = 0, suppress_error_status: bool = False):
     """The main function that runs in the background to perform the full video render and upload pipeline."""
     logger = RenderLogger(job_id)
     logger.start_process()
@@ -2852,10 +3009,18 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
         print(f"\n{'='*80}\n{COLOR_RED}❌ ERROR IN VIDEO BACKGROUND TASK{COLOR_RESET}\n{'='*80}\nJob ID: {job_id}\nError: {error_msg}\n{'='*80}\n")
         import traceback
         traceback.print_exc()
+        
+        if suppress_error_status:
+            # Re-raise so the retry loop can catch it and retry
+            logger.add_interrupt("error", error_msg)
+            logger.end_process(success=False, error=error_msg)
+            raise
+        
         if enable_status_updates:
-            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, "Something went wrong. Please try again.", render_type="VIDEO", logger=logger)
+            _send_status_update(project_id, gallery_id, user_id, job_id, "error", "error", 0, "Scene is too large to render. Please try a different setup.", render_type="VIDEO", logger=logger)
         logger.add_interrupt("error", error_msg)
         logger.end_process(success=False, error=error_msg)
+        raise  # Always propagate so retry loop detects the failure
     finally:
         pass
 

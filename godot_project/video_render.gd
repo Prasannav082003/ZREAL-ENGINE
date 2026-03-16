@@ -1,4 +1,4 @@
-﻿extends "res://video_glb_creation.gd"
+extends "res://video_glb_creation.gd"
 
 # video_render.gd
 # Fast video renderer using Godot's built-in MovieWriter (--write-movie).
@@ -76,8 +76,9 @@ func _ready():
 		return
 		
 	var data = json.data
-	
-	# Build the 3D scene
+	_setup_render(data, output_path)
+
+func _setup_render(data, output_path):
 	_render_data = data   # Cache for later use by setup_fixed_fill_lights()
 	_output_path = output_path  # Store for save_logs at completion
 	set_resolution(data)

@@ -1,0 +1,29 @@
+============================================================
+RENDER FAILURE REPORT
+============================================================
+
+Timestamp      : 2026-03-12T01:21:53.975775
+Job ID         : b47ce47b-c336-436d-968a-0ebca03f143f
+Job Type       : IMAGE
+User ID        : 0
+Project ID     : 2954
+Gallery ID     : 3132
+Total Attempts : 3/3
+
+────────────────────────────────────────────────────────────
+ERROR DETAILS:
+────────────────────────────────────────────────────────────
+Godot did not produce an output image.
+
+Full Traceback:
+Traceback (most recent call last):
+  File "C:\Zlendo2026\4k_Unreal_Engine_v1 - godot\main.py", line 681, in render_queue_worker
+    _background_render_task(
+  File "C:\Zlendo2026\4k_Unreal_Engine_v1 - godot\main.py", line 2677, in _background_render_task
+    output_image_path = _run_godot_render(job_id, payload, logger=logger)
+  File "C:\Zlendo2026\4k_Unreal_Engine_v1 - godot\main.py", line 1970, in _run_godot_render
+    raise Exception("Godot did not produce an output image.")
+Exception: Godot did not produce an output image.
+
+
+============================================================

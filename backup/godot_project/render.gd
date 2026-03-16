@@ -4,6 +4,7 @@ extends "res://image_glb_creation.gd"
 # Main entry point for rendering. Handles arguments, camera, and rendering output.
 var use_threejs = true
 var convert_blender_camera = true
+var _headless = OS.has_feature("headless") or OS.has_feature("server")
 
 func _ready():
 	print("Godot Renderer Started (Split Architecture)")
@@ -186,31 +187,20 @@ func setup_camera(data):
 
 func render_image(data, output_path):
 	print("Rendering Single Image...")
-	await get_tree().process_frame
-	await get_tree().process_frame
+	await _wait_frames(2)
 	var cam = get_node_or_null("MainCamera")
 	if cam:
 		setup_smart_point_lights(cam)
 		# Wait one more frame for lights to register if needed, 
 		# though OmniLight3D is usually immediate for the next force_draw
-		await get_tree().process_frame
-		
-	RenderingServer.force_draw()
-	for i in range(32): await get_tree().process_frame
-	await RenderingServer.frame_post_draw
+		await _wait_frames(1)
 	
-	var vp = get_viewport()
-	print("Viewport Size: ", vp.size)
-	var tex = vp.get_texture()
-	if tex:
-		var img = tex.get_image()
-		if img and not img.is_empty():
-			img.save_png(output_path)
-			print("Image saved to: ", output_path)
-		else:
-			print("Error: Image empty.")
+	var img = await _capture_viewport_image(6)
+	if img:
+		img.save_png(output_path)
+		print("Image saved to: ", output_path)
 	else:
-		print("Error: Viewport texture null.")
+		print("Error: Failed to capture image from viewport.")
 	
 	save_logs(data, output_path)
 	get_tree().quit(0)
@@ -343,11 +333,14 @@ func render_video(data, output_base_path):
 		cam.position = start_pos.lerp(end_pos, t)
 		setup_smart_point_lights(cam)
 		
-		await get_tree().process_frame
+		await _wait_frames(1)
 		
-		var img = get_viewport().get_texture().get_image()
+		var img = await _capture_viewport_image(3)
 		var frame_filename = "%s_%04d.png" % [base_filename, frame]
-		img.save_png(frame_filename)
+		if img:
+			img.save_png(frame_filename)
+		else:
+			print("Warning: empty frame at index ", frame)
 		
 		if frame % 10 == 0:
 			print("Rendered frame ", frame, "/", total_frames)
@@ -417,3 +410,20 @@ func _get_safe_pos(start: Vector3, end: Vector3, space_state: PhysicsDirectSpace
 		return hit_pos - dir * back_off
 		
 	return end
+
+func _wait_frames(count: int) -> void:
+	for i in range(count):
+		await get_tree().process_frame
+
+func _capture_viewport_image(retries: int = 3):
+	var vp = get_viewport()
+	for i in range(max(1, retries)):
+		RenderingServer.force_draw()
+		await get_tree().process_frame
+		var tex = vp.get_texture()
+		if tex:
+			var img = tex.get_image()
+			if img and not img.is_empty():
+				return img
+		await get_tree().process_frame
+	return null

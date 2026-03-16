@@ -7,6 +7,7 @@ extends "res://video_glb_creation.gd"
 
 var use_threejs = true
 var convert_blender_camera = true
+var _headless = OS.has_feature("headless") or OS.has_feature("server")
 
 # Video state
 var _keyframes = []
@@ -52,15 +53,14 @@ func _ready():
 	print("Input JSON: ", input_json_path)
 	print("Output Path: ", output_path)
 	
-	# Detect if MovieWriter is active
-	_use_movie_writer = Engine.get_write_movie_path() != ""
-	if _use_movie_writer:
-		print("MovieWriter ACTIVE - recording to: ", Engine.get_write_movie_path())
+	# Pure headless path: always render PNG sequence (no MovieWriter)
+	_use_movie_writer = false
+	_use_png_fallback = true
+	if output_path != "":
+		_base_filename = output_path.get_basename()
 	else:
-		print("MovieWriter NOT active - using PNG fallback")
-		_use_png_fallback = true
-		if output_path != "":
-			_base_filename = output_path.get_basename()
+		_base_filename = "frame"
+	print("Headless render active - PNG sequence output base: ", _base_filename)
 	
 	if not FileAccess.file_exists(input_json_path):
 		print("Error: Input file does not exist: ", input_json_path)
@@ -76,8 +76,12 @@ func _ready():
 		return
 		
 	var data = json.data
-	
-	# Build the 3D scene
+	_setup_render(data, output_path)
+	# Use deterministic headless render loop (no _process / MovieWriter)
+	set_process(false)
+	call_deferred("_render_video_headless")
+
+func _setup_render(data, output_path):
 	_render_data = data   # Cache for later use by setup_fixed_fill_lights()
 	_output_path = output_path  # Store for save_logs at completion
 	set_resolution(data)
@@ -173,6 +177,46 @@ func _process(_delta):
 		print("Frame ", _current_frame, "/", _total_frames, " (", pct, "%)")
 	
 	_current_frame += 1
+
+func _render_video_headless():
+	# Warmup phase
+	if _warmup_frames > 0:
+		await _wait_frames(_warmup_frames)
+	
+	# Generate auto-pan AFTER scene has settled
+	if _needs_auto_pan:
+		_generate_horizontal_pan(_total_frames)
+		_needs_auto_pan = false
+		if _keyframes.size() > 0:
+			_apply_keyframe(0)
+	
+	if _total_frames <= 0:
+		print("Error: No frames to render.")
+		get_tree().quit(1)
+		return
+	
+	print("Scene settled. Starting headless video render...")
+	
+	var base_filename = _base_filename if _base_filename != "" else "frame"
+	
+	for frame in range(_total_frames):
+		_apply_keyframe(frame)
+		var img = await _capture_viewport_image(3)
+		if img and not img.is_empty():
+			var frame_filename = "%s_%04d.png" % [base_filename, frame]
+			img.save_png(frame_filename)
+		else:
+			print("Warning: empty frame at index ", frame)
+		
+		if frame % 10 == 0 or frame == _total_frames - 1:
+			var pct = int(float(frame) / float(_total_frames) * 100.0)
+			print("Frame ", frame, "/", _total_frames, " (", pct, "%)")
+	
+	print("============================================================")
+	print("VIDEO RENDER COMPLETE - ", _total_frames, " frames rendered.")
+	print("============================================================")
+	save_logs(_render_data, _output_path)
+	get_tree().quit(0)
 
 func _apply_keyframe(frame_idx: int):
 	var cam = get_node_or_null("MainCamera")
@@ -408,6 +452,23 @@ func _generate_horizontal_pan(total_frames: int):
 	
 	print("Generated ", _keyframes.size(), " horizontal pan keyframes")
 	print("  Start: ", start_pos, " Target: ", target_point, " Pan: ", pan_distance, "m")
+
+func _wait_frames(count: int) -> void:
+	for i in range(count):
+		await get_tree().process_frame
+
+func _capture_viewport_image(retries: int = 3):
+	var vp = get_viewport()
+	for i in range(max(1, retries)):
+		RenderingServer.force_draw()
+		await get_tree().process_frame
+		var tex = vp.get_texture()
+		if tex:
+			var img = tex.get_image()
+			if img and not img.is_empty():
+				return img
+		await get_tree().process_frame
+	return null
 
 # ─────────────────────────────────────────────────────────────────
 # Resolution
