@@ -25,6 +25,11 @@ ITEM_RESCUE_TOLERANCE_CM = 85.0
 # Tolerance for matching vertex positions between rooms (cm)
 POSITION_TOLERANCE_CM = 1.0
 
+# Interior precision-culling defaults
+DEFAULT_FOV_HALF_DEG = 30.0
+DEFAULT_VIEW_DISTANCE_CM = 4500.0
+PORTAL_ANGLE_MARGIN_DEG = 5.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GEOMETRY HELPERS
@@ -79,6 +84,186 @@ def _min_dist_to_polygon(ix: float, iy: float, poly_verts: List[Tuple[float, flo
         if dist < min_dist:
             min_dist = dist
     return min_dist
+
+
+def _angle_to_point(
+    cam_x: float,
+    cam_y: float,
+    dir_x: float,
+    dir_y: float,
+    px: float,
+    py: float,
+) -> float:
+    """Signed angle (radians) from camera forward direction to a point."""
+    dx, dy = px - cam_x, py - cam_y
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        return 0.0
+    cos_a = max(-1.0, min(1.0, (dx * dir_x + dy * dir_y) / dist))
+    return math.acos(cos_a)
+
+
+def _portal_visible_in_fov(
+    cam_x: float,
+    cam_y: float,
+    dir_x: float,
+    dir_y: float,
+    fov_half_rad: float,
+    p1x: float,
+    p1y: float,
+    p2x: float,
+    p2y: float,
+    n_samples: int = 5,
+) -> bool:
+    """Returns True if any sampled point on the segment falls inside the view cone."""
+    for i in range(n_samples):
+        t = i / max(1, n_samples - 1)
+        sx = p1x + t * (p2x - p1x)
+        sy = p1y + t * (p2y - p1y)
+        if _angle_to_point(cam_x, cam_y, dir_x, dir_y, sx, sy) <= fov_half_rad:
+            return True
+    return False
+
+
+def _portal_world_endpoints(
+    line: dict,
+    hole: dict,
+    vertices: dict,
+) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Compute the 2D plan endpoints of a hole on a wall."""
+    v_ids = line.get("vertices", [])
+    if len(v_ids) < 2:
+        return None
+
+    v1 = vertices.get(str(v_ids[0]), vertices.get(v_ids[0]))
+    v2 = vertices.get(str(v_ids[1]), vertices.get(v_ids[1]))
+    if not v1 or not v2:
+        return None
+
+    ax, ay = float(v1["x"]), float(v1["y"])
+    bx, by = float(v2["x"]), float(v2["y"])
+    wall_len = math.hypot(bx - ax, by - ay)
+    if wall_len < 1e-6:
+        return None
+
+    ux = (bx - ax) / wall_len
+    uy = (by - ay) / wall_len
+
+    offset = float(hole.get("offset", 0.5))
+    cx = ax + offset * (bx - ax)
+    cy = ay + offset * (by - ay)
+
+    raw_w = hole.get("properties", {}).get("width", hole.get("width", 100))
+    if isinstance(raw_w, dict):
+        half_w = float(raw_w.get("length", 100)) / 2.0
+    else:
+        half_w = float(raw_w) / 2.0
+
+    p1x, p1y = cx - half_w * ux, cy - half_w * uy
+    p2x, p2y = cx + half_w * ux, cy + half_w * uy
+    return (p1x, p1y), (p2x, p2y)
+
+
+def _rooms_beyond_portal(
+    line: dict,
+    active_area_id: str,
+    areas: dict,
+    vertices: dict,
+) -> Set[str]:
+    """Find rooms on the opposite side of a portal-bearing wall."""
+    v_ids = [str(v) for v in line.get("vertices", [])[:2]]
+    if len(v_ids) < 2:
+        return set()
+
+    wall_positions: Set[Tuple[float, float]] = set()
+    for vid in v_ids:
+        v = vertices.get(vid, vertices.get(str(vid)))
+        if v:
+            wall_positions.add((round(float(v["x"]), 0), round(float(v["y"]), 0)))
+
+    beyond: Set[str] = set()
+    for aid, area in areas.items():
+        if aid == active_area_id:
+            continue
+        area_verts = [str(v) for v in area.get("vertices", [])]
+        if any(av in v_ids for av in area_verts):
+            beyond.add(aid)
+            continue
+
+        for av in area_verts:
+            av_data = vertices.get(av, vertices.get(str(av)))
+            if av_data:
+                key = (round(float(av_data["x"]), 0), round(float(av_data["y"]), 0))
+                if key in wall_positions:
+                    beyond.add(aid)
+                    break
+
+    return beyond
+
+
+def _collect_portal_visible_rooms(
+    active_area_id: str,
+    areas: dict,
+    lines: dict,
+    holes: dict,
+    vertices: dict,
+    cam_x: float,
+    cam_y: float,
+    dir_x: float,
+    dir_y: float,
+    fov_half_rad: float,
+    max_dist_cm: float,
+    log_fn,
+    sample_label: str = "",
+) -> Set[str]:
+    """Collect rooms visible through the active room's portals."""
+    prefix = f"{sample_label} " if sample_label else ""
+    log_fn(f"  {prefix}Portal visibility sweep from active room {active_area_id} ...")
+
+    active_verts: Set[str] = set(str(v) for v in areas[active_area_id].get("vertices", []))
+    visible_rooms: Set[str] = set()
+    effective_fov = fov_half_rad + math.radians(PORTAL_ANGLE_MARGIN_DEG)
+
+    for lid, line in lines.items():
+        v_ids = [str(v) for v in line.get("vertices", [])[:2]]
+        if len(v_ids) < 2:
+            continue
+
+        if not any(vid in active_verts for vid in v_ids):
+            continue
+
+        line_holes = line.get("holes", [])
+        if not line_holes:
+            continue
+
+        for hole_id in line_holes:
+            hid = str(hole_id)
+            hole = holes.get(hid, holes.get(hole_id))
+            if not hole:
+                continue
+
+            endpoints = _portal_world_endpoints(line, hole, vertices)
+            if not endpoints:
+                continue
+
+            (ep1x, ep1y), (ep2x, ep2y) = endpoints
+            portal_cx = (ep1x + ep2x) / 2.0
+            portal_cy = (ep1y + ep2y) / 2.0
+            dist = math.hypot(portal_cx - cam_x, portal_cy - cam_y)
+
+            if dist > max_dist_cm:
+                continue
+
+            if not _portal_visible_in_fov(
+                cam_x, cam_y, dir_x, dir_y, effective_fov, ep1x, ep1y, ep2x, ep2y
+            ):
+                continue
+
+            beyond = _rooms_beyond_portal(line, active_area_id, areas, vertices)
+            if beyond:
+                visible_rooms.update(beyond)
+
+    return visible_rooms
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,12 +385,14 @@ def _is_exterior_asset_video(item: dict) -> bool:
 
 def _cull_interior_video(
     active_area_ids: Set[str],
+    active_samples: List[Dict[str, Any]],
     vertices: dict,
     lines: dict,
     areas: dict,
     items: dict,
     holes: dict,
     log_fn,
+    max_view_dist_cm: float = DEFAULT_VIEW_DISTANCE_CM,
 ) -> Tuple[dict, dict, dict, dict, dict]:
     """
     INTERIOR MODE — camera path passes through one or more rooms.
@@ -222,15 +409,39 @@ def _cull_interior_video(
       • Walls, holes, items outside kept rooms
       • Exterior-only items (roof, grill, balcony, etc.) — even if geometrically inside
     """
-    log_fn(f"  ── Interior Culling (Video) ──")
+    log_fn("  Interior Culling (Video Portal Mode)")
 
-    kept_area_ids = _flood_fill_connected_rooms(
-        active_area_ids, areas, lines, vertices, log_fn
+    log_fn(
+        f"  Interior samples: {len(active_samples)} | MaxDist={max_view_dist_cm:.0f}cm"
     )
 
-    log_fn(f"  🎯 Total kept rooms: {len(kept_area_ids)}")
+    kept_area_ids: Set[str] = set(active_area_ids)
+    for idx, sample in enumerate(active_samples):
+        active_area_id = sample.get("active_area_id")
+        if not active_area_id or active_area_id not in areas:
+            continue
+
+        visible_rooms = _collect_portal_visible_rooms(
+            active_area_id,
+            areas,
+            lines,
+            holes,
+            vertices,
+            float(sample["cam_x"]),
+            float(sample["cam_y"]),
+            float(sample["cam_dir_x"]),
+            float(sample["cam_dir_y"]),
+            math.radians(float(sample["fov_half_deg"])),
+            max_view_dist_cm,
+            log_fn,
+            sample_label=f"[sample {idx}]",
+        )
+        kept_area_ids.update(visible_rooms)
+
+    log_fn(f"  Total kept rooms: {len(kept_area_ids)}")
     for aid in kept_area_ids:
-        log_fn(f"     ✓ {areas[aid].get('name', 'Unknown')} ({aid})")
+        room_tag = "ACTIVE" if aid in active_area_ids else "PORTAL"
+        log_fn(f"     - [{room_tag}] {areas[aid].get('name', 'Unknown')} ({aid})")
 
     # ── Areas ────────────────────────────────────────────────────────────────
     new_areas = {aid: areas[aid] for aid in kept_area_ids}
@@ -258,18 +469,63 @@ def _cull_interior_video(
 
     # ── Lines ─────────────────────────────────────────────────────────────────
     new_lines: Dict[str, Any] = {}
+    culled_walls: List[str] = []
+    wall_margin_deg = 20.0
     for lid, line in lines.items():
         v_ids = line.get("vertices", [])
-        if len(v_ids) >= 2:
-            v1, v2 = v_ids[0], v_ids[1]
-            if vertex_is_near_kept(v1) and vertex_is_near_kept(v2):
-                new_lines[lid] = line
-                for vid in (v1, v2):
-                    if vid not in new_vertices and vid in vertices:
-                        new_vertices[vid] = vertices[vid]
-                        kept_vertex_ids.add(vid)
-            else:
-                log_fn(f"  🗑️ Culled wall (exterior): {lid}")
+        if len(v_ids) < 2:
+            continue
+
+        v1, v2 = v_ids[0], v_ids[1]
+        if not (vertex_is_near_kept(v1) and vertex_is_near_kept(v2)):
+            culled_walls.append(f"Wall {lid} [not touching kept rooms]")
+            continue
+
+        vd1 = vertices.get(v1)
+        vd2 = vertices.get(v2)
+        if not vd1 or not vd2:
+            continue
+
+        p1x, p1y = float(vd1.get("x", 0)), float(vd1.get("y", 0))
+        p2x, p2y = float(vd2.get("x", 0)), float(vd2.get("y", 0))
+        mid_x, mid_y = (p1x + p2x) / 2.0, (p1y + p2y) / 2.0
+
+        wall_visible = False
+        for sample in active_samples:
+            cam_x = float(sample["cam_x"])
+            cam_y = float(sample["cam_y"])
+            dist = math.hypot(mid_x - cam_x, mid_y - cam_y)
+            if dist > max_view_dist_cm:
+                continue
+
+            fov_rad = math.radians(float(sample["fov_half_deg"]) + wall_margin_deg)
+            if _portal_visible_in_fov(
+                cam_x,
+                cam_y,
+                float(sample["cam_dir_x"]),
+                float(sample["cam_dir_y"]),
+                fov_rad,
+                p1x,
+                p1y,
+                p2x,
+                p2y,
+            ):
+                wall_visible = True
+                break
+
+        if wall_visible:
+            new_lines[lid] = line
+            for vid in (v1, v2):
+                if vid not in new_vertices and vid in vertices:
+                    new_vertices[vid] = vertices[vid]
+                    kept_vertex_ids.add(vid)
+        else:
+            culled_walls.append(f"Wall {lid} [outside all interior sample FOV/range]")
+
+    if culled_walls:
+        log_fn(f"\n  Culled {len(culled_walls)} walls:")
+        for cw in culled_walls:
+            log_fn(f"     - {cw}")
 
     # ── Holes ─────────────────────────────────────────────────────────────────
     new_holes = {
@@ -297,7 +553,35 @@ def _cull_interior_video(
             log_fn(f"  🗑️ Removing exterior-only asset in interior render: '{item.get('name', 'Unknown')}' ({iid})")
             continue
 
-        ix, iy = item.get("x", 0), item.get("y", 0)
+        ix, iy = float(item.get("x", 0)), float(item.get("y", 0))
+
+        visible_from_path = False
+        for sample in active_samples:
+            cam_x = float(sample["cam_x"])
+            cam_y = float(sample["cam_y"])
+            dist = math.hypot(ix - cam_x, iy - cam_y)
+            if dist > max_view_dist_cm:
+                continue
+
+            angle_deg = math.degrees(
+                _angle_to_point(
+                    cam_x,
+                    cam_y,
+                    float(sample["cam_dir_x"]),
+                    float(sample["cam_dir_y"]),
+                    ix,
+                    iy,
+                )
+            )
+            if angle_deg <= float(sample["fov_half_deg"]) + 15.0:
+                visible_from_path = True
+                break
+
+        if not visible_from_path:
+            culled_items.append(
+                f"{item.get('name', 'Unknown')} ({iid}) [outside all interior sample FOV/range]"
+            )
+            continue
 
         # Pass 1 – polygon inclusion
         is_kept = False
@@ -538,8 +822,14 @@ class VideoSceneOptimizer:
                     self.log(f"⚠️ Failed to parse floor_plan_data: {e}")
                     return payload
 
-            # ── 2. Collect camera points from the full animation path ─────────
-            camera_points: List[Tuple[float, float]] = []
+            # ── 2. Collect camera visibility samples from the animation path ──
+            camera_samples: List[Dict[str, Any]] = []
+            payload_fov_half_deg: Optional[float] = None
+            if "interior_fov_half_deg" in payload:
+                payload_fov_half_deg = float(payload["interior_fov_half_deg"])
+            max_view_dist_cm = float(
+                payload.get("interior_view_dist_cm", DEFAULT_VIEW_DISTANCE_CM)
+            )
 
             if "video_animation" in payload and payload["video_animation"] is not None:
                 anim      = payload["video_animation"]
@@ -551,27 +841,121 @@ class VideoSceneOptimizer:
                         tjs = kf.get("threejs_camera_data")
                         if tjs and isinstance(tjs, dict) and "position" in tjs:
                             pos = tjs["position"]
-                            camera_points.append((pos.get("x", 0.0), pos.get("z", 0.0)))
+                            cam_x = float(pos.get("x", 0.0))
+                            cam_y = float(pos.get("z", 0.0))
+                            dir_x, dir_y = 1.0, 0.0
+                            look_at = tjs.get("lookAt")
+                            if isinstance(look_at, dict):
+                                dx = float(look_at.get("x", cam_x)) - cam_x
+                                dy = float(look_at.get("z", cam_y)) - cam_y
+                                mag = math.hypot(dx, dy)
+                                if mag > 1e-6:
+                                    dir_x, dir_y = dx / mag, dy / mag
+                            fov_half_deg = payload_fov_half_deg
+                            if fov_half_deg is None:
+                                fov_half_deg = float(
+                                    tjs.get("fov", DEFAULT_FOV_HALF_DEG * 2.0)
+                                ) / 2.0
+                            camera_samples.append({
+                                "cam_x": cam_x,
+                                "cam_y": cam_y,
+                                "cam_dir_x": dir_x,
+                                "cam_dir_y": dir_y,
+                                "fov_half_deg": fov_half_deg,
+                            })
                         elif "position" in kf:
                             pos = kf["position"]
-                            camera_points.append((pos.get("x", 0.0), pos.get("z", 0.0)))
-                    self.log(f"   Collected {len(camera_points)} points from video path.")
+                            cam_x = float(pos.get("x", 0.0))
+                            cam_y = float(pos.get("z", 0.0))
+                            dir_x, dir_y = 1.0, 0.0
+                            target = kf.get("target")
+                            if isinstance(target, dict):
+                                dx = float(target.get("x", cam_x)) - cam_x
+                                dy = float(target.get("z", cam_y)) - cam_y
+                                mag = math.hypot(dx, dy)
+                                if mag > 1e-6:
+                                    dir_x, dir_y = dx / mag, dy / mag
+                            fov_half_deg = payload_fov_half_deg
+                            if fov_half_deg is None:
+                                fov_half_deg = float(
+                                    kf.get("fov", DEFAULT_FOV_HALF_DEG * 2.0)
+                                ) / 2.0
+                            camera_samples.append({
+                                "cam_x": cam_x,
+                                "cam_y": cam_y,
+                                "cam_dir_x": dir_x,
+                                "cam_dir_y": dir_y,
+                                "fov_half_deg": fov_half_deg,
+                            })
+                    self.log(f"   Collected {len(camera_samples)} samples from video path.")
                 else:
                     self.log("ℹ️ video_animation has no keyframes. Checking static camera ...")
 
             # Fallback: static camera position
-            if not camera_points:
+            if not camera_samples:
                 if "threejs_camera" in payload and payload["threejs_camera"] is not None:
-                    pos   = payload["threejs_camera"].get("position", {})
-                    cam_x = pos.get("x", 0) * SCALE_METERS_TO_CM
-                    cam_y = pos.get("z", 0) * SCALE_METERS_TO_CM
-                    camera_points.append((cam_x, cam_y))
+                    camera = payload["threejs_camera"]
+                    pos = camera.get("position", {})
+                    cam_x = float(pos.get("x", 0)) * SCALE_METERS_TO_CM
+                    cam_y = float(pos.get("z", 0)) * SCALE_METERS_TO_CM
+                    dir_x, dir_y = 1.0, 0.0
+                    target = camera.get("target")
+                    if isinstance(target, dict):
+                        dx = float(target.get("x", 0)) * SCALE_METERS_TO_CM - cam_x
+                        dy = float(target.get("z", 0)) * SCALE_METERS_TO_CM - cam_y
+                        mag = math.hypot(dx, dy)
+                        if mag > 1e-6:
+                            dir_x, dir_y = dx / mag, dy / mag
+                    fov_half_deg = payload_fov_half_deg
+                    if fov_half_deg is None:
+                        fov_half_deg = float(
+                            camera.get("fov", DEFAULT_FOV_HALF_DEG * 2.0)
+                        ) / 2.0
+                    camera_samples.append({
+                        "cam_x": cam_x,
+                        "cam_y": cam_y,
+                        "cam_dir_x": dir_x,
+                        "cam_dir_y": dir_y,
+                        "fov_half_deg": fov_half_deg,
+                    })
                     self.log(f"📍 Using static ThreeJS camera: ({cam_x:.1f}, {cam_y:.1f})")
                 elif "blender_camera" in payload and payload["blender_camera"] is not None:
-                    loc   = payload["blender_camera"].get("location", [0, 0, 0])
-                    cam_x = loc[0] * SCALE_METERS_TO_CM
-                    cam_y = -loc[1] * SCALE_METERS_TO_CM
-                    camera_points.append((cam_x, cam_y))
+                    camera = payload["blender_camera"]
+                    loc = camera.get("location", [0, 0, 0])
+                    cam_x = float(loc[0]) * SCALE_METERS_TO_CM
+                    cam_y = -float(loc[1]) * SCALE_METERS_TO_CM
+                    dir_x, dir_y = 1.0, 0.0
+                    bt = payload.get("blender_target")
+                    if isinstance(bt, dict):
+                        bt = bt.get("location")
+                    if bt and len(bt) >= 2:
+                        tx = float(bt[0]) * SCALE_METERS_TO_CM
+                        ty = -float(bt[1]) * SCALE_METERS_TO_CM
+                        dx, dy = tx - cam_x, ty - cam_y
+                        mag = math.hypot(dx, dy)
+                        if mag > 1e-6:
+                            dir_x, dir_y = dx / mag, dy / mag
+                    else:
+                        rot = camera.get("rotation_euler")
+                        if rot and len(rot) >= 3:
+                            rz = float(rot[2])
+                            dx, dy = math.sin(rz), -math.cos(rz)
+                            mag = math.hypot(dx, dy)
+                            if mag > 1e-6:
+                                dir_x, dir_y = dx / mag, dy / mag
+                    fov_half_deg = payload_fov_half_deg
+                    if fov_half_deg is None:
+                        if camera.get("lens_unit") == "FOV" and camera.get("lens"):
+                            fov_half_deg = float(camera["lens"]) / 2.0
+                        else:
+                            fov_half_deg = DEFAULT_FOV_HALF_DEG
+                    camera_samples.append({
+                        "cam_x": cam_x,
+                        "cam_y": cam_y,
+                        "cam_dir_x": dir_x,
+                        "cam_dir_y": dir_y,
+                        "fov_half_deg": fov_half_deg,
+                    })
                     self.log(f"📍 Using static Blender camera: ({cam_x:.1f}, {cam_y:.1f})")
                 else:
                     self.log("⚠️ No camera data found. Skipping optimization.")
@@ -622,7 +1006,7 @@ class VideoSceneOptimizer:
             self.log(f"  Items:    {len(items)}")
             self.log(f"  Holes:    {len(holes)}")
             self.log(f"  Vertices: {len(vertices)}")
-            self.log(f"  Camera path points: {len(camera_points)}")
+            self.log(f"  Camera path samples: {len(camera_samples)}")
 
             # ── 4. Pre-compute room bounding boxes ────────────────────────────
             area_bboxes: Dict[str, Any] = {}
@@ -639,12 +1023,17 @@ class VideoSceneOptimizer:
 
             # ── 5. Determine active rooms from camera path ────────────────────
             active_area_ids: Set[str] = set()
-            self.log(f"\n   Checking {len(camera_points)} path points against {len(area_bboxes)} rooms...")
+            active_samples: List[Dict[str, Any]] = []
+            self.log(f"\n   Checking {len(camera_samples)} path samples against {len(area_bboxes)} rooms...")
 
-            for i, (cx, cy) in enumerate(camera_points):
+            for i, sample in enumerate(camera_samples):
+                cx = float(sample["cam_x"])
+                cy = float(sample["cam_y"])
                 for area_id, (min_x, max_x, min_y, max_y, poly_verts) in area_bboxes.items():
                     if min_x <= cx <= max_x and min_y <= cy <= max_y:
                         if _point_in_polygon(cx, cy, poly_verts):
+                            sample["active_area_id"] = area_id
+                            active_samples.append(sample)
                             if area_id not in active_area_ids:
                                 active_area_ids.add(area_id)
                                 self.log(
@@ -664,7 +1053,15 @@ class VideoSceneOptimizer:
                     self.log(f"     ✓ {areas[aid].get('name', 'Unknown')} ({aid})")
 
                 new_vertices, new_lines, new_areas, new_items, new_holes = _cull_interior_video(
-                    active_area_ids, vertices, lines, areas, items, holes, self.log
+                    active_area_ids,
+                    active_samples,
+                    vertices,
+                    lines,
+                    areas,
+                    items,
+                    holes,
+                    self.log,
+                    max_view_dist_cm=max_view_dist_cm,
                 )
             else:
                 render_mode = "EXTERIOR"
@@ -681,7 +1078,7 @@ class VideoSceneOptimizer:
             self.log(f"📊 VIDEO CULLING SUMMARY  [{render_mode}]")
             self.log(f"{'='*60}")
             self.log(f"  Render Mode: {render_mode}")
-            self.log(f"  Camera path points analysed: {len(camera_points)}")
+            self.log(f"  Camera path samples analysed: {len(camera_samples)}")
             if render_mode == "INTERIOR":
                 self.log(f"  Active rooms (camera enters): {len(active_area_ids)}")
             self.log(f"  Areas:  {len(areas)} → {len(new_areas)}  (removed {len(areas) - len(new_areas)})")
