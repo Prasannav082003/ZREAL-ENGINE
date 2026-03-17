@@ -9,13 +9,14 @@ extends Node3D
 
 var _tracked_assets = []
 var day_render = true
+var lighting_profile = "day"
 
 # ─────────────────────────────────────────────────────────────────
 # Entry-point (called by video_render.gd)
 # ─────────────────────────────────────────────────────────────────
 func build_scene(data):
-	if data.has("day_render"):
-		day_render = data["day_render"]
+	lighting_profile = _resolve_lighting_profile(data)
+	day_render = lighting_profile != "night"
 
 	# Unwrap floor_plan_data (may be a JSON string or already a dict)
 	var geom_data = data
@@ -32,6 +33,36 @@ func build_scene(data):
 		else:
 			geom_data = fp
 
+	# ── Unwrap layers structure ───────────────────────────────────────────────
+	# scene_optimizer_video.py writes geometry inside geom_data["layers"][layer_id].
+	# Flatten the selected (or first) layer up to the top level so all downstream
+	# functions (build_architecture, load_assets, lighting bounds) can find
+	# lines / vertices / holes / areas / items without knowing about layers.
+	if geom_data.has("layers") and typeof(geom_data["layers"]) == TYPE_DICTIONARY:
+		var layers = geom_data["layers"]
+		var layer_id = geom_data.get("selectedLayer", "")
+		var layer = null
+		if layer_id != "" and layers.has(layer_id):
+			layer = layers[layer_id]
+		else:
+			# Fall back to the first layer
+			var first_key = layers.keys()[0] if layers.size() > 0 else ""
+			if first_key != "":
+				layer_id = first_key
+				layer = layers[first_key]
+		if layer != null and typeof(layer) == TYPE_DICTIONARY:
+			print("[VideoGLB] Unwrapping layer '", layer_id, "' from layers dict.")
+			# Merge layer contents into a flat working copy so existing code works
+			var flat = {}
+			for k in geom_data:
+				if k != "layers":
+					flat[k] = geom_data[k]
+			for k in layer:
+				flat[k] = layer[k]
+			geom_data = flat
+		else:
+			print("[VideoGLB] WARNING: layers dict found but no valid layer could be selected.")
+
 	var cam_pose = _extract_camera_pose(data)
 	setup_lighting(data, geom_data)
 	var show_all_floors = data.get("showAllFloors", null)
@@ -44,6 +75,8 @@ func build_scene(data):
 # Lighting  — ported from image_glb_creation.gd (full photorealistic setup)
 # ─────────────────────────────────────────────────────────────────
 func setup_lighting(data, geom_data = {}):
+	var lighting = _get_lighting_profile_settings()
+
 	# Extract camera pose for light anchor and room bounds
 	var cam_pose     = _extract_camera_pose(data)
 	var cam_pos: Vector3    = cam_pose["position"]
@@ -63,9 +96,9 @@ func setup_lighting(data, geom_data = {}):
 	# ── Window / ambient OmniLight ─────────────────────────────────────────────
 	var window_light = OmniLight3D.new()
 	window_light.position     = Vector3(room_center.x, room_ceiling_y - 1.25, room_center.z)
-	window_light.light_energy = 0.14 if day_render else 0.07
+	window_light.light_energy = lighting["window_energy"]
 	window_light.omni_range   = max(room_extent.x, room_extent.y) * 2.1 + 6.0
-	window_light.light_color  = Color(1.0, 0.95, 0.85)
+	window_light.light_color  = lighting["window_color"]
 	window_light.light_specular = 0.0
 	window_light.shadow_enabled = false
 	add_child(window_light)
@@ -87,10 +120,17 @@ func setup_lighting(data, geom_data = {}):
 
 	if data.has("directional_light"):
 		var l = data["directional_light"]
-		if day_render:
-			dir_light.light_energy = l.get("intensity", 2.8)
+		dir_light.light_energy = l.get("intensity", lighting["dir_energy"])
+		if l.has("color") and typeof(l["color"]) == TYPE_DICTIONARY:
+			var c = l["color"]
+			var default_dir_color = lighting["dir_color"]
+			dir_light.light_color = Color(
+				float(c.get("r", default_dir_color.r)),
+				float(c.get("g", default_dir_color.g)),
+				float(c.get("b", default_dir_color.b))
+			)
 		else:
-			dir_light.light_energy = l.get("intensity", 0.14)
+			dir_light.light_color = lighting["dir_color"]
 		if l.has("position"):
 			dir_light.position = parse_vec3(l["position"])
 			if l.has("target"):
@@ -98,14 +138,19 @@ func setup_lighting(data, geom_data = {}):
 			else:
 				dir_light.look_at(light_anchor)
 	else:
-		if day_render:
-			dir_light.light_energy = 2.8
-			dir_light.light_color  = Color(1.0, 0.96, 0.88)
+		if lighting_profile == "day":
+			dir_light.light_energy = lighting["dir_energy"]
+			dir_light.light_color  = lighting["dir_color"]
 			dir_light.position     = light_anchor - cam_forward * 12.0 + cam_right * 6.0 + Vector3.UP * 16.0
 			dir_light.look_at(light_anchor)
+		elif lighting_profile == "sunset":
+			dir_light.light_energy = lighting["dir_energy"]
+			dir_light.light_color  = lighting["dir_color"]
+			dir_light.position     = light_anchor - cam_forward * 9.0 + cam_right * 9.0 + Vector3.UP * 8.5
+			dir_light.look_at(light_anchor + Vector3(0, -1.4, 0))
 		else:
-			dir_light.light_energy = 0.14
-			dir_light.light_color  = Color(0.55, 0.62, 0.90)
+			dir_light.light_energy = lighting["dir_energy"]
+			dir_light.light_color  = lighting["dir_color"]
 			dir_light.position     = light_anchor - cam_forward * 10.0 - cam_right * 4.0 + Vector3.UP * 18.0
 			dir_light.look_at(light_anchor)
 
@@ -116,11 +161,7 @@ func setup_lighting(data, geom_data = {}):
 	env.background_mode = Environment.BG_SKY
 	env.sky = Sky.new()
 
-	var exr_path = ""
-	if day_render:
-		exr_path = ProjectSettings.globalize_path("res://day.exr")
-	else:
-		exr_path = ProjectSettings.globalize_path("res://night.exr")
+	var exr_path = ProjectSettings.globalize_path(lighting["sky_exr"])
 
 	var sky_material_set = false
 	if FileAccess.file_exists(exr_path):
@@ -140,35 +181,25 @@ func setup_lighting(data, geom_data = {}):
 
 	if not sky_material_set:
 		var sky_mat = ProceduralSkyMaterial.new()
-		if day_render:
-			sky_mat.sky_top_color      = Color(0.25, 0.40, 0.78)
-			sky_mat.sky_horizon_color  = Color(0.75, 0.80, 0.90)
-			sky_mat.ground_bottom_color   = Color(0.08, 0.06, 0.04)
-			sky_mat.ground_horizon_color  = Color(0.30, 0.28, 0.22)
-			sky_mat.sun_angle_max         = 30.0
-			sky_mat.sun_curve             = 0.15
-		else:
-			sky_mat.sky_top_color      = Color(0.01, 0.02, 0.05)
-			sky_mat.sky_horizon_color  = Color(0.04, 0.06, 0.10)
-			sky_mat.ground_bottom_color   = Color(0.005, 0.005, 0.01)
-			sky_mat.ground_horizon_color  = Color(0.03, 0.05, 0.08)
+		sky_mat.sky_top_color         = lighting["sky_top_color"]
+		sky_mat.sky_horizon_color     = lighting["sky_horizon_color"]
+		sky_mat.ground_bottom_color   = lighting["ground_bottom_color"]
+		sky_mat.ground_horizon_color  = lighting["ground_horizon_color"]
+		sky_mat.sun_angle_max         = lighting["sun_angle_max"]
+		sky_mat.sun_curve             = lighting["sun_curve"]
 		env.sky.sky_material = sky_mat
 		print("[VideoGLB] Using fallback procedural sky")
 
 	# ── Ambient Light ──────────────────────────────────────────────────────────
 	# Use COLOR ambient for enclosed rooms — avoids sky-light bleeding at corners.
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	if day_render:
-		env.ambient_light_color  = Color(0.76, 0.77, 0.78)
-		env.ambient_light_energy = 0.42
-	else:
-		env.ambient_light_color  = Color(0.20, 0.24, 0.34)
-		env.ambient_light_energy = 0.10
+	env.ambient_light_color  = lighting["ambient_color"]
+	env.ambient_light_energy = lighting["ambient_energy"]
 
 	# ── Tone Mapping ───────────────────────────────────────────────────────────
 	env.tonemap_mode     = Environment.TONE_MAPPER_FILMIC
-	env.tonemap_exposure = 0.85
-	env.tonemap_white    = 5.0
+	env.tonemap_exposure = lighting["tonemap_exposure"]
+	env.tonemap_white    = lighting["tonemap_white"]
 
 	# ── Disabled effects (crash / black in headless export) ────────────────────
 	env.sdfgi_enabled = false
@@ -186,10 +217,10 @@ func setup_lighting(data, geom_data = {}):
 
 	# ── Glow ───────────────────────────────────────────────────────────────────
 	env.glow_enabled       = true
-	env.glow_intensity     = 0.10
-	env.glow_bloom         = 0.03
-	env.glow_hdr_threshold = 2.2
-	env.glow_hdr_scale     = 1.4
+	env.glow_intensity     = lighting["glow_intensity"]
+	env.glow_bloom         = lighting["glow_bloom"]
+	env.glow_hdr_threshold = lighting["glow_hdr_threshold"]
+	env.glow_hdr_scale     = lighting["glow_hdr_scale"]
 	env.glow_blend_mode    = Environment.GLOW_BLEND_MODE_SOFTLIGHT
 
 	# ── Colour Grading ─────────────────────────────────────────────────────────
@@ -213,13 +244,13 @@ func setup_lighting(data, geom_data = {}):
 	add_child(world_env)
 
 	# ── Scene Fill Lights ──────────────────────────────────────────────────────
-	if day_render:
+	if lighting_profile == "day" or lighting_profile == "sunset":
 		var fill = OmniLight3D.new()
 		fill.name           = "FillLight"
 		fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
-		fill.light_energy   = 0.18
+		fill.light_energy   = lighting["fill_energy"]
 		fill.omni_range     = max(room_extent.x, room_extent.y) * 2.5 + 10.0
-		fill.light_color    = Color(1.0, 0.97, 0.90)
+		fill.light_color    = lighting["fill_color"]
 		fill.light_specular = 0.0
 		fill.shadow_enabled = false
 		add_child(fill)
@@ -229,9 +260,9 @@ func setup_lighting(data, geom_data = {}):
 		var fill_front = OmniLight3D.new()
 		fill_front.name           = "FrontFillLight"
 		fill_front.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) + cam_forward * fill_offset
-		fill_front.light_energy   = 0.055
+		fill_front.light_energy   = lighting["front_back_fill_energy"]
 		fill_front.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
-		fill_front.light_color    = Color(0.99, 0.97, 0.93)
+		fill_front.light_color    = lighting["front_back_fill_color"]
 		fill_front.light_specular = 0.0
 		fill_front.shadow_enabled = false
 		add_child(fill_front)
@@ -239,9 +270,9 @@ func setup_lighting(data, geom_data = {}):
 		var fill_back = OmniLight3D.new()
 		fill_back.name           = "BackFillLight"
 		fill_back.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) - cam_forward * fill_offset
-		fill_back.light_energy   = 0.055
+		fill_back.light_energy   = lighting["front_back_fill_energy"]
 		fill_back.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
-		fill_back.light_color    = Color(0.99, 0.97, 0.93)
+		fill_back.light_color    = lighting["front_back_fill_color"]
 		fill_back.light_specular = 0.0
 		fill_back.shadow_enabled = false
 		add_child(fill_back)
@@ -249,14 +280,14 @@ func setup_lighting(data, geom_data = {}):
 		var fill = OmniLight3D.new()
 		fill.name           = "FillLight"
 		fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
-		fill.light_energy   = 0.10
+		fill.light_energy   = lighting["fill_energy"]
 		fill.omni_range     = max(room_extent.x, room_extent.y) * 2.2 + 7.0
-		fill.light_color    = Color(0.5, 0.55, 0.8)
+		fill.light_color    = lighting["fill_color"]
 		fill.light_specular = 0.0
 		fill.shadow_enabled = false
 		add_child(fill)
 
-	print("[VideoGLB] Photorealistic lighting setup complete. day_render=", day_render)
+	print("[VideoGLB] Photorealistic lighting setup complete. profile=", lighting_profile)
 
 # ─────────────────────────────────────────────────────────────────
 # Parse vec3 helper
@@ -265,6 +296,107 @@ func parse_vec3(d):
 	if typeof(d) == TYPE_DICTIONARY:
 		return Vector3(d.get("x", 0), d.get("y", 0), d.get("z", 0))
 	return Vector3.ZERO
+
+func _resolve_lighting_profile(data: Dictionary) -> String:
+	var string_keys = ["lighting_profile", "time_of_day", "render_time", "environment_preset"]
+	for key in string_keys:
+		if data.has(key):
+			var value = str(data[key]).to_lower().strip_edges()
+			if "sunset" in value or "dusk" in value or "evening" in value:
+				return "sunset"
+			if "night" in value:
+				return "night"
+			if "day" in value or "morning" in value or "afternoon" in value:
+				return "day"
+
+	if bool(data.get("sunset_render", false)):
+		return "sunset"
+	if bool(data.get("night_render", false)):
+		return "night"
+	if data.has("day_render"):
+		return "day" if bool(data["day_render"]) else "night"
+	return "day"
+
+func _get_lighting_profile_settings() -> Dictionary:
+	match lighting_profile:
+		"night":
+			return {
+				"sky_exr": "res://night.exr",
+				"window_energy": 0.07,
+				"window_color": Color(0.72, 0.80, 1.0),
+				"dir_energy": 0.14,
+				"dir_color": Color(0.55, 0.62, 0.90),
+				"sky_top_color": Color(0.01, 0.02, 0.05),
+				"sky_horizon_color": Color(0.04, 0.06, 0.10),
+				"ground_bottom_color": Color(0.005, 0.005, 0.01),
+				"ground_horizon_color": Color(0.03, 0.05, 0.08),
+				"sun_angle_max": 10.0,
+				"sun_curve": 0.05,
+				"ambient_color": Color(0.20, 0.24, 0.34),
+				"ambient_energy": 0.10,
+				"tonemap_exposure": 0.68,
+				"tonemap_white": 4.8,
+				"glow_intensity": 0.26,
+				"glow_bloom": 0.10,
+				"glow_hdr_threshold": 1.15,
+				"glow_hdr_scale": 2.1,
+				"fill_energy": 0.10,
+				"fill_color": Color(0.5, 0.55, 0.8),
+				"front_back_fill_energy": 0.04,
+				"front_back_fill_color": Color(0.58, 0.64, 0.88)
+			}
+		"sunset":
+			return {
+				"sky_exr": "res://day.exr",
+				"window_energy": 0.18,
+				"window_color": Color(1.0, 0.76, 0.56),
+				"dir_energy": 1.65,
+				"dir_color": Color(1.0, 0.63, 0.38),
+				"sky_top_color": Color(0.20, 0.24, 0.42),
+				"sky_horizon_color": Color(1.0, 0.56, 0.34),
+				"ground_bottom_color": Color(0.09, 0.05, 0.03),
+				"ground_horizon_color": Color(0.42, 0.22, 0.14),
+				"sun_angle_max": 18.0,
+				"sun_curve": 0.22,
+				"ambient_color": Color(0.62, 0.50, 0.42),
+				"ambient_energy": 0.28,
+				"tonemap_exposure": 0.78,
+				"tonemap_white": 4.6,
+				"glow_intensity": 0.28,
+				"glow_bloom": 0.11,
+				"glow_hdr_threshold": 1.10,
+				"glow_hdr_scale": 2.15,
+				"fill_energy": 0.15,
+				"fill_color": Color(1.0, 0.80, 0.60),
+				"front_back_fill_energy": 0.07,
+				"front_back_fill_color": Color(1.0, 0.82, 0.64)
+			}
+		_:
+			return {
+				"sky_exr": "res://day.exr",
+				"window_energy": 0.14,
+				"window_color": Color(1.0, 0.95, 0.85),
+				"dir_energy": 2.8,
+				"dir_color": Color(1.0, 0.96, 0.88),
+				"sky_top_color": Color(0.25, 0.40, 0.78),
+				"sky_horizon_color": Color(0.75, 0.80, 0.90),
+				"ground_bottom_color": Color(0.08, 0.06, 0.04),
+				"ground_horizon_color": Color(0.30, 0.28, 0.22),
+				"sun_angle_max": 30.0,
+				"sun_curve": 0.15,
+				"ambient_color": Color(0.76, 0.77, 0.78),
+				"ambient_energy": 0.42,
+				"tonemap_exposure": 0.92,
+				"tonemap_white": 5.0,
+				"glow_intensity": 0.22,
+				"glow_bloom": 0.08,
+				"glow_hdr_threshold": 1.35,
+				"glow_hdr_scale": 1.9,
+				"fill_energy": 0.18,
+				"fill_color": Color(1.0, 0.97, 0.90),
+				"front_back_fill_energy": 0.055,
+				"front_back_fill_color": Color(0.99, 0.97, 0.93)
+			}
 
 # ─────────────────────────────────────────────────────────────────
 # Camera pose extractor
@@ -1193,6 +1325,197 @@ func _resolve_local_model_path(path: String) -> String:
 
 	return ""
 
+func _is_light_fixture_item(item: Dictionary) -> bool:
+	var item_type = str(item.get("type", "")).to_lower()
+	var item_name = str(item.get("name", "")).to_lower()
+	var mounting_type = str(item.get("mounting_type", "")).to_lower()
+	var model_hint = ""
+	if item.has("asset_urls") and typeof(item["asset_urls"]) == TYPE_DICTIONARY:
+		var urls = item["asset_urls"]
+		if urls.has("GLB_File_URL") and urls["GLB_File_URL"] != null:
+			model_hint = str(urls["GLB_File_URL"]).to_lower()
+		elif urls.has("glb_Url") and urls["glb_Url"] != null:
+			model_hint = str(urls["glb_Url"]).to_lower()
+
+	var full_desc = item_type + " " + item_name + " " + mounting_type + " " + model_hint
+	var light_keywords = [
+		"light", "lamp", "pendant", "pendent", "chandelier",
+		"lantern", "sconce", "ceilinglamp", "ceiling_light",
+		"wallmount", "streetlamp", "lighting fixture"
+	]
+	for kw in light_keywords:
+		if kw in full_desc:
+			return true
+	return false
+
+func _apply_light_fixture_emission(node: Node3D, light_color: Color, emission_energy: float) -> bool:
+	var meshes = _get_all_meshes(node)
+	var applied = false
+	var emissive_keywords = [
+		"bulb", "emiss", "glow", "glass",
+		"shade_inner", "lamp_head", "tube", "led",
+		"filament", "diffuser"
+	]
+	for m in meshes:
+		if not m.mesh:
+			continue
+		for i in range(m.mesh.get_surface_count()):
+			var mat = m.get_active_material(i)
+			if mat == null:
+				mat = m.mesh.surface_get_material(i)
+			var mat_name = ""
+			var surface_name = ""
+			if mat != null:
+				mat_name = str(mat.resource_name).to_lower()
+			surface_name = str(m.mesh.surface_get_name(i)).to_lower()
+			var is_emissive_surface = false
+			for kw in emissive_keywords:
+				if kw in mat_name or kw in surface_name:
+					is_emissive_surface = true
+					break
+			if not is_emissive_surface:
+				continue
+			if mat and mat is StandardMaterial3D:
+				var new_mat = mat.duplicate()
+				new_mat.emission_enabled = true
+				new_mat.emission = light_color
+				new_mat.emission_energy_multiplier = emission_energy
+				m.set_surface_override_material(i, new_mat)
+				applied = true
+	return applied
+
+func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB, final_scale: Vector3) -> void:
+	if item.get("is_exterior_black", false):
+		return
+	if not _is_light_fixture_item(item):
+		return
+
+	var item_type = str(item.get("type", "")).to_lower()
+	var item_name = str(item.get("name", "")).to_lower()
+	var mounting_type = str(item.get("mounting_type", "")).to_lower()
+	var full_desc = item_type + " " + item_name + " " + mounting_type
+
+	var scaled_origin = Vector3(
+		local_aabb.position.x * final_scale.x,
+		local_aabb.position.y * final_scale.y,
+		local_aabb.position.z * final_scale.z
+	)
+	var scaled_size = Vector3(
+		abs(local_aabb.size.x * final_scale.x),
+		abs(local_aabb.size.y * final_scale.y),
+		abs(local_aabb.size.z * final_scale.z)
+	)
+	var emitter_local = scaled_origin + scaled_size * 0.5
+
+	if mounting_type == "ceiling_mount":
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.18
+	elif "wall" in full_desc:
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.45
+		emitter_local.z = scaled_origin.z + scaled_size.z * 0.22
+	elif mounting_type == "floor_mount":
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.82
+	else:
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.72
+
+	var is_street_light = "street" in full_desc or "exterior" in full_desc
+	var is_night = lighting_profile == "night"
+	var is_sunset = lighting_profile == "sunset"
+	var warm_color = Color(1.0, 0.90, 0.74)
+	var street_color = Color(1.0, 0.92, 0.80)
+	if is_sunset:
+		warm_color = Color(1.0, 0.72, 0.46)
+		street_color = Color(1.0, 0.78, 0.52)
+	elif is_night:
+		warm_color = Color(1.0, 0.84, 0.62)
+		street_color = Color(1.0, 0.78, 0.52)
+	var light_color = street_color if is_street_light else warm_color
+
+	var light_energy = 1.15
+	var light_range = max(max(scaled_size.x, scaled_size.z) * 5.5, 3.6)
+	var emission_energy = 4.5
+	if is_sunset:
+		light_energy = 2.6
+		emission_energy = 7.5
+	elif is_night:
+		light_energy = 4.2
+		emission_energy = 9.0
+
+	if mounting_type == "ceiling_mount":
+		light_energy = 1.5
+		light_range = max(light_range, 5.8)
+		emission_energy = 5.8
+		if is_sunset:
+			light_energy = 3.4
+			emission_energy = 9.2
+		elif is_night:
+			light_energy = 5.5
+			emission_energy = 11.5
+	elif "wall" in full_desc:
+		light_energy = 1.2
+		light_range = max(light_range, 4.2)
+		emission_energy = 5.0
+		if is_sunset:
+			light_energy = 2.9
+			emission_energy = 8.1
+		elif is_night:
+			light_energy = 4.6
+			emission_energy = 9.8
+	elif mounting_type == "floor_mount":
+		if is_street_light:
+			light_energy = 2.0
+			light_range = max(light_range, 8.5)
+			emission_energy = 6.0
+			if is_sunset:
+				light_energy = 4.2
+				emission_energy = 9.6
+			elif is_night:
+				light_energy = 7.2
+				emission_energy = 12.0
+		else:
+			light_energy = 1.35
+			light_range = max(light_range, 4.8)
+			emission_energy = 5.2
+			if is_sunset:
+				light_energy = 3.1
+				emission_energy = 8.4
+			elif is_night:
+				light_energy = 5.0
+				emission_energy = 10.0
+
+	var emissive_surface_found = _apply_light_fixture_emission(node, light_color, emission_energy)
+
+	var world_pos = node.to_global(emitter_local)
+	if mounting_type == "ceiling_mount" or "wall" in full_desc or is_street_light:
+		var spot = SpotLight3D.new()
+		spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		spot.global_position = world_pos
+		spot.light_color = light_color
+		spot.light_energy = light_energy
+		spot.light_specular = 0.25
+		spot.shadow_enabled = false
+		spot.spot_range = light_range
+		spot.spot_angle = 62.0 if mounting_type == "ceiling_mount" else 48.0
+		spot.spot_attenuation = 0.75
+		add_child(spot)
+
+		var target_local = emitter_local + Vector3(0, -max(1.0, light_range * 0.45), 0)
+		if "wall" in full_desc and not is_street_light:
+			target_local = emitter_local + Vector3(0, -0.15, -max(0.8, light_range * 0.25))
+		spot.look_at(node.to_global(target_local), Vector3.UP)
+	else:
+		var omni = OmniLight3D.new()
+		omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		omni.global_position = world_pos
+		omni.light_color = light_color
+		omni.light_energy = light_energy
+		omni.light_specular = 0.25
+		omni.shadow_enabled = false
+		omni.omni_range = light_range
+		add_child(omni)
+
+	if not emissive_surface_found:
+		print("[VideoGLB] Light fixture added without material override for asset: ", item.get("name", "Light"))
+
 func _load_layer_items(items, layer_altitude, layer_id = "root"):
 	for item_id in items:
 		var item
@@ -1451,6 +1774,8 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 
 												if modified:
 													m.set_surface_override_material(i, new_mat)
+
+						_add_light_fixture_effect(node, item, aabb, final_scale)
 
 						print("[VideoGLB] Loaded asset: ", used_path, " final scale: ", final_scale)
 					else:

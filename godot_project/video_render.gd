@@ -697,6 +697,18 @@ func _get_floor_plan_areas() -> Dictionary:
 		elif typeof(fp) == TYPE_DICTIONARY:
 			src = fp
 
+	# Unwrap layers if present
+	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
+		var layers = src["layers"]
+		var layer_id = src.get("selectedLayer", "")
+		var layer = null
+		if layer_id != "" and layers.has(layer_id):
+			layer = layers[layer_id]
+		elif layers.size() > 0:
+			layer = layers[layers.keys()[0]]
+		if layer != null and typeof(layer) == TYPE_DICTIONARY:
+			src = layer
+
 	var raw = src.get("areas", null)
 	if raw == null: return {}
 	if typeof(raw) == TYPE_DICTIONARY: return raw
@@ -716,6 +728,18 @@ func _get_floor_plan_vertices() -> Dictionary:
 			if j.parse(fp) == OK: src = j.data
 		elif typeof(fp) == TYPE_DICTIONARY:
 			src = fp
+
+	# Unwrap layers if present
+	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
+		var layers = src["layers"]
+		var layer_id = src.get("selectedLayer", "")
+		var layer = null
+		if layer_id != "" and layers.has(layer_id):
+			layer = layers[layer_id]
+		elif layers.size() > 0:
+			layer = layers[layers.keys()[0]]
+		if layer != null and typeof(layer) == TYPE_DICTIONARY:
+			src = layer
 
 	var raw = src.get("vertices", null)
 	if raw == null: return {}
