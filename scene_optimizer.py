@@ -1232,6 +1232,7 @@ class SceneOptimizer:
             self._log_data["show_all_floors"] = show_all_floors
             self.log(f"🏗️  showAllFloors = {show_all_floors}")
             self._apply_ceiling_visibility(fp_data, cam_height_m, show_all_floors)
+            keep_all_layers = show_all or show_all_floors
 
             # ── 4. Per-layer culling ──────────────────────────────────────────
             layers = fp_data.get("layers", {})
@@ -1258,9 +1259,10 @@ class SceneOptimizer:
             # active; IDs like "layer-1-1769245501306" are the authoritative
             # selected layer even if the spatial scan would map back to "layer-1".
             camera_layer_id: Optional[str] = None
-
             _selected_layer_raw: str = str(fp_data.get("selectedLayer", "")).strip()
-            if _selected_layer_raw and not is_top_view:
+            if show_all_floors:
+                self.log("  🏗️ showAllFloors=true: skipping selectedLayer isolation and spatial pre-scan.")
+            elif _selected_layer_raw and not is_top_view:
                 # Exact match first
                 if _selected_layer_raw in layers:
                     camera_layer_id = _selected_layer_raw
@@ -1295,7 +1297,7 @@ class SceneOptimizer:
                     f"(resolved to '{camera_layer_id}') — skipping spatial pre-scan."
                 )
 
-            if not camera_layer_id and not is_top_view:
+            if not camera_layer_id and not is_top_view and not show_all_floors:
                 for _lid, _layer in layers.items():
                     # ── Height check: camera must sit within this layer's
                     # vertical range [altitude .. altitude + wall_height].
@@ -1354,7 +1356,7 @@ class SceneOptimizer:
                     if camera_layer_id:
                         break
 
-            if camera_layer_id and not show_all:
+            if camera_layer_id and not keep_all_layers and not show_all_floors:
                 self.log(
                     f"\n🎯 LAYER ISOLATION: Camera is inside layer '{camera_layer_id}' "
                     f"— only this layer will be rendered. All other layers are SKIPPED."
@@ -1386,7 +1388,7 @@ class SceneOptimizer:
                 # When the camera is placed inside a specific layer (INTERIOR),
                 # every other layer is irrelevant — skip it entirely so its
                 # geometry is not sent to the renderer at all.
-                if camera_layer_id and not show_all and layer_id != camera_layer_id:
+                if camera_layer_id and not keep_all_layers and layer_id != camera_layer_id:
                     self.log(
                         f"  ⏭️  SKIPPED — camera is in layer '{camera_layer_id}', "
                         f"not '{layer_id}'. Removing entire layer from output."
