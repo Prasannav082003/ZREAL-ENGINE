@@ -7,7 +7,6 @@ extends "res://video_glb_creation.gd"
 
 var use_threejs = true
 var convert_blender_camera = true
-var _headless = OS.has_feature("headless") or OS.has_feature("server")
 
 # Video state
 var _keyframes = []
@@ -23,6 +22,7 @@ var _use_png_fallback: bool = false
 var _needs_auto_pan: bool = false
 var _render_data = {}    # Full parsed JSON — used by setup_fixed_fill_lights()
 var _output_path: String = ""  # Stored for save_logs at completion
+var _first_frame_saved: bool = false  # Track whether first-frame thumbnail has been saved
 
 func _ready():
 	print("Godot VIDEO Renderer Started")
@@ -53,14 +53,15 @@ func _ready():
 	print("Input JSON: ", input_json_path)
 	print("Output Path: ", output_path)
 	
-	# Pure headless path: always render PNG sequence (no MovieWriter)
-	_use_movie_writer = false
-	_use_png_fallback = true
-	if output_path != "":
-		_base_filename = output_path.get_basename()
+	# Detect if MovieWriter is active
+	_use_movie_writer = Engine.get_write_movie_path() != ""
+	if _use_movie_writer:
+		print("MovieWriter ACTIVE - recording to: ", Engine.get_write_movie_path())
 	else:
-		_base_filename = "frame"
-	print("Headless render active - PNG sequence output base: ", _base_filename)
+		print("MovieWriter NOT active - using PNG fallback")
+		_use_png_fallback = true
+		if output_path != "":
+			_base_filename = output_path.get_basename()
 	
 	if not FileAccess.file_exists(input_json_path):
 		print("Error: Input file does not exist: ", input_json_path)
@@ -77,9 +78,6 @@ func _ready():
 		
 	var data = json.data
 	_setup_render(data, output_path)
-	# Use deterministic headless render loop (no _process / MovieWriter)
-	set_process(false)
-	call_deferred("_render_video_headless")
 
 func _setup_render(data, output_path):
 	_render_data = data   # Cache for later use by setup_fixed_fill_lights()
@@ -146,7 +144,10 @@ func _process(_delta):
 			
 			_rendering = true
 			print("Scene settled. Starting video render...")
-			# Fill lights were already set up in _ready() - no need to call again here
+			# Capture thumbnail safely asynchronously without blocking _process
+			if not _first_frame_saved:
+				_first_frame_saved = true
+				call_deferred("_capture_thumbnail_async")
 		return
 	
 	if not _rendering:
@@ -178,45 +179,11 @@ func _process(_delta):
 	
 	_current_frame += 1
 
-func _render_video_headless():
-	# Warmup phase
-	if _warmup_frames > 0:
-		await _wait_frames(_warmup_frames)
-	
-	# Generate auto-pan AFTER scene has settled
-	if _needs_auto_pan:
-		_generate_horizontal_pan(_total_frames)
-		_needs_auto_pan = false
-		if _keyframes.size() > 0:
-			_apply_keyframe(0)
-	
-	if _total_frames <= 0:
-		print("Error: No frames to render.")
-		get_tree().quit(1)
-		return
-	
-	print("Scene settled. Starting headless video render...")
-	
-	var base_filename = _base_filename if _base_filename != "" else "frame"
-	
-	for frame in range(_total_frames):
-		_apply_keyframe(frame)
-		var img = await _capture_viewport_image(3)
-		if img and not img.is_empty():
-			var frame_filename = "%s_%04d.png" % [base_filename, frame]
-			img.save_png(frame_filename)
-		else:
-			print("Warning: empty frame at index ", frame)
-		
-		if frame % 10 == 0 or frame == _total_frames - 1:
-			var pct = int(float(frame) / float(_total_frames) * 100.0)
-			print("Frame ", frame, "/", _total_frames, " (", pct, "%)")
-	
-	print("============================================================")
-	print("VIDEO RENDER COMPLETE - ", _total_frames, " frames rendered.")
-	print("============================================================")
-	save_logs(_render_data, _output_path)
-	get_tree().quit(0)
+func _capture_thumbnail_async():
+	await RenderingServer.frame_post_draw
+	var img = get_viewport().get_texture().get_image()
+	if img and not img.is_empty():
+		_save_thumbnail_webp(img, _output_path)
 
 func _apply_keyframe(frame_idx: int):
 	var cam = get_node_or_null("MainCamera")
@@ -452,23 +419,6 @@ func _generate_horizontal_pan(total_frames: int):
 	
 	print("Generated ", _keyframes.size(), " horizontal pan keyframes")
 	print("  Start: ", start_pos, " Target: ", target_point, " Pan: ", pan_distance, "m")
-
-func _wait_frames(count: int) -> void:
-	for i in range(count):
-		await get_tree().process_frame
-
-func _capture_viewport_image(retries: int = 3):
-	var vp = get_viewport()
-	for i in range(max(1, retries)):
-		RenderingServer.force_draw()
-		await get_tree().process_frame
-		var tex = vp.get_texture()
-		if tex:
-			var img = tex.get_image()
-			if img and not img.is_empty():
-				return img
-		await get_tree().process_frame
-	return null
 
 # ─────────────────────────────────────────────────────────────────
 # Resolution
@@ -757,6 +707,18 @@ func _get_floor_plan_areas() -> Dictionary:
 		elif typeof(fp) == TYPE_DICTIONARY:
 			src = fp
 
+	# Unwrap layers if present
+	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
+		var layers = src["layers"]
+		var layer_id = src.get("selectedLayer", "")
+		var layer = null
+		if layer_id != "" and layers.has(layer_id):
+			layer = layers[layer_id]
+		elif layers.size() > 0:
+			layer = layers[layers.keys()[0]]
+		if layer != null and typeof(layer) == TYPE_DICTIONARY:
+			src = layer
+
 	var raw = src.get("areas", null)
 	if raw == null: return {}
 	if typeof(raw) == TYPE_DICTIONARY: return raw
@@ -776,6 +738,18 @@ func _get_floor_plan_vertices() -> Dictionary:
 			if j.parse(fp) == OK: src = j.data
 		elif typeof(fp) == TYPE_DICTIONARY:
 			src = fp
+
+	# Unwrap layers if present
+	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
+		var layers = src["layers"]
+		var layer_id = src.get("selectedLayer", "")
+		var layer = null
+		if layer_id != "" and layers.has(layer_id):
+			layer = layers[layer_id]
+		elif layers.size() > 0:
+			layer = layers[layers.keys()[0]]
+		if layer != null and typeof(layer) == TYPE_DICTIONARY:
+			src = layer
 
 	var raw = src.get("vertices", null)
 	if raw == null: return {}
@@ -859,3 +833,64 @@ func save_logs(input_data, output_video_path):
 		print("Saved video render log to: ", log_path)
 	else:
 		print("Error saving video render log to ", log_path)
+
+# ─────────────────────────────────────────────────────────────────
+# Thumbnail Generation
+# ─────────────────────────────────────────────────────────────────
+func _save_thumbnail_webp(source_image: Image, output_path: String) -> void:
+	"""Saves a small WebP thumbnail next to the render output.
+	The thumbnail is saved with a '_thumb.webp' suffix in the same directory.
+	Max dimension is 480px, WebP quality 75% to keep file size low."""
+	if source_image == null or source_image.is_empty():
+		print("Warning: Cannot create thumbnail — source image is empty.")
+		return
+	
+	# We handle both single file paths and nested paths correctly:
+	# If the output_path is .../output_renders/<uuid>/frame.avi,
+	# We want the thumbnail at:  .../output_renders/<uuid>_thumb.webp
+	# If the output_path is just .../video.avi, we want: .../video_thumb.webp
+	var thumb_path = ""
+	var inner_dir = output_path.get_base_dir()
+	var folder_name = inner_dir.get_file()
+	
+	# Simple heuristic: if the containing folder looks like an ID (or we are in a subfolder structure)
+	# and output_path ends with 'frame.avi' or similar generic name from Python
+	if output_path.get_file().get_basename().begins_with("frame") and inner_dir.get_base_dir().get_file() == "output_renders":
+		var parent_dir = inner_dir.get_base_dir()
+		thumb_path = parent_dir.path_join(folder_name + "_thumb.webp")
+	else:
+		# Default fallback
+		var dir = output_path.get_base_dir()
+		var basename = output_path.get_file().get_basename()
+		
+		# Prevent doubling the _render extension if the UUID folder is used
+		if basename.ends_with("_render"):
+			thumb_path = dir.path_join(basename + "_thumb.webp")
+		elif folder_name.length() > 20: # UUID length approx check
+			thumb_path = dir.get_base_dir().path_join(folder_name + "_thumb.webp")
+		else:
+			thumb_path = dir.path_join(basename + "_thumb.webp")
+	
+	# Create a copy to avoid mutating the original image
+	var thumb = source_image.duplicate()
+	
+	# Resize to max 480px on the longest side, preserving aspect ratio
+	var max_dim = 480
+	var w = thumb.get_width()
+	var h = thumb.get_height()
+	if w > max_dim or h > max_dim:
+		if w >= h:
+			var new_w = max_dim
+			var new_h = int(float(h) * float(max_dim) / float(w))
+			thumb.resize(new_w, max(new_h, 1), Image.INTERPOLATE_LANCZOS)
+		else:
+			var new_h = max_dim
+			var new_w = int(float(w) * float(max_dim) / float(h))
+			thumb.resize(max(new_w, 1), new_h, Image.INTERPOLATE_LANCZOS)
+	
+	# Save as WebP with lossy compression (quality 0.75 = 75%)
+	var err = thumb.save_webp(thumb_path, true, 0.75)
+	if err == OK:
+		print("Thumbnail saved to: ", thumb_path)
+	else:
+		print("Warning: Failed to save thumbnail. Error code: ", err)

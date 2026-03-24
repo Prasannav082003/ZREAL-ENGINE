@@ -4,10 +4,11 @@ extends Node3D
 # Handles the construction of the scene: Architecture (Walls, Floors, Ceilings) and Asset Loading.
 var _tracked_assets = []
 var day_render = true
+var lighting_profile = "day"
 
 func build_scene(data):
-	if data.has("day_render"):
-		day_render = data["day_render"]
+	lighting_profile = _resolve_lighting_profile(data)
+	day_render = lighting_profile != "night"
 	
 	var geom_data = data
 	if data.has("floor_plan_data"):
@@ -26,10 +27,13 @@ func build_scene(data):
 	setup_lighting(data, geom_data)
 		
 	build_architecture(geom_data)
+	build_structures(geom_data)
 	load_assets(geom_data)
 	# setup_camera(data) - Moved to render_image.gd
 
 func setup_lighting(data, geom_data = {}):
+	var lighting = _get_lighting_profile_settings()
+
 	# Window sunlight simulation (stable alternative to RectLight)
 	var cam_pose = _extract_camera_pose(data)
 	var cam_pos: Vector3 = cam_pose["position"]
@@ -48,9 +52,9 @@ func setup_lighting(data, geom_data = {}):
 
 	var window_light = OmniLight3D.new()
 	window_light.position = Vector3(room_center.x, room_ceiling_y - 1.25, room_center.z)
-	window_light.light_energy = 0.14 if day_render else 0.07
+	window_light.light_energy = lighting["window_energy"]
 	window_light.omni_range = max(room_extent.x, room_extent.y) * 2.1 + 6.0
-	window_light.light_color = Color(1.0, 0.95, 0.85)
+	window_light.light_color = lighting["window_color"]
 	window_light.light_specular = 0.0
 	window_light.shadow_enabled = false
 
@@ -75,10 +79,16 @@ func setup_lighting(data, geom_data = {}):
 
 	if data.has("directional_light"):
 		var l = data["directional_light"]
-		if day_render:
-			dir_light.light_energy = l.get("intensity", 2.8)
+		dir_light.light_energy = l.get("intensity", lighting["dir_energy"])
+		if l.has("color") and typeof(l["color"]) == TYPE_DICTIONARY:
+			var c = l["color"]
+			dir_light.light_color = Color(
+				float(c.get("r", lighting["dir_color"].r)),
+				float(c.get("g", lighting["dir_color"].g)),
+				float(c.get("b", lighting["dir_color"].b))
+			)
 		else:
-			dir_light.light_energy = l.get("intensity", 0.14)
+			dir_light.light_color = lighting["dir_color"]
 		if l.has("position"):
 			dir_light.position = parse_vec3(l["position"])
 			if l.has("target"):
@@ -87,14 +97,19 @@ func setup_lighting(data, geom_data = {}):
 				dir_light.look_at(light_anchor)
 	else:
 		# Camera-aware defaults: keep key light roughly behind/above the camera direction.
-		if day_render:
-			dir_light.light_energy = 2.8
-			dir_light.light_color  = Color(1.0, 0.96, 0.88)  # warm sunlight
+		if lighting_profile == "day":
+			dir_light.light_energy = lighting["dir_energy"]
+			dir_light.light_color  = lighting["dir_color"]
 			dir_light.position     = light_anchor - cam_forward * 12.0 + cam_right * 6.0 + Vector3.UP * 16.0
 			dir_light.look_at(light_anchor)
+		elif lighting_profile == "sunset":
+			dir_light.light_energy = lighting["dir_energy"]
+			dir_light.light_color  = lighting["dir_color"]
+			dir_light.position     = light_anchor - cam_forward * 9.0 + cam_right * 9.0 + Vector3.UP * 8.5
+			dir_light.look_at(light_anchor + Vector3(0, -1.4, 0))
 		else:
-			dir_light.light_energy = 0.14
-			dir_light.light_color  = Color(0.55, 0.62, 0.90)  # cool moonlight
+			dir_light.light_energy = lighting["dir_energy"]
+			dir_light.light_color  = lighting["dir_color"]
 			dir_light.position     = light_anchor - cam_forward * 10.0 - cam_right * 4.0 + Vector3.UP * 18.0
 			dir_light.look_at(light_anchor)
 
@@ -105,11 +120,7 @@ func setup_lighting(data, geom_data = {}):
 	env.background_mode = Environment.BG_SKY
 	env.sky = Sky.new()
 
-	var exr_path = ""
-	if day_render:
-		exr_path = ProjectSettings.globalize_path("res://day.exr")
-	else:
-		exr_path = ProjectSettings.globalize_path("res://night.exr")
+	var exr_path = ProjectSettings.globalize_path(lighting["sky_exr"])
 
 	var sky_material_set = false
 	if FileAccess.file_exists(exr_path):
@@ -129,37 +140,27 @@ func setup_lighting(data, geom_data = {}):
 
 	if not sky_material_set:
 		var sky_mat = ProceduralSkyMaterial.new()
-		if day_render:
-			sky_mat.sky_top_color      = Color(0.25, 0.40, 0.78)   # deep blue zenith
-			sky_mat.sky_horizon_color  = Color(0.75, 0.80, 0.90)   # pale horizon
-			sky_mat.ground_bottom_color   = Color(0.08, 0.06, 0.04)
-			sky_mat.ground_horizon_color  = Color(0.30, 0.28, 0.22)
-			sky_mat.sun_angle_max         = 30.0
-			sky_mat.sun_curve             = 0.15
-		else:
-			sky_mat.sky_top_color      = Color(0.01, 0.02, 0.05)
-			sky_mat.sky_horizon_color  = Color(0.04, 0.06, 0.10)
-			sky_mat.ground_bottom_color   = Color(0.005, 0.005, 0.01)
-			sky_mat.ground_horizon_color  = Color(0.03, 0.05, 0.08)
+		sky_mat.sky_top_color         = lighting["sky_top_color"]
+		sky_mat.sky_horizon_color     = lighting["sky_horizon_color"]
+		sky_mat.ground_bottom_color   = lighting["ground_bottom_color"]
+		sky_mat.ground_horizon_color  = lighting["ground_horizon_color"]
+		sky_mat.sun_angle_max         = lighting["sun_angle_max"]
+		sky_mat.sun_curve             = lighting["sun_curve"]
 		env.sky.sky_material = sky_mat
 		print("Using fallback procedural sky")
 
 	# ── Ambient Light ──────────────────────────────────────────────────────
 	# Use color ambient for enclosed rooms to avoid sky-light leaking at wall/ceiling corners.
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	if day_render:
-		env.ambient_light_color = Color(0.76, 0.77, 0.78)
-		env.ambient_light_energy = 0.42
-	else:
-		env.ambient_light_color = Color(0.20, 0.24, 0.34)
-		env.ambient_light_energy = 0.10
+	env.ambient_light_color = lighting["ambient_color"]
+	env.ambient_light_energy = lighting["ambient_energy"]
 
 	# ── Tone Mapping ──────────────────────────────────────────────────────
 	# CRITICAL: exposure must be set high enough that headless render is NOT black.
 	# CameraAttributesPhysical is intentionally NOT used (causes black in headless).
 	env.tonemap_mode     = Environment.TONE_MAPPER_FILMIC
-	env.tonemap_exposure = 0.85   # slightly darker global exposure
-	env.tonemap_white    = 5.0
+	env.tonemap_exposure = lighting["tonemap_exposure"]
+	env.tonemap_white    = lighting["tonemap_white"]
 
 	# ── SDFGI: DISABLED — crashes / produces black in headless Godot export ─
 	# Use SSAO + SSIL for safe indirect-light approximation instead.
@@ -182,10 +183,10 @@ func setup_lighting(data, geom_data = {}):
 
 	# ── Glow (subtle bloom for realism) ───────────────────────────────────
 	env.glow_enabled       = true
-	env.glow_intensity     = 0.10
-	env.glow_bloom         = 0.03
-	env.glow_hdr_threshold = 2.2
-	env.glow_hdr_scale     = 1.4
+	env.glow_intensity     = lighting["glow_intensity"]
+	env.glow_bloom         = lighting["glow_bloom"]
+	env.glow_hdr_threshold = lighting["glow_hdr_threshold"]
+	env.glow_hdr_scale     = lighting["glow_hdr_scale"]
 	env.glow_blend_mode    = Environment.GLOW_BLEND_MODE_SOFTLIGHT
 
 	# ── Colour Grading ────────────────────────────────────────────────────
@@ -213,14 +214,14 @@ func setup_lighting(data, geom_data = {}):
 	# ── Scene Fill Lights ─────────────────────────────────────────────────
 	# These guarantee the scene is NEVER black regardless of GI or sky state.
 	# They are kept intentionally low so the directional sun dominates.
-	if day_render:
+	if lighting_profile == "day" or lighting_profile == "sunset":
 		# Warm overhead fill — simulates ceiling/sky bounce
 		var fill = OmniLight3D.new()
 		fill.name           = "FillLight"
 		fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
-		fill.light_energy   = 0.18
+		fill.light_energy   = lighting["fill_energy"]
 		fill.omni_range     = max(room_extent.x, room_extent.y) * 2.5 + 10.0
-		fill.light_color    = Color(1.0, 0.97, 0.90)
+		fill.light_color    = lighting["fill_color"]
 		fill.light_specular = 0.0
 		fill.shadow_enabled = false
 		add_child(fill)
@@ -230,9 +231,9 @@ func setup_lighting(data, geom_data = {}):
 		var fill_front = OmniLight3D.new()
 		fill_front.name           = "FrontFillLight"
 		fill_front.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) + cam_forward * fill_offset
-		fill_front.light_energy   = 0.055
+		fill_front.light_energy   = lighting["front_back_fill_energy"]
 		fill_front.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
-		fill_front.light_color    = Color(0.99, 0.97, 0.93)
+		fill_front.light_color    = lighting["front_back_fill_color"]
 		fill_front.light_specular = 0.0
 		fill_front.shadow_enabled = false
 		add_child(fill_front)
@@ -240,9 +241,9 @@ func setup_lighting(data, geom_data = {}):
 		var fill_back = OmniLight3D.new()
 		fill_back.name           = "BackFillLight"
 		fill_back.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) - cam_forward * fill_offset
-		fill_back.light_energy   = 0.055
+		fill_back.light_energy   = lighting["front_back_fill_energy"]
 		fill_back.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
-		fill_back.light_color    = Color(0.99, 0.97, 0.93)
+		fill_back.light_color    = lighting["front_back_fill_color"]
 		fill_back.light_specular = 0.0
 		fill_back.shadow_enabled = false
 		add_child(fill_back)
@@ -250,19 +251,120 @@ func setup_lighting(data, geom_data = {}):
 		var fill = OmniLight3D.new()
 		fill.name           = "FillLight"
 		fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
-		fill.light_energy   = 0.10
+		fill.light_energy   = lighting["fill_energy"]
 		fill.omni_range     = max(room_extent.x, room_extent.y) * 2.2 + 7.0
-		fill.light_color    = Color(0.5, 0.55, 0.8)
+		fill.light_color    = lighting["fill_color"]
 		fill.light_specular = 0.0
 		fill.shadow_enabled = false
 		add_child(fill)
 
-	print("Photorealistic lighting setup complete. day_render=", day_render)
+	print("Photorealistic lighting setup complete. profile=", lighting_profile)
 
 func parse_vec3(d):
 	if typeof(d) == TYPE_DICTIONARY:
 		return Vector3(d.get("x", 0), d.get("y", 0), d.get("z", 0))
 	return Vector3.ZERO
+
+func _resolve_lighting_profile(data: Dictionary) -> String:
+	var string_keys = ["lighting_profile", "time_of_day", "render_time", "environment_preset"]
+	for key in string_keys:
+		if data.has(key):
+			var value = str(data[key]).to_lower().strip_edges()
+			if "sunset" in value or "dusk" in value or "evening" in value:
+				return "sunset"
+			if "night" in value:
+				return "night"
+			if "day" in value or "morning" in value or "afternoon" in value:
+				return "day"
+
+	if bool(data.get("sunset_render", false)):
+		return "sunset"
+	if bool(data.get("night_render", false)):
+		return "night"
+	if data.has("day_render"):
+		return "day" if bool(data["day_render"]) else "night"
+	return "day"
+
+func _get_lighting_profile_settings() -> Dictionary:
+	match lighting_profile:
+		"night":
+			return {
+				"sky_exr": "res://night.exr",
+				"window_energy": 0.03,
+				"window_color": Color(0.72, 0.80, 1.0),
+				"dir_energy": 0.06,
+				"dir_color": Color(0.55, 0.62, 0.90),
+				"sky_top_color": Color(0.01, 0.02, 0.05),
+				"sky_horizon_color": Color(0.04, 0.06, 0.10),
+				"ground_bottom_color": Color(0.005, 0.005, 0.01),
+				"ground_horizon_color": Color(0.03, 0.05, 0.08),
+				"sun_angle_max": 10.0,
+				"sun_curve": 0.05,
+				"ambient_color": Color(0.20, 0.24, 0.34),
+				"ambient_energy": 0.05,
+				"tonemap_exposure": 0.45,
+				"tonemap_white": 4.8,
+				"glow_intensity": 0.26,
+				"glow_bloom": 0.10,
+				"glow_hdr_threshold": 1.15,
+				"glow_hdr_scale": 2.1,
+				"fill_energy": 0.05,
+				"fill_color": Color(0.5, 0.55, 0.8),
+				"front_back_fill_energy": 0.02,
+				"front_back_fill_color": Color(0.58, 0.64, 0.88)
+			}
+		"sunset":
+			return {
+				"sky_exr": "res://day.exr",
+				"window_energy": 0.18,
+				"window_color": Color(1.0, 0.76, 0.56),
+				"dir_energy": 1.65,
+				"dir_color": Color(1.0, 0.63, 0.38),
+				"sky_top_color": Color(0.20, 0.24, 0.42),
+				"sky_horizon_color": Color(1.0, 0.56, 0.34),
+				"ground_bottom_color": Color(0.09, 0.05, 0.03),
+				"ground_horizon_color": Color(0.42, 0.22, 0.14),
+				"sun_angle_max": 18.0,
+				"sun_curve": 0.22,
+				"ambient_color": Color(0.62, 0.50, 0.42),
+				"ambient_energy": 0.28,
+				"tonemap_exposure": 0.78,
+				"tonemap_white": 4.6,
+				"glow_intensity": 0.28,
+				"glow_bloom": 0.11,
+				"glow_hdr_threshold": 1.10,
+				"glow_hdr_scale": 2.15,
+				"fill_energy": 0.15,
+				"fill_color": Color(1.0, 0.80, 0.60),
+				"front_back_fill_energy": 0.07,
+				"front_back_fill_color": Color(1.0, 0.82, 0.64)
+			}
+		_:
+			return {
+				"sky_exr": "res://day.exr",
+				"window_energy": 0.06,
+				"window_color": Color(1.0, 0.95, 0.85),
+				"dir_energy": 1.0,
+				"dir_color": Color(1.0, 0.96, 0.88),
+				"sky_top_color": Color(0.25, 0.40, 0.78),
+				"sky_horizon_color": Color(0.75, 0.80, 0.90),
+				"ground_bottom_color": Color(0.08, 0.06, 0.04),
+				"ground_horizon_color": Color(0.30, 0.28, 0.22),
+				"sun_angle_max": 30.0,
+				"sun_curve": 0.15,
+				"ambient_color": Color(0.76, 0.77, 0.78),
+				"ambient_energy": 0.15,
+				"tonemap_exposure": 0.72,
+				"tonemap_white": 5.0,
+				"glow_intensity": 0.22,
+				"glow_bloom": 0.08,
+				"glow_hdr_threshold": 1.35,
+				"glow_hdr_scale": 1.9,
+				"fill_energy": 0.10,
+				"fill_color": Color(1.0, 0.97, 0.90),
+				"front_back_fill_energy": 0.03,
+				"front_back_fill_color": Color(0.99, 0.97, 0.93)
+			}
 
 func _extract_camera_pose(data: Dictionary) -> Dictionary:
 	var cam_pos = Vector3(0, 1.6, 6)
@@ -383,6 +485,7 @@ func build_architecture(data):
 		# Determine which layers to process based on showAllFloors / selectedLayer
 		var show_all_floors = data.get("showAllFloors", true)
 		var selected_layer = data.get("selectedLayer", "")
+		var keep_all_layers = show_all_floors
 		
 		if show_all_floors:
 			print("showAllFloors is true — building ALL layers.")
@@ -391,7 +494,7 @@ func build_architecture(data):
 		
 		for layer_id in data["layers"]:
 			# If showAllFloors is false, skip layers that don't match selectedLayer
-			if not show_all_floors and selected_layer != "" and str(layer_id) != str(selected_layer):
+			if not keep_all_layers and selected_layer != "" and str(layer_id) != str(selected_layer):
 				print("Skipping layer: ", layer_id, " (not selected)")
 				continue
 			
@@ -557,6 +660,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 	var areas = {}
 	if layer_data.has("areas"):
 		areas = layer_data["areas"]
+
+	# Structures dictionary — used for floor openings and procedural meshes
+	var structures = {}
+	if layer_data.has("structures") and typeof(layer_data["structures"]) == TYPE_DICTIONARY:
+		structures = layer_data["structures"]
 
 	# ── Compute room centroid (used for inner_sign fallback only) ─────────
 	# The centroid approach is a legacy fallback kept for walls that belong to
@@ -965,6 +1073,9 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 				var floor_mat = StandardMaterial3D.new()
 				floor_mat.albedo_color = Color(0.8, 0.8, 0.8)
 				floor_poly.material    = floor_mat
+
+			# Subtract floor openings that belong to this area before adding the slab.
+			_add_floor_opening_cutters(csg, structures, str(area_id), layer_altitude, floor_depth, scale_factor)
 			
 			csg.add_child(floor_poly)
 			
@@ -1028,6 +1139,17 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 #   2. line["inner_properties"]["material"] / line["outer_properties"]["material"]
 #   3. null (caller uses default grey)
 func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
+	var prop_key = face + "_properties"
+	var other_face = "outer" if face == "inner" else "inner"
+	var other_prop_key = other_face + "_properties"
+	var has_face_material = false
+	if line.has(prop_key) and typeof(line[prop_key]) == TYPE_DICTIONARY:
+		var face_props = line[prop_key]
+		has_face_material = face_props.has("material") and typeof(face_props["material"]) == TYPE_DICTIONARY
+	if not has_face_material and line.has(other_prop_key) and typeof(line[other_prop_key]) == TYPE_DICTIONARY:
+		var other_props = line[other_prop_key]
+		has_face_material = other_props.has("material") and typeof(other_props["material"]) == TYPE_DICTIONARY
+
 	# 1. asset_urls block  (same data the frontend wallTextures come from)
 	if line.has("asset_urls") and typeof(line["asset_urls"]) == TYPE_DICTIONARY:
 		var au = line["asset_urls"]
@@ -1066,24 +1188,538 @@ func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
 				mat_data["repeat"] = block["repeat"]
 
 			if mat_data.size() > 0:
-				return mat_data
+				var has_texture = mat_data.has("mapUrl") or mat_data.has("normalUrl") or mat_data.has("roughnessUrl")
+				var has_color = mat_data.has("color")
+				if has_texture or (has_color and not has_face_material):
+					return mat_data
 
 	# 2. inner_properties / outer_properties
-	var prop_key = face + "_properties"
 	if line.has(prop_key) and typeof(line[prop_key]) == TYPE_DICTIONARY:
 		var props = line[prop_key]
 		if props.has("material") and typeof(props["material"]) == TYPE_DICTIONARY:
 			return props["material"]
 
 	# 3. Cross-fallback: if requesting "outer" and only "inner" exists, use inner (and vice-versa)
-	var other_face = "outer" if face == "inner" else "inner"
-	var other_prop_key = other_face + "_properties"
 	if line.has(other_prop_key) and typeof(line[other_prop_key]) == TYPE_DICTIONARY:
 		var props = line[other_prop_key]
 		if props.has("material") and typeof(props["material"]) == TYPE_DICTIONARY:
 			return props["material"]
 
 	return null
+
+func build_structures(data):
+	if data.has("layers"):
+		var layers_dict    = data["layers"]
+		var show_all_floors = data.get("showAllFloors", true)
+		var selected_layer  = data.get("selectedLayer", "")
+
+		for layer_id in layers_dict:
+			if not show_all_floors and selected_layer != "" and str(layer_id) != str(selected_layer):
+				continue
+
+			var layer = layers_dict[layer_id]
+			var layer_alt = 0.0
+			if show_all_floors:
+				if layer.has("altitude"):
+					var alt_val = layer["altitude"]
+					if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
+						layer_alt = float(alt_val["length"]) * 0.01
+					else:
+						layer_alt = float(alt_val) * 0.01
+
+			if layer.has("structures"):
+				_load_layer_structures(layer["structures"], layer_alt, str(layer_id))
+	elif data.has("structures"):
+		_load_layer_structures(data["structures"], 0.0, "root")
+
+func _load_layer_structures(structures, layer_altitude, layer_id := ""):
+	for structure_id in structures:
+		var structure
+		if typeof(structures) == TYPE_DICTIONARY:
+			structure = structures[structure_id]
+		else:
+			structure = structure_id
+		if typeof(structure) != TYPE_DICTIONARY:
+			continue
+		if structure.has("visible") and structure["visible"] == false:
+			continue
+		_build_structure_mesh(structure, layer_altitude, layer_id)
+
+func _build_structure_mesh(structure: Dictionary, layer_altitude: float, layer_id := "") -> void:
+	var structure_type = str(structure.get("structure_type", structure.get("type", ""))).to_lower()
+	if structure_type == "":
+		return
+
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var scale_factor = 0.01
+	var width  = get_dimension_value(props.get("width",  structure.get("width",  100))) * scale_factor
+	var depth  = get_dimension_value(props.get("depth",  structure.get("depth",  100))) * scale_factor
+	var height = get_dimension_value(props.get("height", structure.get("height", 100))) * scale_factor
+	var altitude = get_dimension_value(props.get("altitude", structure.get("altitude", 0))) * scale_factor
+
+	var root = Node3D.new()
+	root.name = "Structure_%s_%s" % [structure_type, str(structure.get("id", "unknown"))]
+	root.position = Vector3(
+		float(structure.get("x", 0)) * scale_factor,
+		layer_altitude + altitude,
+		float(structure.get("y", 0)) * scale_factor
+	)
+
+	var rot = 0.0
+	if structure.has("rotation"):
+		rot = float(structure["rotation"])
+	elif props.has("rotation"):
+		rot = float(props["rotation"])
+	root.rotation.y = -deg_to_rad(rot)
+	root.scale = Vector3(
+		-1.0 if bool(structure.get("flipX", false)) else 1.0,
+		1.0,
+		-1.0 if bool(structure.get("flipZ", false)) else 1.0
+	)
+	add_child(root)
+
+	var mat_data = _resolve_structure_material(structure, structure_type)
+	match structure_type:
+		"squarecolumn", "flue", "beam":
+			_add_box_structure(root, structure_type, width, depth, height, mat_data)
+		"circlecolumn":
+			_add_cylinder_structure(root, width, depth, height, mat_data)
+		"ramp":
+			_add_ramp_structure(root, width, depth, height, mat_data)
+		"step":
+			_add_step_structure(root, structure, width, depth, height, mat_data)
+		"falseceiling":
+			_add_false_ceiling_structure(root, structure, width, depth, height, mat_data)
+		"staircase":
+			_add_staircase_structure(root, structure, width, depth, height, mat_data)
+		"flooropening":
+			_add_floor_opening_frame(root, structure, width, depth, mat_data)
+		_:
+			_add_box_structure(root, structure_type, width, depth, height, mat_data)
+
+func _resolve_structure_material(structure: Dictionary, structure_type: String) -> Dictionary:
+	var mats = {}
+	if structure.has("materials") and typeof(structure["materials"]) == TYPE_DICTIONARY:
+		mats = structure["materials"]
+
+	var preferred = []
+	match structure_type:
+		"squarecolumn", "circlecolumn", "flue":
+			preferred = ["Column"]
+		"beam":
+			preferred = ["Beam"]
+		"ramp":
+			preferred = ["Ramp"]
+		"step":
+			preferred = ["Step"]
+		"falseceiling":
+			preferred = ["False Ceiling", "Drop Section"]
+		"staircase":
+			preferred = ["StaircaseTop", "Step", "LandingTop"]
+		"flooropening":
+			preferred = ["FloorOpening", "Frame"]
+		_:
+			preferred = []
+
+	for key in preferred:
+		if mats.has(key) and typeof(mats[key]) == TYPE_DICTIONARY:
+			return mats[key]
+
+	if mats.size() > 0:
+		var first_key = mats.keys()[0]
+		if typeof(mats[first_key]) == TYPE_DICTIONARY:
+			return mats[first_key]
+
+	return {"color": Color(0.78, 0.78, 0.78)}
+
+func _add_box_structure(parent: Node3D, structure_type: String, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var mesh = BoxMesh.new()
+	mesh.size = Vector3(max(width, 0.05), max(height, 0.05), max(depth, 0.05))
+	var mi = MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = create_material(mat_data)
+	mi.position = Vector3(0, max(height, 0.05) * 0.5, 0)
+	parent.add_child(mi)
+
+func _add_cylinder_structure(parent: Node3D, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var radius = max(width, depth) * 0.5
+	var mesh = CylinderMesh.new()
+	mesh.top_radius = radius
+	mesh.bottom_radius = radius
+	mesh.height = max(height, 0.05)
+	mesh.radial_segments = 24
+	var mi = MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = create_material(mat_data)
+	mi.position = Vector3(0, max(height, 0.05) * 0.5, 0)
+	parent.add_child(mi)
+
+func _create_ramp_mesh(width: float, depth: float, height: float) -> ArrayMesh:
+	var w = max(width, 0.05)
+	var d = max(depth, 0.05)
+	var h = max(height, 0.05)
+
+	# Triangular prism extruded along X to make a simple ramp wedge.
+	var st = SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var v0 = Vector3(-w * 0.5, 0, 0)
+	var v1 = Vector3(-w * 0.5, 0, d)
+	var v2 = Vector3(-w * 0.5, h, d)
+	var v3 = Vector3(w * 0.5, 0, 0)
+	var v4 = Vector3(w * 0.5, 0, d)
+	var v5 = Vector3(w * 0.5, h, d)
+
+	# Left triangle
+	st.add_vertex(v0)
+	st.add_vertex(v1)
+	st.add_vertex(v2)
+	# Right triangle
+	st.add_vertex(v3)
+	st.add_vertex(v5)
+	st.add_vertex(v4)
+	# Bottom face
+	st.add_vertex(v0)
+	st.add_vertex(v3)
+	st.add_vertex(v4)
+	st.add_vertex(v0)
+	st.add_vertex(v4)
+	st.add_vertex(v1)
+	# Back face
+	st.add_vertex(v1)
+	st.add_vertex(v4)
+	st.add_vertex(v5)
+	st.add_vertex(v1)
+	st.add_vertex(v5)
+	st.add_vertex(v2)
+	# Sloped face
+	st.add_vertex(v0)
+	st.add_vertex(v2)
+	st.add_vertex(v5)
+	st.add_vertex(v0)
+	st.add_vertex(v5)
+	st.add_vertex(v3)
+
+	st.generate_normals()
+	return st.commit()
+
+func _add_ramp_structure(parent: Node3D, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var mesh = MeshInstance3D.new()
+	mesh.mesh = _create_ramp_mesh(width, depth, height)
+	mesh.material_override = create_material(mat_data)
+	parent.add_child(mesh)
+
+func _add_step_structure(parent: Node3D, structure: Dictionary, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var stair = {}
+	if props.has("stair") and typeof(props["stair"]) == TYPE_DICTIONARY:
+		stair = props["stair"]
+
+	var flights = []
+	if stair.has("flights") and typeof(stair["flights"]) == TYPE_ARRAY:
+		flights = stair["flights"]
+
+	var step_count = 1
+	var riser = max(height, 0.05)
+	var tread = max(depth, 0.05)
+	var direction = "forward"
+
+	if flights.size() > 0 and typeof(flights[0]) == TYPE_DICTIONARY:
+		var flight = flights[0]
+		step_count = max(int(flight.get("step_count", 1)), 1)
+		if float(flight.get("riser_height", 0.0)) > 0:
+			riser = float(flight.get("riser_height", 0.0)) * 0.01
+		else:
+			riser = max(height / float(step_count), 0.05)
+		if float(flight.get("tread_depth", 0.0)) > 0:
+			tread = float(flight.get("tread_depth", 0.0)) * 0.01
+		else:
+			tread = max(depth / float(step_count), 0.05)
+		direction = str(flight.get("direction", "forward")).to_lower()
+	else:
+		if stair.has("auto_calculate_steps") and bool(stair["auto_calculate_steps"]):
+			step_count = max(int(round(height / 0.15)), 1)
+			riser = max(height / float(step_count), 0.05)
+			tread = max(depth / float(step_count), 0.05)
+
+	var step_width = max(width, 0.05)
+	var dir_vec = Vector3(0, 0, 1)
+	var step_rot_y = 0.0
+	match direction:
+		"backward", "back", "reverse":
+			dir_vec = Vector3(0, 0, 1)
+		"left":
+			dir_vec = Vector3(-1, 0, 0)
+			step_rot_y = PI / 2
+		"right":
+			dir_vec = Vector3(1, 0, 0)
+			step_rot_y = PI / 2
+		_:
+			dir_vec = Vector3(0, 0, -1)
+
+	var stair_csg = CSGCombiner3D.new()
+	stair_csg.name = "StepCSG_" + str(structure.get("id", "unknown"))
+	parent.add_child(stair_csg)
+
+	var step_mat = create_material(mat_data)
+	var overlap = 0.002
+	var run_length = tread * float(step_count)
+	var total_height = riser * float(step_count)
+
+	var support_node = MeshInstance3D.new()
+	support_node.mesh = _create_step_support_mesh(step_width, run_length, total_height)
+	support_node.material_override = step_mat
+	match direction:
+		"backward", "back", "reverse":
+			support_node.rotation.y = 0.0
+		"left":
+			support_node.rotation.y = -PI / 2.0
+		"right":
+			support_node.rotation.y = PI / 2.0
+		_:
+			support_node.rotation.y = PI
+	stair_csg.add_child(support_node)
+
+	for i in range(step_count):
+		var step_node = CSGBox3D.new()
+		step_node.operation = CSGShape3D.OPERATION_UNION
+		step_node.size = Vector3(step_width, riser + overlap, tread + overlap)
+		step_node.material = step_mat
+		var step_pos = Vector3.ZERO
+		step_pos += dir_vec * (tread * (i + 0.5))
+		step_pos.y = riser * (i + 0.5)
+		step_node.position = step_pos
+		step_node.rotation.y = step_rot_y
+		stair_csg.add_child(step_node)
+
+func _create_step_support_mesh(width: float, run_length: float, total_height: float) -> ArrayMesh:
+	var w = max(width, 0.05)
+	var r = max(run_length, 0.05)
+	var h = max(total_height, 0.05)
+
+	var st = SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var a = Vector3(-w * 0.5, 0, 0)
+	var b = Vector3(-w * 0.5, 0, r)
+	var c = Vector3(-w * 0.5, h, r)
+	var d = Vector3(w * 0.5, 0, 0)
+	var e = Vector3(w * 0.5, 0, r)
+	var f = Vector3(w * 0.5, h, r)
+
+	# Left end
+	st.add_vertex(a)
+	st.add_vertex(b)
+	st.add_vertex(c)
+	# Right end
+	st.add_vertex(d)
+	st.add_vertex(f)
+	st.add_vertex(e)
+	# Bottom
+	st.add_vertex(a)
+	st.add_vertex(d)
+	st.add_vertex(e)
+	st.add_vertex(a)
+	st.add_vertex(e)
+	st.add_vertex(b)
+	# Back vertical face
+	st.add_vertex(b)
+	st.add_vertex(e)
+	st.add_vertex(f)
+	st.add_vertex(b)
+	st.add_vertex(f)
+	st.add_vertex(c)
+	# Sloped face
+	st.add_vertex(a)
+	st.add_vertex(c)
+	st.add_vertex(f)
+	st.add_vertex(a)
+	st.add_vertex(f)
+	st.add_vertex(d)
+
+	st.generate_normals()
+	return st.commit()
+
+func _add_false_ceiling_structure(parent: Node3D, structure: Dictionary, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var drop_height = get_dimension_value(props.get("drop_height", 0)) * 0.01
+	var pattern_type = str(props.get("pattern_type", "")).to_lower()
+	var slab_h = max(height, 0.03)
+	var root_color = mat_data
+	var drop_mat = _resolve_structure_material(structure, "falseceiling")
+	if structure.has("materials") and typeof(structure["materials"]) == TYPE_DICTIONARY:
+		var mats = structure["materials"]
+		if mats.has("Drop Section") and typeof(mats["Drop Section"]) == TYPE_DICTIONARY:
+			drop_mat = mats["Drop Section"]
+
+	if pattern_type == "coffered" and drop_height > 0.01 and width > 0.2 and depth > 0.2:
+		var border = min(width, depth) * 0.16
+		border = clamp(border, 0.08, 0.35)
+
+		# Central panel
+		_add_box_part(parent, Vector3(max(width - border * 2.0, 0.1), slab_h, max(depth - border * 2.0, 0.1)), root_color, Vector3(0, -slab_h * 0.5, 0))
+
+		# Lower perimeter bands
+		var drop_y = -(drop_height + slab_h * 0.5)
+		_add_box_part(parent, Vector3(width, slab_h, border), drop_mat, Vector3(0, drop_y, depth * 0.5 - border * 0.5))
+		_add_box_part(parent, Vector3(width, slab_h, border), drop_mat, Vector3(0, drop_y, -depth * 0.5 + border * 0.5))
+		_add_box_part(parent, Vector3(border, slab_h, max(depth - border * 2.0, 0.1)), drop_mat, Vector3(width * 0.5 - border * 0.5, drop_y, 0))
+		_add_box_part(parent, Vector3(border, slab_h, max(depth - border * 2.0, 0.1)), drop_mat, Vector3(-width * 0.5 + border * 0.5, drop_y, 0))
+	else:
+		_add_box_part(parent, Vector3(width, slab_h, depth), root_color, Vector3(0, -slab_h * 0.5, 0))
+
+func _add_box_part(parent: Node3D, size: Vector3, mat_data: Dictionary, local_position: Vector3) -> void:
+	var mesh = BoxMesh.new()
+	mesh.size = Vector3(max(size.x, 0.03), max(size.y, 0.03), max(size.z, 0.03))
+	var mi = MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = create_material(mat_data)
+	mi.position = local_position
+	parent.add_child(mi)
+
+func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var stair = {}
+	if props.has("stair") and typeof(props["stair"]) == TYPE_DICTIONARY:
+		stair = props["stair"]
+
+	var stair_type = str(stair.get("stair_type", "straight")).to_lower()
+	var flights = []
+	if stair.has("flights") and typeof(stair["flights"]) == TYPE_ARRAY:
+		flights = stair["flights"]
+
+	var step_material = mat_data
+
+	if flights.size() == 0:
+		var fallback_width = width
+		if fallback_width <= 0.05:
+			fallback_width = 1.0
+		_add_stair_flight(parent, 12, 0.1524, 0.254, fallback_width, Vector3.ZERO, Vector3(0, 0, 1), step_material)
+		return
+
+	var first_flight = flights[0]
+	var first_steps = int(first_flight.get("step_count", 12))
+	var first_riser = height / max(first_steps, 1)
+	if float(first_flight.get("riser_height", 0.0)) > 0:
+		first_riser = float(first_flight.get("riser_height", 0.0)) * 0.01
+	var first_tread = depth / max(first_steps, 1)
+	if float(first_flight.get("tread_depth", 0.0)) > 0:
+		first_tread = float(first_flight.get("tread_depth", 0.0)) * 0.01
+	var stair_width = float(first_flight.get("width", get_dimension_value(props.get("width", 100)))) * 0.01
+
+	_add_stair_flight(parent, first_steps, first_riser, first_tread, stair_width, Vector3.ZERO, Vector3(0, 0, 1), step_material)
+
+	var current_height = first_steps * first_riser
+	var first_run = first_steps * first_tread
+	var landing_h = max(first_riser, 0.05)
+	var landing_depth = max(stair_width, first_tread * 1.5)
+
+	if stair_type == "straight" or flights.size() == 1:
+		return
+
+	if stair_type == "u_shaped":
+		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(0, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
+		if flights.size() > 1:
+			var second_flight = flights[1]
+			var second_steps = int(second_flight.get("step_count", first_steps))
+			var second_riser = first_riser
+			if float(second_flight.get("riser_height", 0.0)) > 0:
+				second_riser = float(second_flight.get("riser_height", 0.0)) * 0.01
+			var second_tread = first_tread
+			if float(second_flight.get("tread_depth", 0.0)) > 0:
+				second_tread = float(second_flight.get("tread_depth", 0.0)) * 0.01
+			_add_stair_flight(parent, second_steps, second_riser, second_tread, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(0, 0, -1), step_material)
+	elif stair_type == "winder":
+		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(-stair_width * 0.25, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
+		if flights.size() > 1:
+			var second_flight_w = flights[1]
+			var second_steps_w = int(second_flight_w.get("step_count", first_steps))
+			var second_riser_w = first_riser
+			if float(second_flight_w.get("riser_height", 0.0)) > 0:
+				second_riser_w = float(second_flight_w.get("riser_height", 0.0)) * 0.01
+			var second_tread_w = first_tread
+			if float(second_flight_w.get("tread_depth", 0.0)) > 0:
+				second_tread_w = float(second_flight_w.get("tread_depth", 0.0)) * 0.01
+			_add_stair_flight(parent, second_steps_w, second_riser_w, second_tread_w, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
+	else:
+		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(0, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
+		if flights.size() > 1:
+			var second_flight_l = flights[1]
+			var second_steps_l = int(second_flight_l.get("step_count", first_steps))
+			var second_riser_l = first_riser
+			if float(second_flight_l.get("riser_height", 0.0)) > 0:
+				second_riser_l = float(second_flight_l.get("riser_height", 0.0)) * 0.01
+			var second_tread_l = first_tread
+			if float(second_flight_l.get("tread_depth", 0.0)) > 0:
+				second_tread_l = float(second_flight_l.get("tread_depth", 0.0)) * 0.01
+			_add_stair_flight(parent, second_steps_l, second_riser_l, second_tread_l, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
+
+func _add_stair_flight(parent: Node3D, step_count: int, riser: float, tread: float, stair_width: float, start_pos: Vector3, travel_dir: Vector3, mat_data: Dictionary) -> void:
+	var steps = max(step_count, 1)
+	var step_w = max(stair_width, 0.05)
+	var step_h = max(riser, 0.03)
+	var step_d = max(tread, 0.05)
+	var dir = travel_dir
+	if dir.length() < 0.001:
+		dir = Vector3(0, 0, 1)
+	dir = dir.normalized()
+
+	for i in range(steps):
+		var pos = start_pos
+		pos += dir * (step_d * (i + 0.5))
+		pos.y += step_h * (i + 0.5)
+		_add_box_part(parent, Vector3(step_w, step_h, step_d), mat_data, pos)
+
+func _add_floor_opening_frame(parent: Node3D, structure: Dictionary, width: float, depth: float, mat_data: Dictionary) -> void:
+	var frame = max(min(width, depth) * 0.08, 0.04)
+	var frame_h = 0.04
+	var slab_y = frame_h * 0.5
+	_add_box_part(parent, Vector3(width + frame * 2.0, frame_h, frame), mat_data, Vector3(0, slab_y, depth * 0.5 + frame * 0.5))
+	_add_box_part(parent, Vector3(width + frame * 2.0, frame_h, frame), mat_data, Vector3(0, slab_y, -depth * 0.5 - frame * 0.5))
+	_add_box_part(parent, Vector3(frame, frame_h, depth), mat_data, Vector3(width * 0.5 + frame * 0.5, slab_y, 0))
+	_add_box_part(parent, Vector3(frame, frame_h, depth), mat_data, Vector3(-width * 0.5 - frame * 0.5, slab_y, 0))
+
+func _add_floor_opening_cutters(csg: CSGCombiner3D, structures, area_id: String, layer_altitude: float, cut_height: float, scale_factor: float) -> void:
+	if typeof(structures) != TYPE_DICTIONARY:
+		return
+
+	for structure_id in structures:
+		var structure = structures[structure_id]
+		if typeof(structure) != TYPE_DICTIONARY:
+			continue
+		if str(structure.get("structure_type", "")).to_lower() != "flooropening":
+			continue
+		if not structure.has("parentId") or str(structure["parentId"]) != area_id:
+			continue
+
+		var props = {}
+		if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+			props = structure["properties"]
+
+		var width = get_dimension_value(props.get("width", structure.get("width", 100))) * scale_factor
+		var depth = get_dimension_value(props.get("depth", structure.get("depth", 100))) * scale_factor
+		var altitude = get_dimension_value(props.get("altitude", structure.get("altitude", 0))) * scale_factor
+		var opening = CSGBox3D.new()
+		opening.operation = CSGBox3D.OPERATION_SUBTRACTION
+		opening.size = Vector3(max(width, 0.05), max(cut_height, 0.2), max(depth, 0.05))
+		opening.position = Vector3(
+			float(structure.get("x", 0)) * scale_factor,
+			layer_altitude + altitude - max(cut_height, 0.2) * 0.5,
+			float(structure.get("y", 0)) * scale_factor
+		)
+		csg.add_child(opening)
 
 func load_assets(data):
 	if data.has("layers"):
@@ -1187,6 +1823,197 @@ func _resolve_local_model_path(path: String) -> String:
 		da.list_dir_end()
 
 	return ""
+
+func _is_light_fixture_item(item: Dictionary) -> bool:
+	var item_type = str(item.get("type", "")).to_lower()
+	var item_name = str(item.get("name", "")).to_lower()
+	var mounting_type = str(item.get("mounting_type", "")).to_lower()
+	var model_hint = ""
+	if item.has("asset_urls") and typeof(item["asset_urls"]) == TYPE_DICTIONARY:
+		var urls = item["asset_urls"]
+		if urls.has("GLB_File_URL") and urls["GLB_File_URL"] != null:
+			model_hint = str(urls["GLB_File_URL"]).to_lower()
+		elif urls.has("glb_Url") and urls["glb_Url"] != null:
+			model_hint = str(urls["glb_Url"]).to_lower()
+
+	var full_desc = item_type + " " + item_name + " " + mounting_type + " " + model_hint
+	var light_keywords = [
+		"light", "lamp", "pendant", "pendent", "chandelier",
+		"lantern", "sconce", "ceilinglamp", "ceiling_light",
+		"wallmount", "streetlamp", "lighting fixture"
+	]
+	for kw in light_keywords:
+		if kw in full_desc:
+			return true
+	return false
+
+func _apply_light_fixture_emission(node: Node3D, light_color: Color, emission_energy: float) -> bool:
+	var meshes = _get_all_meshes(node)
+	var applied = false
+	var emissive_keywords = [
+		"bulb", "emiss", "glow", "glass",
+		"shade_inner", "lamp_head", "tube", "led",
+		"filament", "diffuser"
+	]
+	for m in meshes:
+		if not m.mesh:
+			continue
+		for i in range(m.mesh.get_surface_count()):
+			var mat = m.get_active_material(i)
+			if mat == null:
+				mat = m.mesh.surface_get_material(i)
+			var mat_name = ""
+			var surface_name = ""
+			if mat != null:
+				mat_name = str(mat.resource_name).to_lower()
+			surface_name = str(m.mesh.surface_get_name(i)).to_lower()
+			var is_emissive_surface = false
+			for kw in emissive_keywords:
+				if kw in mat_name or kw in surface_name:
+					is_emissive_surface = true
+					break
+			if not is_emissive_surface:
+				continue
+			if mat and mat is StandardMaterial3D:
+				var new_mat = mat.duplicate()
+				new_mat.emission_enabled = true
+				new_mat.emission = light_color
+				new_mat.emission_energy_multiplier = emission_energy
+				m.set_surface_override_material(i, new_mat)
+				applied = true
+	return applied
+
+func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB, final_scale: Vector3) -> void:
+	if item.get("is_exterior_black", false):
+		return
+	if not _is_light_fixture_item(item):
+		return
+
+	var item_type = str(item.get("type", "")).to_lower()
+	var item_name = str(item.get("name", "")).to_lower()
+	var mounting_type = str(item.get("mounting_type", "")).to_lower()
+	var full_desc = item_type + " " + item_name + " " + mounting_type
+
+	var scaled_origin = Vector3(
+		local_aabb.position.x * final_scale.x,
+		local_aabb.position.y * final_scale.y,
+		local_aabb.position.z * final_scale.z
+	)
+	var scaled_size = Vector3(
+		abs(local_aabb.size.x * final_scale.x),
+		abs(local_aabb.size.y * final_scale.y),
+		abs(local_aabb.size.z * final_scale.z)
+	)
+	var emitter_local = scaled_origin + scaled_size * 0.5
+
+	if mounting_type == "ceiling_mount":
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.18
+	elif "wall" in full_desc:
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.45
+		emitter_local.z = scaled_origin.z + scaled_size.z * 0.22
+	elif mounting_type == "floor_mount":
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.82
+	else:
+		emitter_local.y = scaled_origin.y + scaled_size.y * 0.72
+
+	var is_street_light = "street" in full_desc or "exterior" in full_desc
+	var is_night = lighting_profile == "night"
+	var is_sunset = lighting_profile == "sunset"
+	var warm_color = Color(1.0, 0.90, 0.74)
+	var street_color = Color(1.0, 0.92, 0.80)
+	if is_sunset:
+		warm_color = Color(1.0, 0.72, 0.46)
+		street_color = Color(1.0, 0.78, 0.52)
+	elif is_night:
+		warm_color = Color(1.0, 0.84, 0.62)
+		street_color = Color(1.0, 0.78, 0.52)
+	var light_color = street_color if is_street_light else warm_color
+
+	var light_energy = 1.15
+	var light_range = max(max(scaled_size.x, scaled_size.z) * 5.5, 3.6)
+	var emission_energy = 4.5
+	if is_sunset:
+		light_energy = 2.6
+		emission_energy = 7.5
+	elif is_night:
+		light_energy = 4.2
+		emission_energy = 9.0
+
+	if mounting_type == "ceiling_mount":
+		light_energy = 1.5
+		light_range = max(light_range, 5.8)
+		emission_energy = 5.8
+		if is_sunset:
+			light_energy = 3.4
+			emission_energy = 9.2
+		elif is_night:
+			light_energy = 5.5
+			emission_energy = 11.5
+	elif "wall" in full_desc:
+		light_energy = 1.2
+		light_range = max(light_range, 4.2)
+		emission_energy = 5.0
+		if is_sunset:
+			light_energy = 2.9
+			emission_energy = 8.1
+		elif is_night:
+			light_energy = 4.6
+			emission_energy = 9.8
+	elif mounting_type == "floor_mount":
+		if is_street_light:
+			light_energy = 2.0
+			light_range = max(light_range, 8.5)
+			emission_energy = 6.0
+			if is_sunset:
+				light_energy = 4.2
+				emission_energy = 9.6
+			elif is_night:
+				light_energy = 7.2
+				emission_energy = 12.0
+		else:
+			light_energy = 1.35
+			light_range = max(light_range, 4.8)
+			emission_energy = 5.2
+			if is_sunset:
+				light_energy = 3.1
+				emission_energy = 8.4
+			elif is_night:
+				light_energy = 5.0
+				emission_energy = 10.0
+
+	var emissive_surface_found = _apply_light_fixture_emission(node, light_color, emission_energy)
+
+	var world_pos = node.to_global(emitter_local)
+	if mounting_type == "ceiling_mount" or "wall" in full_desc or is_street_light:
+		var spot = SpotLight3D.new()
+		spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		spot.global_position = world_pos
+		spot.light_color = light_color
+		spot.light_energy = light_energy
+		spot.light_specular = 0.25
+		spot.shadow_enabled = false
+		spot.spot_range = light_range
+		spot.spot_angle = 62.0 if mounting_type == "ceiling_mount" else 48.0
+		spot.spot_attenuation = 0.75
+		add_child(spot)
+
+		var target_local = emitter_local + Vector3(0, -max(1.0, light_range * 0.45), 0)
+		if "wall" in full_desc and not is_street_light:
+			target_local = emitter_local + Vector3(0, -0.15, -max(0.8, light_range * 0.25))
+		spot.look_at(node.to_global(target_local), Vector3.UP)
+	else:
+		var omni = OmniLight3D.new()
+		omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		omni.global_position = world_pos
+		omni.light_color = light_color
+		omni.light_energy = light_energy
+		omni.light_specular = 0.25
+		omni.shadow_enabled = false
+		omni.omni_range = light_range
+		add_child(omni)
+
+	if not emissive_surface_found:
+		print("Light fixture added without material override for asset: ", item.get("name", "Light"))
 
 func _load_layer_items(items, layer_altitude, layer_id := ""):
 	for item_id in items:
@@ -1458,6 +2285,8 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 
 											if modified:
 												m.set_surface_override_material(i, new_mat)
+
+					_add_light_fixture_effect(node, item, aabb, final_scale)
 					
 					print("Loaded asset: ", resolved_model_path, " final scale: ", final_scale)
 					load_status = "loaded"

@@ -8,15 +8,37 @@ extends Node3D
 #   - All floor-plan coordinates are in centimetres (multiply by 0.01 for Godot metres)
 
 var _tracked_assets = []
+var _window_sunlight_data = []  # Collected during hole building, used to place window sunlights
 var day_render = true
 var lighting_profile = "day"
+var _lighting_locked = false
+var _lighting_setup_done = false
+var _frozen_lighting_profile = "day"
+var _frozen_camera_pose = null
+var _scene_built = false  # TRUE after first full build — prevents light/asset accumulation
 
 # ─────────────────────────────────────────────────────────────────
 # Entry-point (called by video_render.gd)
 # ─────────────────────────────────────────────────────────────────
 func build_scene(data):
-	lighting_profile = _resolve_lighting_profile(data)
-	day_render = lighting_profile != "night"
+	# ── First frame: resolve and lock lighting profile + camera pose ──────────
+	if not _lighting_locked:
+		lighting_profile = _resolve_lighting_profile(data)
+		day_render = lighting_profile != "night"
+		_frozen_lighting_profile = lighting_profile
+		_frozen_camera_pose = _extract_camera_pose(data)
+		_lighting_locked = true
+	else:
+		lighting_profile = _frozen_lighting_profile
+		day_render = lighting_profile != "night"
+
+	# ── Subsequent frames: scene geometry + lighting already built, skip ──────
+	# This is the key fix: geometry, lights, and assets are added as persistent
+	# child nodes. Re-running build_architecture / load_assets every frame
+	# stacks duplicate lights causing whitish overexposure on all frames after 1.
+	if _scene_built:
+		print("[VideoGLB] Frame skip — scene already built, reusing geometry and lighting.")
+		return
 
 	# Unwrap floor_plan_data (may be a JSON string or already a dict)
 	var geom_data = data
@@ -63,22 +85,32 @@ func build_scene(data):
 		else:
 			print("[VideoGLB] WARNING: layers dict found but no valid layer could be selected.")
 
-	var cam_pose = _extract_camera_pose(data)
-	setup_lighting(data, geom_data)
+	var cam_pose = _frozen_camera_pose if _frozen_camera_pose != null else _extract_camera_pose(data)
+	setup_lighting(data, geom_data, cam_pose)
 	var show_all_floors = data.get("showAllFloors", null)
 	if geom_data.has("showAllFloors"):
 		show_all_floors = geom_data["showAllFloors"]
+
+	_window_sunlight_data.clear()
 	build_architecture(geom_data, cam_pose.get("position", Vector3.ZERO), show_all_floors)
+	_create_window_sunlights()  # Place sunlights through detected windows
+	build_structures(geom_data)
 	load_assets(geom_data)
+
+	# Mark scene as fully built — all subsequent frames skip directly above ↑
+	_scene_built = true
 
 # ─────────────────────────────────────────────────────────────────
 # Lighting  — ported from image_glb_creation.gd (full photorealistic setup)
 # ─────────────────────────────────────────────────────────────────
-func setup_lighting(data, geom_data = {}):
+func setup_lighting(data, geom_data = {}, cam_pose_override = null):
+	if _lighting_setup_done:
+		print("[VideoGLB] Lighting already initialized; reusing first-frame setup.")
+		return
 	var lighting = _get_lighting_profile_settings()
 
 	# Extract camera pose for light anchor and room bounds
-	var cam_pose     = _extract_camera_pose(data)
+	var cam_pose     = cam_pose_override if cam_pose_override != null else _extract_camera_pose(data)
 	var cam_pos: Vector3    = cam_pose["position"]
 	var cam_target: Vector3 = cam_pose["target"]
 	var cam_forward: Vector3 = (cam_target - cam_pos).normalized()
@@ -106,12 +138,12 @@ func setup_lighting(data, geom_data = {}):
 	# ── Primary Directional Light (Sun / Moon) ─────────────────────────────────
 	var dir_light = DirectionalLight3D.new()
 	dir_light.name = "Sun"
-	# Shadows disabled — avoid the half-surface seam bug in headless/video export
-	dir_light.shadow_enabled = false
-	dir_light.light_angular_distance  = 0.6
-	dir_light.shadow_bias             = 0.01
-	dir_light.shadow_normal_bias      = 0.2
-	dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	# Enable shadows so sunlight through windows casts realistic shadow patterns
+	dir_light.shadow_enabled = true
+	dir_light.light_angular_distance  = 0.5
+	dir_light.shadow_bias             = 0.1
+	dir_light.shadow_normal_bias      = 3.0
+	dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	dir_light.directional_shadow_max_distance    = 120.0
 	dir_light.directional_shadow_blend_splits    = true
 	dir_light.shadow_transmittance_bias          = 0.05
@@ -229,14 +261,18 @@ func setup_lighting(data, geom_data = {}):
 	env.adjustment_contrast   = 1.06
 	env.adjustment_saturation = 1.10
 
-	# ── ReflectionProbe ────────────────────────────────────────────────────────
+# ── ReflectionProbe ────────────────────────────────────────────────────────
+	# UPDATE_ONCE on frame 0 captures an incomplete scene (no geometry yet) and
+	# bakes that overexposed sky reflection permanently — causing frame 0 blowout.
+	# Fix: lower intensity so the probe contribution is subtle, not dominant.
+	# In headless video renders the probe adds more overexposure than realism.
 	var room_height = max(2.8, (room_ceiling_y - room_center.y) * 2.0)
 	var probe = ReflectionProbe.new()
-	probe.size        = Vector3(max(room_extent.x + 4.0, 8.0), room_height + 2.0, max(room_extent.y + 4.0, 8.0))
-	probe.update_mode = ReflectionProbe.UPDATE_ONCE
-	probe.intensity   = 1.0
+	probe.size         = Vector3(max(room_extent.x + 4.0, 8.0), room_height + 2.0, max(room_extent.y + 4.0, 8.0))
+	probe.update_mode  = ReflectionProbe.UPDATE_ONCE
+	probe.intensity    = 0.0
 	probe.max_distance = max(room_extent.x, room_extent.y) * 1.5 + 12.0
-	probe.position    = room_center
+	probe.position     = room_center
 	add_child(probe)
 
 	var world_env = WorldEnvironment.new()
@@ -287,7 +323,71 @@ func setup_lighting(data, geom_data = {}):
 		fill.shadow_enabled = false
 		add_child(fill)
 
+	_lighting_setup_done = true
 	print("[VideoGLB] Photorealistic lighting setup complete. profile=", lighting_profile)
+
+# ─────────────────────────────────────────────────────────────────
+# _create_window_sunlights  (ported from image_glb_creation.gd)
+# ─────────────────────────────────────────────────────────────────
+func _create_window_sunlights():
+	if _window_sunlight_data.size() == 0:
+		print("[VideoGLB] No windows detected — skipping window sunlight placement.")
+		return
+
+	var sun_energy := 20.0
+	var sun_color  := Color(1.0, 0.95, 0.85)
+	var sun_range  := 30.0
+
+	match lighting_profile:
+		"sunset":
+			sun_energy = 15.0
+			sun_color  = Color(1.0, 0.65, 0.35)
+		"night":
+			sun_energy = 0.5
+			sun_color  = Color(0.60, 0.70, 0.98)
+
+	print("[VideoGLB] Creating ", _window_sunlight_data.size(), " window sunlight(s)")
+
+	for idx in range(_window_sunlight_data.size()):
+		var win        = _window_sunlight_data[idx]
+		var win_center : Vector3 = win["center"]
+		var inner_dir  : Vector3 = win["inner_dir"]
+		var outer_dir  : Vector3 = win["outer_dir"]
+
+		var light_dist := 6.0
+		var light_pos   = win_center + outer_dir * light_dist
+
+		var win_alt: float = win.get("altitude", 0.0)
+		if win_alt > 0.20:
+			light_pos.y += 4.5
+		else:
+			light_pos.y += 5.5
+
+		var floor_y: float = win.get("layer_altitude", 0.0)
+		var target_inside  = win_center + inner_dir * 5.0
+		target_inside.y    = floor_y
+
+		var spot = SpotLight3D.new()
+		spot.name = "WindowSunlight_%d" % idx
+		spot.position     = light_pos
+		spot.light_energy = sun_energy
+		spot.light_color  = sun_color
+		spot.spot_range   = sun_range
+		spot.spot_angle   = 60.0
+
+		spot.shadow_enabled     = true
+		spot.shadow_bias        = 0.1
+		spot.shadow_normal_bias = 3.0
+		spot.shadow_blur        = 0.1
+
+		spot.light_specular = 0.2
+		spot.add_to_group("window_sunlights")
+		add_child(spot)
+
+		if light_pos.distance_to(target_inside) > 0.001:
+			spot.look_at(target_inside, Vector3.UP)
+
+		print("[VideoGLB]   Window sunlight #", idx, " at ", light_pos.round())
 
 # ─────────────────────────────────────────────────────────────────
 # Parse vec3 helper
@@ -322,9 +422,9 @@ func _get_lighting_profile_settings() -> Dictionary:
 		"night":
 			return {
 				"sky_exr": "res://night.exr",
-				"window_energy": 0.07,
+				"window_energy": 0.03,
 				"window_color": Color(0.72, 0.80, 1.0),
-				"dir_energy": 0.14,
+				"dir_energy": 0.06,
 				"dir_color": Color(0.55, 0.62, 0.90),
 				"sky_top_color": Color(0.01, 0.02, 0.05),
 				"sky_horizon_color": Color(0.04, 0.06, 0.10),
@@ -333,16 +433,16 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"sun_angle_max": 10.0,
 				"sun_curve": 0.05,
 				"ambient_color": Color(0.20, 0.24, 0.34),
-				"ambient_energy": 0.10,
-				"tonemap_exposure": 0.68,
+				"ambient_energy": 0.05,
+				"tonemap_exposure": 0.45,
 				"tonemap_white": 4.8,
 				"glow_intensity": 0.26,
 				"glow_bloom": 0.10,
 				"glow_hdr_threshold": 1.15,
 				"glow_hdr_scale": 2.1,
-				"fill_energy": 0.10,
+				"fill_energy": 0.05,
 				"fill_color": Color(0.5, 0.55, 0.8),
-				"front_back_fill_energy": 0.04,
+				"front_back_fill_energy": 0.02,
 				"front_back_fill_color": Color(0.58, 0.64, 0.88)
 			}
 		"sunset":
@@ -374,9 +474,9 @@ func _get_lighting_profile_settings() -> Dictionary:
 		_:
 			return {
 				"sky_exr": "res://day.exr",
-				"window_energy": 0.14,
+				"window_energy": 0.06,
 				"window_color": Color(1.0, 0.95, 0.85),
-				"dir_energy": 2.8,
+				"dir_energy": 1.0,
 				"dir_color": Color(1.0, 0.96, 0.88),
 				"sky_top_color": Color(0.25, 0.40, 0.78),
 				"sky_horizon_color": Color(0.75, 0.80, 0.90),
@@ -385,16 +485,16 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"sun_angle_max": 30.0,
 				"sun_curve": 0.15,
 				"ambient_color": Color(0.76, 0.77, 0.78),
-				"ambient_energy": 0.42,
-				"tonemap_exposure": 0.92,
+				"ambient_energy": 0.15,
+				"tonemap_exposure": 0.72,
 				"tonemap_white": 5.0,
 				"glow_intensity": 0.22,
 				"glow_bloom": 0.08,
 				"glow_hdr_threshold": 1.35,
 				"glow_hdr_scale": 1.9,
-				"fill_energy": 0.18,
+				"fill_energy": 0.10,
 				"fill_color": Color(1.0, 0.97, 0.90),
-				"front_back_fill_energy": 0.055,
+				"front_back_fill_energy": 0.03,
 				"front_back_fill_color": Color(0.99, 0.97, 0.93)
 			}
 
@@ -615,6 +715,16 @@ func _arrays_to_dicts(data: Dictionary) -> Dictionary:
 	elif typeof(raw_i) == TYPE_DICTIONARY:
 		out["items"] = raw_i
 
+	var raw_s = data.get("structures", null)
+	if typeof(raw_s) == TYPE_ARRAY:
+		var d = {}
+		for s in raw_s:
+			if typeof(s) == TYPE_DICTIONARY and s.has("id"):
+				d[str(s["id"])] = s
+		out["structures"] = d
+	elif typeof(raw_s) == TYPE_DICTIONARY:
+		out["structures"] = raw_s
+
 	return out
 
 # ─────────────────────────────────────────────────────────────────
@@ -703,6 +813,17 @@ func _is_point_in_polygon(point: Vector2, polygon: Array) -> bool:
 # Priority: asset_urls block → inner/outer_properties → cross-fallback → null
 # ─────────────────────────────────────────────────────────────────
 func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
+	var prop_key = face + "_properties"
+	var other_face = "outer" if face == "inner" else "inner"
+	var other_prop_key = other_face + "_properties"
+	var has_face_material = false
+	if line.has(prop_key) and typeof(line[prop_key]) == TYPE_DICTIONARY:
+		var face_props = line[prop_key]
+		has_face_material = face_props.has("material") and typeof(face_props["material"]) == TYPE_DICTIONARY
+	if not has_face_material and line.has(other_prop_key) and typeof(line[other_prop_key]) == TYPE_DICTIONARY:
+		var other_props = line[other_prop_key]
+		has_face_material = other_props.has("material") and typeof(other_props["material"]) == TYPE_DICTIONARY
+
 	# 1. asset_urls block
 	if line.has("asset_urls") and typeof(line["asset_urls"]) == TYPE_DICTIONARY:
 		var au = line["asset_urls"]
@@ -735,18 +856,18 @@ func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
 				mat_data["repeat"] = block["repeat"]
 
 			if mat_data.size() > 0:
-				return mat_data
+				var has_texture = mat_data.has("mapUrl") or mat_data.has("normalUrl") or mat_data.has("roughnessUrl")
+				var has_color = mat_data.has("color")
+				if has_texture or (has_color and not has_face_material):
+					return mat_data
 
 	# 2. inner_properties / outer_properties
-	var prop_key = face + "_properties"
 	if line.has(prop_key) and typeof(line[prop_key]) == TYPE_DICTIONARY:
 		var props = line[prop_key]
 		if props.has("material") and typeof(props["material"]) == TYPE_DICTIONARY:
 			return props["material"]
 
 	# 3. Cross-fallback
-	var other_face    = "outer" if face == "inner" else "inner"
-	var other_prop_key = other_face + "_properties"
 	if line.has(other_prop_key) and typeof(line[other_prop_key]) == TYPE_DICTIONARY:
 		var props = line[other_prop_key]
 		if props.has("material") and typeof(props["material"]) == TYPE_DICTIONARY:
@@ -757,6 +878,510 @@ func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
 # ─────────────────────────────────────────────────────────────────
 # Core geometry builder — full parity with image_glb_creation.gd
 # ─────────────────────────────────────────────────────────────────
+func build_structures(data):
+	var layer_data = _arrays_to_dicts(data)
+
+	if layer_data.has("layers") and typeof(layer_data["layers"]) == TYPE_DICTIONARY:
+		var layers_dict = layer_data["layers"]
+		var show_all_floors = data.get("showAllFloors", true)
+		var selected_layer = data.get("selectedLayer", "")
+
+		for layer_id in layers_dict:
+			if not show_all_floors and selected_layer != "" and str(layer_id) != str(selected_layer):
+				continue
+
+			var layer = layers_dict[layer_id]
+			if typeof(layer) != TYPE_DICTIONARY:
+				continue
+
+			var layer_flat = _arrays_to_dicts(layer)
+			var layer_alt = 0.0
+			if show_all_floors and layer_flat.has("altitude"):
+				var alt_val = layer_flat["altitude"]
+				if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
+					layer_alt = float(alt_val["length"]) * 0.01
+				else:
+					layer_alt = float(alt_val) * 0.01
+
+			if layer_flat.has("structures"):
+				_load_layer_structures(layer_flat["structures"], layer_alt, str(layer_id))
+	elif layer_data.has("structures"):
+		_load_layer_structures(layer_data["structures"], 0.0, "root")
+
+func _load_layer_structures(structures, layer_altitude, layer_id := ""):
+	for structure_id in structures:
+		var structure
+		if typeof(structures) == TYPE_DICTIONARY:
+			structure = structures[structure_id]
+		else:
+			structure = structure_id
+		if typeof(structure) != TYPE_DICTIONARY:
+			continue
+		if structure.has("visible") and structure["visible"] == false:
+			continue
+		_build_structure_mesh(structure, layer_altitude, layer_id)
+
+func _build_structure_mesh(structure: Dictionary, layer_altitude: float, layer_id := "") -> void:
+	var structure_type = str(structure.get("structure_type", structure.get("type", ""))).to_lower()
+	if structure_type == "":
+		return
+
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var scale_factor = 0.01
+	var width = get_dimension_value(props.get("width", structure.get("width", 100))) * scale_factor
+	var depth = get_dimension_value(props.get("depth", structure.get("depth", 100))) * scale_factor
+	var height = get_dimension_value(props.get("height", structure.get("height", 100))) * scale_factor
+	var altitude = get_dimension_value(props.get("altitude", structure.get("altitude", 0))) * scale_factor
+
+	var root = Node3D.new()
+	root.name = "Structure_%s_%s" % [structure_type, str(structure.get("id", "unknown"))]
+	root.position = Vector3(
+		float(structure.get("x", 0)) * scale_factor,
+		layer_altitude + altitude,
+		float(structure.get("y", 0)) * scale_factor
+	)
+
+	var rot = 0.0
+	if structure.has("rotation"):
+		rot = float(structure["rotation"])
+	elif props.has("rotation"):
+		rot = float(props["rotation"])
+	root.rotation.y = -deg_to_rad(rot)
+	root.scale = Vector3(
+		-1.0 if bool(structure.get("flipX", false)) else 1.0,
+		1.0,
+		-1.0 if bool(structure.get("flipZ", false)) else 1.0
+	)
+	add_child(root)
+
+	var mat_data = _resolve_structure_material(structure, structure_type)
+	match structure_type:
+		"squarecolumn", "flue", "beam":
+			_add_box_structure(root, width, depth, height, mat_data)
+		"circlecolumn":
+			_add_cylinder_structure(root, width, depth, height, mat_data)
+		"ramp":
+			_add_ramp_structure(root, width, depth, height, mat_data)
+		"step":
+			_add_step_structure(root, structure, width, depth, height, mat_data)
+		"falseceiling":
+			_add_false_ceiling_structure(root, structure, width, depth, height, mat_data)
+		"staircase":
+			_add_staircase_structure(root, structure, width, depth, height, mat_data)
+		"flooropening":
+			_add_floor_opening_frame(root, structure, width, depth, mat_data)
+		_:
+			_add_box_structure(root, width, depth, height, mat_data)
+
+func _resolve_structure_material(structure: Dictionary, structure_type: String) -> Dictionary:
+	var mats = {}
+	if structure.has("materials") and typeof(structure["materials"]) == TYPE_DICTIONARY:
+		mats = structure["materials"]
+
+	var preferred = []
+	match structure_type:
+		"squarecolumn", "circlecolumn", "flue":
+			preferred = ["Column"]
+		"beam":
+			preferred = ["Beam"]
+		"ramp":
+			preferred = ["Ramp"]
+		"step":
+			preferred = ["Step"]
+		"falseceiling":
+			preferred = ["False Ceiling", "Drop Section"]
+		"staircase":
+			preferred = ["StaircaseTop", "Step", "LandingTop"]
+		"flooropening":
+			preferred = ["FloorOpening", "Frame"]
+		_:
+			preferred = []
+
+	for key in preferred:
+		if mats.has(key) and typeof(mats[key]) == TYPE_DICTIONARY:
+			return mats[key]
+
+	if mats.size() > 0:
+		var first_key = mats.keys()[0]
+		if typeof(mats[first_key]) == TYPE_DICTIONARY:
+			return mats[first_key]
+
+	return {"color": Color(0.78, 0.78, 0.78)}
+
+func _add_box_structure(parent: Node3D, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var mesh = BoxMesh.new()
+	mesh.size = Vector3(max(width, 0.05), max(height, 0.05), max(depth, 0.05))
+	var mi = MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = create_material(mat_data)
+	mi.position = Vector3(0, max(height, 0.05) * 0.5, 0)
+	parent.add_child(mi)
+
+func _add_cylinder_structure(parent: Node3D, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var radius = max(width, depth) * 0.5
+	var mesh = CylinderMesh.new()
+	mesh.top_radius = radius
+	mesh.bottom_radius = radius
+	mesh.height = max(height, 0.05)
+	mesh.radial_segments = 24
+	var mi = MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = create_material(mat_data)
+	mi.position = Vector3(0, max(height, 0.05) * 0.5, 0)
+	parent.add_child(mi)
+
+func _create_ramp_mesh(width: float, depth: float, height: float) -> ArrayMesh:
+	var w = max(width, 0.05)
+	var d = max(depth, 0.05)
+	var h = max(height, 0.05)
+
+	var st = SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var v0 = Vector3(-w * 0.5, 0, 0)
+	var v1 = Vector3(-w * 0.5, 0, d)
+	var v2 = Vector3(-w * 0.5, h, d)
+	var v3 = Vector3(w * 0.5, 0, 0)
+	var v4 = Vector3(w * 0.5, 0, d)
+	var v5 = Vector3(w * 0.5, h, d)
+
+	st.add_vertex(v0)
+	st.add_vertex(v1)
+	st.add_vertex(v2)
+	st.add_vertex(v3)
+	st.add_vertex(v5)
+	st.add_vertex(v4)
+	st.add_vertex(v0)
+	st.add_vertex(v3)
+	st.add_vertex(v4)
+	st.add_vertex(v0)
+	st.add_vertex(v4)
+	st.add_vertex(v1)
+	st.add_vertex(v1)
+	st.add_vertex(v4)
+	st.add_vertex(v5)
+	st.add_vertex(v1)
+	st.add_vertex(v5)
+	st.add_vertex(v2)
+	st.add_vertex(v0)
+	st.add_vertex(v2)
+	st.add_vertex(v5)
+	st.add_vertex(v0)
+	st.add_vertex(v5)
+	st.add_vertex(v3)
+
+	st.generate_normals()
+	return st.commit()
+
+func _add_ramp_structure(parent: Node3D, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var mesh = MeshInstance3D.new()
+	mesh.mesh = _create_ramp_mesh(width, depth, height)
+	mesh.material_override = create_material(mat_data)
+	parent.add_child(mesh)
+
+func _add_step_structure(parent: Node3D, structure: Dictionary, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var stair = {}
+	if props.has("stair") and typeof(props["stair"]) == TYPE_DICTIONARY:
+		stair = props["stair"]
+
+	var flights = []
+	if stair.has("flights") and typeof(stair["flights"]) == TYPE_ARRAY:
+		flights = stair["flights"]
+
+	var step_count = 1
+	var riser = max(height, 0.05)
+	var tread = max(depth, 0.05)
+	var direction = "forward"
+
+	if flights.size() > 0 and typeof(flights[0]) == TYPE_DICTIONARY:
+		var flight = flights[0]
+		step_count = max(int(flight.get("step_count", 1)), 1)
+		if float(flight.get("riser_height", 0.0)) > 0:
+			riser = float(flight.get("riser_height", 0.0)) * 0.01
+		else:
+			riser = max(height / float(step_count), 0.05)
+		if float(flight.get("tread_depth", 0.0)) > 0:
+			tread = float(flight.get("tread_depth", 0.0)) * 0.01
+		else:
+			tread = max(depth / float(step_count), 0.05)
+		direction = str(flight.get("direction", "forward")).to_lower()
+	else:
+		if stair.has("auto_calculate_steps") and bool(stair["auto_calculate_steps"]):
+			step_count = max(int(round(height / 0.15)), 1)
+			riser = max(height / float(step_count), 0.05)
+			tread = max(depth / float(step_count), 0.05)
+
+	var step_width = max(width, 0.05)
+	var dir_vec = Vector3(0, 0, 1)
+	var step_rot_y = 0.0
+	match direction:
+		"backward", "back", "reverse":
+			dir_vec = Vector3(0, 0, 1)
+		"left":
+			dir_vec = Vector3(-1, 0, 0)
+			step_rot_y = PI / 2
+		"right":
+			dir_vec = Vector3(1, 0, 0)
+			step_rot_y = PI / 2
+		_:
+			dir_vec = Vector3(0, 0, -1)
+
+	var stair_csg = CSGCombiner3D.new()
+	stair_csg.name = "StepCSG_" + str(structure.get("id", "unknown"))
+	parent.add_child(stair_csg)
+
+	var step_mat = create_material(mat_data)
+	var overlap = 0.002
+	var run_length = tread * float(step_count)
+	var total_height = riser * float(step_count)
+
+	var support_node = MeshInstance3D.new()
+	support_node.mesh = _create_step_support_mesh(step_width, run_length, total_height)
+	support_node.material_override = step_mat
+	match direction:
+		"backward", "back", "reverse":
+			support_node.rotation.y = 0.0
+		"left":
+			support_node.rotation.y = -PI / 2.0
+		"right":
+			support_node.rotation.y = PI / 2.0
+		_:
+			support_node.rotation.y = PI
+	stair_csg.add_child(support_node)
+
+	for i in range(step_count):
+		var step_node = CSGBox3D.new()
+		step_node.operation = CSGShape3D.OPERATION_UNION
+		step_node.size = Vector3(step_width, riser + overlap, tread + overlap)
+		step_node.material = step_mat
+		var step_pos = Vector3.ZERO
+		step_pos += dir_vec * (tread * (i + 0.5))
+		step_pos.y = riser * (i + 0.5)
+		step_node.position = step_pos
+		step_node.rotation.y = step_rot_y
+		stair_csg.add_child(step_node)
+
+func _create_step_support_mesh(width: float, run_length: float, total_height: float) -> ArrayMesh:
+	var w = max(width, 0.05)
+	var r = max(run_length, 0.05)
+	var h = max(total_height, 0.05)
+
+	var st = SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var a = Vector3(-w * 0.5, 0, 0)
+	var b = Vector3(-w * 0.5, 0, r)
+	var c = Vector3(-w * 0.5, h, r)
+	var d = Vector3(w * 0.5, 0, 0)
+	var e = Vector3(w * 0.5, 0, r)
+	var f = Vector3(w * 0.5, h, r)
+
+	st.add_vertex(a)
+	st.add_vertex(b)
+	st.add_vertex(c)
+	st.add_vertex(d)
+	st.add_vertex(f)
+	st.add_vertex(e)
+	st.add_vertex(a)
+	st.add_vertex(d)
+	st.add_vertex(e)
+	st.add_vertex(a)
+	st.add_vertex(e)
+	st.add_vertex(b)
+	st.add_vertex(b)
+	st.add_vertex(e)
+	st.add_vertex(f)
+	st.add_vertex(b)
+	st.add_vertex(f)
+	st.add_vertex(c)
+	st.add_vertex(a)
+	st.add_vertex(c)
+	st.add_vertex(f)
+	st.add_vertex(a)
+	st.add_vertex(f)
+	st.add_vertex(d)
+
+	st.generate_normals()
+	return st.commit()
+
+func _add_false_ceiling_structure(parent: Node3D, structure: Dictionary, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var drop_height = get_dimension_value(props.get("drop_height", 0)) * 0.01
+	var pattern_type = str(props.get("pattern_type", "")).to_lower()
+	var slab_h = max(height, 0.03)
+	var root_color = mat_data
+	var drop_mat = _resolve_structure_material(structure, "falseceiling")
+	if structure.has("materials") and typeof(structure["materials"]) == TYPE_DICTIONARY:
+		var mats = structure["materials"]
+		if mats.has("Drop Section") and typeof(mats["Drop Section"]) == TYPE_DICTIONARY:
+			drop_mat = mats["Drop Section"]
+
+	if pattern_type == "coffered" and drop_height > 0.01 and width > 0.2 and depth > 0.2:
+		var border = min(width, depth) * 0.16
+		border = clamp(border, 0.08, 0.35)
+		_add_box_part(parent, Vector3(max(width - border * 2.0, 0.1), slab_h, max(depth - border * 2.0, 0.1)), root_color, Vector3(0, -slab_h * 0.5, 0))
+		var drop_y = -(drop_height + slab_h * 0.5)
+		_add_box_part(parent, Vector3(width, slab_h, border), drop_mat, Vector3(0, drop_y, depth * 0.5 - border * 0.5))
+		_add_box_part(parent, Vector3(width, slab_h, border), drop_mat, Vector3(0, drop_y, -depth * 0.5 + border * 0.5))
+		_add_box_part(parent, Vector3(border, slab_h, max(depth - border * 2.0, 0.1)), drop_mat, Vector3(width * 0.5 - border * 0.5, drop_y, 0))
+		_add_box_part(parent, Vector3(border, slab_h, max(depth - border * 2.0, 0.1)), drop_mat, Vector3(-width * 0.5 + border * 0.5, drop_y, 0))
+	else:
+		_add_box_part(parent, Vector3(width, slab_h, depth), root_color, Vector3(0, -slab_h * 0.5, 0))
+
+func _add_box_part(parent: Node3D, size: Vector3, mat_data: Dictionary, local_position: Vector3) -> void:
+	var mesh = BoxMesh.new()
+	mesh.size = Vector3(max(size.x, 0.03), max(size.y, 0.03), max(size.z, 0.03))
+	var mi = MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = create_material(mat_data)
+	mi.position = local_position
+	parent.add_child(mi)
+
+func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: float, depth: float, height: float, mat_data: Dictionary) -> void:
+	var props = {}
+	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+		props = structure["properties"]
+
+	var stair = {}
+	if props.has("stair") and typeof(props["stair"]) == TYPE_DICTIONARY:
+		stair = props["stair"]
+
+	var stair_type = str(stair.get("stair_type", "straight")).to_lower()
+	var flights = []
+	if stair.has("flights") and typeof(stair["flights"]) == TYPE_ARRAY:
+		flights = stair["flights"]
+
+	var step_material = mat_data
+
+	if flights.size() == 0:
+		var fallback_width = width
+		if fallback_width <= 0.05:
+			fallback_width = 1.0
+		_add_stair_flight(parent, 12, 0.1524, 0.254, fallback_width, Vector3.ZERO, Vector3(0, 0, 1), step_material)
+		return
+
+	var first_flight = flights[0]
+	var first_steps = int(first_flight.get("step_count", 12))
+	var first_riser = height / max(first_steps, 1)
+	if float(first_flight.get("riser_height", 0.0)) > 0:
+		first_riser = float(first_flight.get("riser_height", 0.0)) * 0.01
+	var first_tread = depth / max(first_steps, 1)
+	if float(first_flight.get("tread_depth", 0.0)) > 0:
+		first_tread = float(first_flight.get("tread_depth", 0.0)) * 0.01
+	var stair_width = float(first_flight.get("width", get_dimension_value(props.get("width", 100)))) * 0.01
+
+	_add_stair_flight(parent, first_steps, first_riser, first_tread, stair_width, Vector3.ZERO, Vector3(0, 0, 1), step_material)
+
+	var current_height = first_steps * first_riser
+	var first_run = first_steps * first_tread
+	var landing_h = max(first_riser, 0.05)
+	var landing_depth = max(stair_width, first_tread * 1.5)
+
+	if stair_type == "straight" or flights.size() == 1:
+		return
+
+	if stair_type == "u_shaped":
+		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(0, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
+		if flights.size() > 1:
+			var second_flight = flights[1]
+			var second_steps = int(second_flight.get("step_count", first_steps))
+			var second_riser = first_riser
+			if float(second_flight.get("riser_height", 0.0)) > 0:
+				second_riser = float(second_flight.get("riser_height", 0.0)) * 0.01
+			var second_tread = first_tread
+			if float(second_flight.get("tread_depth", 0.0)) > 0:
+				second_tread = float(second_flight.get("tread_depth", 0.0)) * 0.01
+			_add_stair_flight(parent, second_steps, second_riser, second_tread, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(0, 0, -1), step_material)
+	elif stair_type == "winder":
+		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(-stair_width * 0.25, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
+		if flights.size() > 1:
+			var second_flight_w = flights[1]
+			var second_steps_w = int(second_flight_w.get("step_count", first_steps))
+			var second_riser_w = first_riser
+			if float(second_flight_w.get("riser_height", 0.0)) > 0:
+				second_riser_w = float(second_flight_w.get("riser_height", 0.0)) * 0.01
+			var second_tread_w = first_tread
+			if float(second_flight_w.get("tread_depth", 0.0)) > 0:
+				second_tread_w = float(second_flight_w.get("tread_depth", 0.0)) * 0.01
+			_add_stair_flight(parent, second_steps_w, second_riser_w, second_tread_w, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
+	else:
+		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(0, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
+		if flights.size() > 1:
+			var second_flight_l = flights[1]
+			var second_steps_l = int(second_flight_l.get("step_count", first_steps))
+			var second_riser_l = first_riser
+			if float(second_flight_l.get("riser_height", 0.0)) > 0:
+				second_riser_l = float(second_flight_l.get("riser_height", 0.0)) * 0.01
+			var second_tread_l = first_tread
+			if float(second_flight_l.get("tread_depth", 0.0)) > 0:
+				second_tread_l = float(second_flight_l.get("tread_depth", 0.0)) * 0.01
+			_add_stair_flight(parent, second_steps_l, second_riser_l, second_tread_l, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
+
+func _add_stair_flight(parent: Node3D, step_count: int, riser: float, tread: float, stair_width: float, start_pos: Vector3, travel_dir: Vector3, mat_data: Dictionary) -> void:
+	var steps = max(step_count, 1)
+	var step_w = max(stair_width, 0.05)
+	var step_h = max(riser, 0.03)
+	var step_d = max(tread, 0.05)
+	var dir = travel_dir
+	if dir.length() < 0.001:
+		dir = Vector3(0, 0, 1)
+	dir = dir.normalized()
+
+	for i in range(steps):
+		var pos = start_pos
+		pos += dir * (step_d * (i + 0.5))
+		pos.y += step_h * (i + 0.5)
+		_add_box_part(parent, Vector3(step_w, step_h, step_d), mat_data, pos)
+
+func _add_floor_opening_frame(parent: Node3D, structure: Dictionary, width: float, depth: float, mat_data: Dictionary) -> void:
+	var frame = max(min(width, depth) * 0.08, 0.04)
+	var frame_h = 0.04
+	var slab_y = frame_h * 0.5
+	_add_box_part(parent, Vector3(width + frame * 2.0, frame_h, frame), mat_data, Vector3(0, slab_y, depth * 0.5 + frame * 0.5))
+	_add_box_part(parent, Vector3(width + frame * 2.0, frame_h, frame), mat_data, Vector3(0, slab_y, -depth * 0.5 - frame * 0.5))
+	_add_box_part(parent, Vector3(frame, frame_h, depth), mat_data, Vector3(width * 0.5 + frame * 0.5, slab_y, 0))
+	_add_box_part(parent, Vector3(frame, frame_h, depth), mat_data, Vector3(-width * 0.5 - frame * 0.5, slab_y, 0))
+
+func _add_floor_opening_cutters(csg: CSGCombiner3D, structures, area_id: String, layer_altitude: float, cut_height: float, scale_factor: float) -> void:
+	if typeof(structures) != TYPE_DICTIONARY:
+		return
+
+	for structure_id in structures:
+		var structure = structures[structure_id]
+		if typeof(structure) != TYPE_DICTIONARY:
+			continue
+		if str(structure.get("structure_type", "")).to_lower() != "flooropening":
+			continue
+		if not structure.has("parentId") or str(structure["parentId"]) != area_id:
+			continue
+
+		var props = {}
+		if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
+			props = structure["properties"]
+
+		var width = get_dimension_value(props.get("width", structure.get("width", 100))) * scale_factor
+		var depth = get_dimension_value(props.get("depth", structure.get("depth", 100))) * scale_factor
+		var altitude = get_dimension_value(props.get("altitude", structure.get("altitude", 0))) * scale_factor
+		var opening = CSGBox3D.new()
+		opening.operation = CSGBox3D.OPERATION_SUBTRACTION
+		opening.size = Vector3(max(width, 0.05), max(cut_height, 0.2), max(depth, 0.05))
+		opening.position = Vector3(
+			float(structure.get("x", 0)) * scale_factor,
+			layer_altitude + altitude - max(cut_height, 0.2) * 0.5,
+			float(structure.get("y", 0)) * scale_factor
+		)
+		csg.add_child(opening)
+
 func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, cam_pos = null, render_mode: String = "INTERIOR"):
 	var csg = CSGCombiner3D.new()
 	csg.use_collision = true
@@ -773,6 +1398,10 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 	var areas = {}
 	if layer_data.has("areas"):
 		areas = layer_data["areas"]
+
+	var structures = {}
+	if layer_data.has("structures") and typeof(layer_data["structures"]) == TYPE_DICTIONARY:
+		structures = layer_data["structures"]
 
 	# ── Room centroid (fallback for walls with no named area) ──────────────────
 	var room_centroid  = Vector3.ZERO
@@ -1044,7 +1673,23 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 									var flip_z = -1.0 if hole.get("flipZ", false) else 1.0
 									asset_node.scale = Vector3(scale_x * flip_x, scale_y, scale_z * flip_z)
 
-									print("[VideoGLB] Loaded hole asset: ", model_path, " scale: ", asset_node.scale)
+									# Smart shadow control: frame/mullion meshes keep shadows ON
+									# (cast grid pattern), glass panes get shadows OFF.
+									_disable_shadow_casting_recursive(asset_node)
+									print("[VideoGLB] Loaded hole asset: ", model_path, " scale: ", asset_node.scale, " (smart shadow: frame=ON glass=OFF)")
+
+									# If the GLB has NO shadow-casting frame meshes at all
+									# (pure-glass or fully disabled asset), add a procedural
+									# grid shadow caster so we always get a window grid pattern.
+									var frame_casters := _count_shadow_casters(asset_node)
+									if frame_casters == 0 and h_alt > 0.15:
+										var wall_basis_g = Basis(Vector3.UP, wall_angle)
+										var outer_dir_g  = wall_basis_g * Vector3(0, 0, 1) * (-inner_sign)
+										_add_window_grid_shadow_caster(
+											h_center_pos, h_width, h_height,
+											wall_angle, outer_dir_g, layer_altitude
+										)
+										print("[VideoGLB]   GLB had no frame casters — added procedural grid")
 							else:
 								print("[VideoGLB] Failed to load hole GLTF: ", model_path, " Error: ", error)
 
@@ -1054,6 +1699,24 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 							"name": hole.get("name", "unknown"),
 							"path": model_path
 						})
+
+				# ── 5. Collect ALL openings for sunlight placement ────────────
+				# Every hole (window, door, any opening) lets sunlight into the room.
+				var wall_basis_sun = Basis(Vector3.UP, wall_angle)
+				var wall_normal_sun = wall_basis_sun * Vector3(0, 0, 1)
+				var outer_direction = wall_normal_sun * (-inner_sign)
+				var inner_direction = wall_normal_sun * inner_sign
+				_window_sunlight_data.append({
+					"center": h_center_pos,
+					"width": h_width,
+					"height": h_height,
+					"altitude": h_alt,
+					"wall_angle": wall_angle,
+					"outer_dir": outer_direction,
+					"inner_dir": inner_direction,
+					"layer_altitude": layer_altitude
+				})
+				print("[VideoGLB] Collected opening for sunlight: pos=", h_center_pos, " size=", Vector2(h_width, h_height), " alt=", h_alt)
 
 	# ── 2. Build Floors and Ceilings from Areas ────────────────────────────────
 	var max_wall_height    = 0.0
@@ -1133,6 +1796,7 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 				floor_mat.albedo_color = Color(0.8, 0.8, 0.8)
 				floor_poly.material    = floor_mat
 
+			_add_floor_opening_cutters(csg, structures, str(area_id), layer_altitude, floor_depth, scale_factor)
 			csg.add_child(floor_poly)
 
 			# ── Ceiling ────────────────────────────────────────────────────────
@@ -1796,6 +2460,110 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 			"reason":   load_reason,
 			"position": item.get("x", 0),
 		})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _disable_shadow_casting_recursive
+# ─────────────────────────────────────────────────────────────────────────────
+func _disable_shadow_casting_recursive(node: Node) -> void:
+	if node is MeshInstance3D:
+		var mesh_inst := node as MeshInstance3D
+		var is_glass := _is_glass_mesh(mesh_inst)
+		if is_glass:
+			mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		else:
+			mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	for child in node.get_children():
+		_disable_shadow_casting_recursive(child)
+
+func _is_glass_mesh(mesh_inst: MeshInstance3D) -> bool:
+	var lower_name := mesh_inst.name.to_lower()
+	for keyword in ["glass", "glaz", "pane", "transp", "window_fill", "glazing"]:
+		if keyword in lower_name: return true
+
+	var surface_count := mesh_inst.get_surface_override_material_count()
+	if surface_count == 0 and mesh_inst.mesh != null:
+		surface_count = mesh_inst.mesh.get_surface_count()
+
+	for s in range(surface_count):
+		var mat = mesh_inst.get_surface_override_material(s)
+		if mat == null and mesh_inst.mesh != null:
+			mat = mesh_inst.mesh.surface_get_material(s)
+		if mat == null: continue
+		if mat is StandardMaterial3D:
+			var std_mat := mat as StandardMaterial3D
+			if std_mat.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED: return true
+			if std_mat.albedo_color.a < 0.5: return true
+	return false
+
+func _count_shadow_casters(node: Node) -> int:
+	var count := 0
+	if node is MeshInstance3D:
+		if (node as MeshInstance3D).cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF:
+			count += 1
+	for child in node.get_children():
+		count += _count_shadow_casters(child)
+	return count
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _add_window_grid_shadow_caster
+# ─────────────────────────────────────────────────────────────────────────────
+func _add_window_grid_shadow_caster(win_center: Vector3, win_width: float,
+		win_height: float, wall_angle: float, outer_dir: Vector3,
+		layer_altitude: float) -> void:
+	var bar_t    := 0.04
+	var bar_d    := 0.06
+	var grid_pos := win_center + outer_dir * 0.06
+
+	var grid_root := Node3D.new()
+	grid_root.name      = "WindowGridShadowCaster"
+	grid_root.position  = grid_pos
+	grid_root.rotation.y = wall_angle
+	add_child(grid_root)
+
+	var frame_mat := StandardMaterial3D.new()
+	frame_mat.albedo_color  = Color(0.15, 0.10, 0.08)
+	frame_mat.roughness     = 0.6
+	frame_mat.cull_mode     = BaseMaterial3D.CULL_DISABLED
+
+	var border_meshes := [
+		Vector3(0.0,  win_height * 0.5 - bar_t * 0.5, 0.0), Vector3(win_width, bar_t, bar_d),
+		Vector3(0.0, -win_height * 0.5 + bar_t * 0.5, 0.0), Vector3(win_width, bar_t, bar_d),
+		Vector3(-win_width * 0.5 + bar_t * 0.5, 0.0, 0.0),  Vector3(bar_t, win_height, bar_d),
+		Vector3( win_width * 0.5 - bar_t * 0.5, 0.0, 0.0),  Vector3(bar_t, win_height, bar_d),
+	]
+
+	var bi := 0
+	while bi + 1 < border_meshes.size():
+		var b_pos  : Vector3 = border_meshes[bi]
+		var b_size : Vector3 = border_meshes[bi + 1]
+		bi += 2
+		var bm := BoxMesh.new()
+		bm.size = b_size
+		var bmi := MeshInstance3D.new()
+		bmi.mesh = bm
+		bmi.position = b_pos
+		bmi.set_surface_override_material(0, frame_mat)
+		bmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		grid_root.add_child(bmi)
+
+	var vm := BoxMesh.new()
+	vm.size = Vector3(bar_t, win_height - bar_t * 2.0, bar_d)
+	var vmi := MeshInstance3D.new()
+	vmi.mesh     = vm
+	vmi.position = Vector3(0.0, 0.0, 0.0)
+	vmi.set_surface_override_material(0, frame_mat)
+	vmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	grid_root.add_child(vmi)
+
+	var hm := BoxMesh.new()
+	hm.size = Vector3(win_width - bar_t * 2.0, bar_t, bar_d)
+	var hmi := MeshInstance3D.new()
+	hmi.mesh     = hm
+	hmi.position = Vector3(0.0, 0.0, 0.0)
+	hmi.set_surface_override_material(0, frame_mat)
+	hmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	grid_root.add_child(hmi)
+	print("[VideoGLB]   Added procedural window grid shadow caster at ", grid_pos)
 
 # ─────────────────────────────────────────────────────────────────
 # get_dimension_value — identical to image_glb_creation.gd

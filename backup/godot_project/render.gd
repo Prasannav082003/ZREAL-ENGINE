@@ -199,6 +199,8 @@ func render_image(data, output_path):
 	if img:
 		img.save_png(output_path)
 		print("Image saved to: ", output_path)
+		# Save WebP thumbnail alongside the rendered image
+		_save_thumbnail_webp(img, output_path)
 	else:
 		print("Error: Failed to capture image from viewport.")
 	
@@ -327,6 +329,7 @@ func render_video(data, output_base_path):
 		end_pos = parse_vec3(anim_data["camera_position_end"])
 		
 	var base_filename = output_base_path.get_basename()
+	var first_frame_saved = false
 	
 	for frame in range(total_frames):
 		var t = float(frame) / float(total_frames - 1) if total_frames > 1 else 0.0
@@ -339,6 +342,10 @@ func render_video(data, output_base_path):
 		var frame_filename = "%s_%04d.png" % [base_filename, frame]
 		if img:
 			img.save_png(frame_filename)
+			# Save the 1st frame as WebP thumbnail for the video
+			if not first_frame_saved:
+				_save_thumbnail_webp(img, output_base_path)
+				first_frame_saved = true
 		else:
 			print("Warning: empty frame at index ", frame)
 		
@@ -410,6 +417,46 @@ func _get_safe_pos(start: Vector3, end: Vector3, space_state: PhysicsDirectSpace
 		return hit_pos - dir * back_off
 		
 	return end
+
+# ─────────────────────────────────────────────────────────────────
+# Thumbnail Generation
+# ─────────────────────────────────────────────────────────────────
+func _save_thumbnail_webp(source_image: Image, output_path: String) -> void:
+	"""Saves a small WebP thumbnail next to the render output.
+	The thumbnail is saved with a '_thumb.webp' suffix in the same directory.
+	Max dimension is 480px, WebP quality 75% to keep file size low."""
+	if source_image == null or source_image.is_empty():
+		print("Warning: Cannot create thumbnail — source image is empty.")
+		return
+	
+	# Determine thumbnail path: same directory, basename + _thumb.webp
+	var dir = output_path.get_base_dir()
+	var basename = output_path.get_file().get_basename()
+	var thumb_path = dir.path_join(basename + "_thumb.webp")
+	
+	# Create a copy to avoid mutating the original image
+	var thumb = source_image.duplicate()
+	
+	# Resize to max 480px on the longest side, preserving aspect ratio
+	var max_dim = 480
+	var w = thumb.get_width()
+	var h = thumb.get_height()
+	if w > max_dim or h > max_dim:
+		if w >= h:
+			var new_w = max_dim
+			var new_h = int(float(h) * float(max_dim) / float(w))
+			thumb.resize(new_w, max(new_h, 1), Image.INTERPOLATE_LANCZOS)
+		else:
+			var new_h = max_dim
+			var new_w = int(float(w) * float(max_dim) / float(h))
+			thumb.resize(max(new_w, 1), new_h, Image.INTERPOLATE_LANCZOS)
+	
+	# Save as WebP with lossy compression (quality 0.75 = 75%)
+	var err = thumb.save_webp(thumb_path, true, 0.75)
+	if err == OK:
+		print("Thumbnail saved to: ", thumb_path)
+	else:
+		print("Warning: Failed to save thumbnail. Error code: ", err)
 
 func _wait_frames(count: int) -> void:
 	for i in range(count):
