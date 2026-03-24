@@ -22,6 +22,7 @@ var _use_png_fallback: bool = false
 var _needs_auto_pan: bool = false
 var _render_data = {}    # Full parsed JSON — used by setup_fixed_fill_lights()
 var _output_path: String = ""  # Stored for save_logs at completion
+var _first_frame_saved: bool = false  # Track whether first-frame thumbnail has been saved
 
 func _ready():
 	print("Godot VIDEO Renderer Started")
@@ -143,7 +144,10 @@ func _process(_delta):
 			
 			_rendering = true
 			print("Scene settled. Starting video render...")
-			# Fill lights were already set up in _ready() - no need to call again here
+			# Capture thumbnail safely asynchronously without blocking _process
+			if not _first_frame_saved:
+				_first_frame_saved = true
+				call_deferred("_capture_thumbnail_async")
 		return
 	
 	if not _rendering:
@@ -174,6 +178,12 @@ func _process(_delta):
 		print("Frame ", _current_frame, "/", _total_frames, " (", pct, "%)")
 	
 	_current_frame += 1
+
+func _capture_thumbnail_async():
+	await RenderingServer.frame_post_draw
+	var img = get_viewport().get_texture().get_image()
+	if img and not img.is_empty():
+		_save_thumbnail_webp(img, _output_path)
 
 func _apply_keyframe(frame_idx: int):
 	var cam = get_node_or_null("MainCamera")
@@ -823,3 +833,64 @@ func save_logs(input_data, output_video_path):
 		print("Saved video render log to: ", log_path)
 	else:
 		print("Error saving video render log to ", log_path)
+
+# ─────────────────────────────────────────────────────────────────
+# Thumbnail Generation
+# ─────────────────────────────────────────────────────────────────
+func _save_thumbnail_webp(source_image: Image, output_path: String) -> void:
+	"""Saves a small WebP thumbnail next to the render output.
+	The thumbnail is saved with a '_thumb.webp' suffix in the same directory.
+	Max dimension is 480px, WebP quality 75% to keep file size low."""
+	if source_image == null or source_image.is_empty():
+		print("Warning: Cannot create thumbnail — source image is empty.")
+		return
+	
+	# We handle both single file paths and nested paths correctly:
+	# If the output_path is .../output_renders/<uuid>/frame.avi,
+	# We want the thumbnail at:  .../output_renders/<uuid>_thumb.webp
+	# If the output_path is just .../video.avi, we want: .../video_thumb.webp
+	var thumb_path = ""
+	var inner_dir = output_path.get_base_dir()
+	var folder_name = inner_dir.get_file()
+	
+	# Simple heuristic: if the containing folder looks like an ID (or we are in a subfolder structure)
+	# and output_path ends with 'frame.avi' or similar generic name from Python
+	if output_path.get_file().get_basename().begins_with("frame") and inner_dir.get_base_dir().get_file() == "output_renders":
+		var parent_dir = inner_dir.get_base_dir()
+		thumb_path = parent_dir.path_join(folder_name + "_thumb.webp")
+	else:
+		# Default fallback
+		var dir = output_path.get_base_dir()
+		var basename = output_path.get_file().get_basename()
+		
+		# Prevent doubling the _render extension if the UUID folder is used
+		if basename.ends_with("_render"):
+			thumb_path = dir.path_join(basename + "_thumb.webp")
+		elif folder_name.length() > 20: # UUID length approx check
+			thumb_path = dir.get_base_dir().path_join(folder_name + "_thumb.webp")
+		else:
+			thumb_path = dir.path_join(basename + "_thumb.webp")
+	
+	# Create a copy to avoid mutating the original image
+	var thumb = source_image.duplicate()
+	
+	# Resize to max 480px on the longest side, preserving aspect ratio
+	var max_dim = 480
+	var w = thumb.get_width()
+	var h = thumb.get_height()
+	if w > max_dim or h > max_dim:
+		if w >= h:
+			var new_w = max_dim
+			var new_h = int(float(h) * float(max_dim) / float(w))
+			thumb.resize(new_w, max(new_h, 1), Image.INTERPOLATE_LANCZOS)
+		else:
+			var new_h = max_dim
+			var new_w = int(float(w) * float(max_dim) / float(h))
+			thumb.resize(max(new_w, 1), new_h, Image.INTERPOLATE_LANCZOS)
+	
+	# Save as WebP with lossy compression (quality 0.75 = 75%)
+	var err = thumb.save_webp(thumb_path, true, 0.75)
+	if err == OK:
+		print("Thumbnail saved to: ", thumb_path)
+	else:
+		print("Warning: Failed to save thumbnail. Error code: ", err)
