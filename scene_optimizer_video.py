@@ -233,9 +233,12 @@ def _collect_portal_visible_rooms(
             continue
 
         line_holes = line.get("holes", [])
-        if not line_holes:
+        is_hidden  = line.get("visible") is False
+        
+        if not line_holes and not is_hidden:
             continue
 
+        # (a) Regular portals
         for hole_id in line_holes:
             hid = str(hole_id)
             hole = holes.get(hid, holes.get(hole_id))
@@ -262,6 +265,21 @@ def _collect_portal_visible_rooms(
             beyond = _rooms_beyond_portal(line, active_area_id, areas, vertices)
             if beyond:
                 visible_rooms.update(beyond)
+
+        # (b) Hidden walls (entire wall spans acts as a portal)
+        if is_hidden:
+            vd1 = vertices.get(v_ids[0], vertices.get(str(v_ids[0])))
+            vd2 = vertices.get(v_ids[1], vertices.get(str(v_ids[1])))
+            if vd1 and vd2:
+                p1x, p1y = float(vd1.get("x", 0)), float(vd1.get("y", 0))
+                p2x, p2y = float(vd2.get("x", 0)), float(vd2.get("y", 0))
+                portal_cx, portal_cy = (p1x + p2x) / 2.0, (p1y + p2y) / 2.0
+                dist = math.hypot(portal_cx - cam_x, portal_cy - cam_y)
+                if dist <= max_dist_cm:
+                    if _portal_visible_in_fov(cam_x, cam_y, dir_x, dir_y, effective_fov, p1x, p1y, p2x, p2y):
+                        beyond = _rooms_beyond_portal(line, active_area_id, areas, vertices)
+                        if beyond:
+                            visible_rooms.update(beyond)
 
     return visible_rooms
 

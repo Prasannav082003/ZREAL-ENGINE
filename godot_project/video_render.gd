@@ -463,9 +463,10 @@ func set_resolution(data):
 	# Anti-aliasing for video:
 	# TAA is intentionally DISABLED — it accumulates frames over time and causes
 	# strong ghosting/blur whenever the camera moves, making the video look smeared.
-	# MSAA_4X gives sharp per-frame quality without temporal artifacts.
-	get_viewport().msaa_3d = Viewport.MSAA_4X
-	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+	# MSAA_8X provides the best physically hard-edged geometry clarity.
+	# FXAA is DISABLED because it smears/softens high-frequency texture details.
+	get_viewport().msaa_3d = Viewport.MSAA_8X
+	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
 	get_viewport().use_taa = false          # ← must stay OFF during animated renders
 	get_viewport().use_debanding = true
 	get_viewport().mesh_lod_threshold = 0.0
