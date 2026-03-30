@@ -1,0 +1,101 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Environment variables
+.env
+.env.local
+
+# -------------------------
+# IDE
+# -------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# -------------------------
+# OS files
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------
+# Render outputs (VERY IMPORTANT)
+# -------------------------
+*.exr
+*.png
+*.jpg
+*.jpeg
+*.tiff
+*.bmp
+
+# Videos
+*.mp4
+*.avi
+*.mov
+
+# -------------------------
+# Project generated folders
+# -------------------------
+backup/
+output_renders/
+output_glb/
+asset_downloads/
+logs/
+audio/
+ffmpeg/
+
+# Scene optimizer logs
+culling_logs/
+
+# Generated JSON inputs
+godot_project/input_json/
+
+# Godot cache files
+.godot/
+.import/
+.export/
+
+# Temporary files
+tmp/
+temp/
+
+# -------------------------
+# Large assets
+# -------------------------
+*.zip
+*.tar
+*.gz
+*.rar
+
+# -------------------------
+# Local credentials
+# -------------------------
+login_details.txt

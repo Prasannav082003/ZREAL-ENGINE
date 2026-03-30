@@ -1,0 +1,1757 @@
+{
+	"ambient_light": {
+		"intensity": 0.6
+	},
+	"aspect_ratio": "16:9",
+	"blender_camera": {
+		"clip_end": 450.0,
+		"clip_start": 0.1,
+		"lens": 60.0,
+		"lens_unit": "FOV",
+		"location": [
+			3.1,
+			-17.53,
+			1.5
+		],
+		"rotation_euler": [
+			-1.23358797325276,
+			0.0,
+			0.676223598236522
+		],
+		"rotation_mode": "XYZ",
+		"sensor_fit": "AUTO",
+		"sensor_height": 18.0,
+		"sensor_width": 32.0,
+		"shift_x": 0.0,
+		"shift_y": 0.0,
+		"type": "PERSP"
+	},
+	"blender_script": "\nimport bpy\nimport bmesh\nfrom mathutils import Vector, Euler\n\n# Clear existing camera and target\nif \"Camera\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"Camera\"], do_unlink=True)\nif \"CameraTarget\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"CameraTarget\"], do_unlink=True)\n\n# Create camera\nbpy.ops.object.camera_add()\ncamera = bpy.context.object\ncamera.name = \"Camera\"\n\n# Set camera properties\ncamera.location = (3.1000000000000005, -17.529999999999998, 1.5)\ncamera.rotation_euler = (-1.233587973252764, 0, 0.6762235982365223)\ncamera.rotation_mode = 'XYZ'\ncamera.data.type = 'PERSP'\ncamera.data.lens_unit = 'FOV'\ncamera.data.lens = 60\ncamera.data.clip_start = 0.1\ncamera.data.clip_end = 450\ncamera.data.sensor_width = 32\ncamera.data.sensor_height = 18\ncamera.data.sensor_fit = 'AUTO'\ncamera.data.shift_x = 0\ncamera.data.shift_y = 0\n\n# Create camera target (Empty object)\nbpy.ops.object.empty_add(type='PLAIN_AXES')\ntarget = bpy.context.object\ntarget.name = \"CameraTarget\"\ntarget.location = (5.170656513611144, -8.093180311992061, 4.080468131689594)\ntarget.rotation_euler = (0, 0, 0)\ntarget.empty_display_size = 1\n\n# Set camera to track target\ncamera.constraints.new(type='TRACK_TO')\ncamera.constraints[\"Track To\"].target = target\ncamera.constraints[\"Track To\"].track_axis = 'TRACK_NEGATIVE_Z'\ncamera.constraints[\"Track To\"].up_axis = 'UP_Y'\n\n# Set camera as active camera\nbpy.context.scene.camera = camera\n\nprint(\"Camera setup complete!\")\nprint(f\"Camera location: {camera.location}\")\nprint(f\"Camera rotation: {camera.rotation_euler}\")\nprint(f\"Target location: {target.location}\")\nprint(f\"Camera FOV: {camera.data.lens}\")\n",
+	"blender_target": {
+		"empty_display_size": 1.0,
+		"empty_display_type": "PLAIN_AXES",
+		"location": [
+			5.17065651361114,
+			-8.09318031199206,
+			4.08046813168959
+		],
+		"rotation_euler": [
+			0.0,
+			0.0,
+			0.0
+		],
+		"rotation_mode": "XYZ",
+		"type": "EMPTY"
+	},
+	"coordinate_system": "right_handed_y_up",
+	"day_render": true,
+	"directional_light": {
+		"cast_shadow": false,
+		"color": {
+			"b": 0.871367119195957,
+			"g": 0.938685728456504,
+			"r": 1.0
+		},
+		"intensity": 0.8,
+		"position": {
+			"x": 25.0,
+			"y": 35.0,
+			"z": -10.0
+		},
+		"target": {
+			"x": 0.0,
+			"y": 0.0,
+			"z": 0.0
+		}
+	},
+	"floor_plan_data": {
+		"direction": "n",
+		"directionangle": 0.0,
+		"grids": {
+
+		},
+		"groups": {
+
+		},
+		"guides": {
+			"circular": {
+
+			},
+			"horizontal": {
+
+			},
+			"vertical": {
+
+			}
+		},
+		"height": 1363.10769865368,
+		"layers": {
+			"layer-1": {
+				"altitude": 0.0,
+				"areas": {
+					"a-1772773799495-ouq4ouj4": {
+						"ceiling_properties": {
+							"height": 300.0,
+							"isvisible": true,
+							"material": {
+								"aoUrl": "",
+								"color": "#D9D2E9",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": "",
+								"textureId": null
+							},
+							"thickness": 2.0
+						},
+						"floor_properties": {
+							"height": 0.0,
+							"isvisible": true,
+							"material": {
+								"aoUrl": "",
+								"color": "#D9D2E9",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									2.0,
+									2.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": "",
+								"textureId": 318.0
+							},
+							"thickness": 5.0
+						},
+						"holes": [],
+						"id": "a-1772773799495-ouq4ouj4",
+						"misc": {
+
+						},
+						"name": "Room",
+						"properties": {
+							"height": {
+								"length": 304.8
+							}
+						},
+						"prototype": "areas",
+						"selected": false,
+						"type": "area",
+						"vertices": [
+							"v-1772773799495-c3810ss5",
+							"v-1772773799495-9jq8x96z",
+							"v-1772773799495-ga4onxgx",
+							"v-1772773799495-6s1wc7e3"
+						],
+						"visible": true
+					}
+				},
+				"externalAreas": {
+
+				},
+				"holes": {
+
+				},
+				"id": "layer-1",
+				"items": {
+
+				},
+				"lines": {
+					"l-1772773799495-he2196ig": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1772773799495-he2196ig",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D9D2E9",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": "",
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#7c8eae",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773799495-ga4onxgx",
+							"v-1772773799495-6s1wc7e3"
+						],
+						"visible": true
+					},
+					"l-1772773799495-laf6avxu": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1772773799495-laf6avxu",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D9D2E9",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": "",
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#7c8eae",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773799495-9jq8x96z",
+							"v-1772773799495-ga4onxgx"
+						],
+						"visible": true
+					},
+					"l-1772773799495-rnqlw6jm": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1772773799495-rnqlw6jm",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\fa272442_PavingStones146_4K-PNG_HR_BaseColor.png",
+								"metalnessUrl": "",
+								"normalUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\e14d535f_PavingStones146_4K-PNG_HR_NormalDX.png",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\3db4369f_PavingStones146_4K-PNG_HR_Roughness.png",
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D92C27",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": "",
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773799495-c3810ss5",
+							"v-1772773799495-9jq8x96z"
+						],
+						"visible": true
+					},
+					"l-1772773799495-w7ipi37y": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1772773799495-w7ipi37y",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D9D2E9",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": "",
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#7c8eae",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773799495-6s1wc7e3",
+							"v-1772773799495-c3810ss5"
+						],
+						"visible": true
+					}
+				},
+				"name": "Ground Floor",
+				"opacity": 1.0,
+				"order": 0.0,
+				"selected": {
+					"areas": [],
+					"dimensions": [],
+					"externalAreas": [],
+					"holes": [],
+					"items": [],
+					"lines": [],
+					"structures": [],
+					"vertices": []
+				},
+				"structures": {
+
+				},
+				"vertices": {
+					"v-1772773799495-6s1wc7e3": {
+						"areas": [
+							"a-1772773799495-ouq4ouj4"
+						],
+						"externalAreas": [],
+						"id": "v-1772773799495-6s1wc7e3",
+						"lines": [
+							"l-1772773799495-he2196ig",
+							"l-1772773799495-w7ipi37y"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": -152.400073742146,
+						"y": 568.400073742146
+					},
+					"v-1772773799495-9jq8x96z": {
+						"areas": [
+							"a-1772773799495-ouq4ouj4"
+						],
+						"externalAreas": [],
+						"id": "v-1772773799495-9jq8x96z",
+						"lines": [
+							"l-1772773799495-rnqlw6jm",
+							"l-1772773799495-laf6avxu"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": 778.400073742146,
+						"y": -152.400073742146
+					},
+					"v-1772773799495-c3810ss5": {
+						"areas": [
+							"a-1772773799495-ouq4ouj4"
+						],
+						"externalAreas": [],
+						"id": "v-1772773799495-c3810ss5",
+						"lines": [
+							"l-1772773799495-w7ipi37y",
+							"l-1772773799495-rnqlw6jm"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": -152.400073742146,
+						"y": -152.400073742146
+					},
+					"v-1772773799495-ga4onxgx": {
+						"areas": [
+							"a-1772773799495-ouq4ouj4"
+						],
+						"externalAreas": [],
+						"id": "v-1772773799495-ga4onxgx",
+						"lines": [
+							"l-1772773799495-laf6avxu",
+							"l-1772773799495-he2196ig"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": 778.400073742146,
+						"y": 568.400073742146
+					}
+				},
+				"visible": true
+			},
+			"layer-2": {
+				"altitude": 300.0,
+				"areas": {
+					"a-1772773831433-tn0jnjey": {
+						"ceiling_properties": {
+							"height": 300.0,
+							"isvisible": true,
+							"material": {
+								"color": "#ffffff",
+								"flipY": false,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0
+							},
+							"thickness": 15.24
+						},
+						"floor_properties": {
+							"height": 0.0,
+							"isvisible": true,
+							"material": {
+								"aoUrl": "",
+								"color": "#ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\d6fbdb8d_Wood091A_4K-PNG_HR_Color.png",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": ""
+							},
+							"thickness": 10.0
+						},
+						"holes": [],
+						"id": "a-1772773831433-tn0jnjey",
+						"misc": {
+
+						},
+						"name": "Room",
+						"properties": {
+							"height": {
+								"length": 0.0
+							},
+							"texture": "none"
+						},
+						"prototype": "areas",
+						"selected": false,
+						"type": "area",
+						"vertices": [
+							"v-1772773825935-0",
+							"v-1772773825935-1",
+							"v-1772773828391-1",
+							"v-1772773830136-1"
+						],
+						"visible": true
+					},
+					"a-1772881183289-ixtb6yao": {
+						"ceiling_properties": {
+							"height": 300.0,
+							"isvisible": true,
+							"material": {
+								"color": "#ffffff",
+								"flipY": false,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0
+							},
+							"thickness": 15.24
+						},
+						"floor_properties": {
+							"height": 0.0,
+							"isvisible": true,
+							"material": {
+								"aoUrl": "",
+								"color": "#ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\d6fbdb8d_Wood091A_4K-PNG_HR_Color.png",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": ""
+							},
+							"thickness": 10.0
+						},
+						"holes": [],
+						"id": "a-1772881183289-ixtb6yao",
+						"misc": {
+
+						},
+						"name": "Room",
+						"properties": {
+							"height": {
+								"length": 0.0
+							},
+							"texture": "none"
+						},
+						"prototype": "areas",
+						"selected": false,
+						"type": "area",
+						"vertices": [
+							"v-1772773830136-1",
+							"v-1772773828391-1",
+							"v-1772881182012-1",
+							"v-1772881180578-1"
+						],
+						"visible": true
+					}
+				},
+				"externalAreas": {
+
+				},
+				"gridLines": {
+
+				},
+				"holes": {
+
+				},
+				"id": "layer-2",
+				"items": {
+					"i-1772881668289-5azt1ett": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\8e496650_Balconygrills_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Balcony_Rails/Balcony_Grills/BalconyGrills.svg",
+							"assetId_3D": 383.0
+						},
+						"id": "i-1772881668289-5azt1ett",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "floor_mount",
+						"name": "Balcony Grills",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 150.0
+							},
+							"height": {
+								"length": 130.0
+							},
+							"width": {
+								"length": 300.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 0.0,
+						"selected": false,
+						"type": "Furniture",
+						"visible": true,
+						"x": 521.132147480432,
+						"y": 660.5
+					},
+					"i-1772884120404-b29006xi": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f7f7e636_MinimalistSofa_HP.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "https://zrealtystoragedev.blob.core.windows.net/asset-library/Sofas/Minimalistic_Sofa/Svg_MinimalisticSofa.svg",
+							"assetId_3D": 152.0
+						},
+						"id": "i-1772884120404-b29006xi",
+						"materials": {
+							"SofaFabric.001": {
+								"isColorEdited": false,
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot - staging\\asset_downloads\\dbd76c19_waffle_pique_cotton_HR_diff.jpg",
+								"repeat": [
+									0.64,
+									0.64
+								]
+							}
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Minimalistic_Sofa",
+						"properties": {
+							"altitude": {
+								"length": 0.0
+							},
+							"depth": {
+								"length": 120.0
+							},
+							"height": {
+								"length": 68.9
+							},
+							"width": {
+								"length": 230.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 0.0,
+						"selected": false,
+						"type": "Furniture",
+						"visible": true,
+						"x": 562.754311724073,
+						"y": 1050.97799961177
+					}
+				},
+				"lines": {
+					"l-1772773825935-let7e9pj": {
+						"holes": [],
+						"id": "l-1772773825935-let7e9pj",
+						"inner_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773825935-0",
+							"v-1772773825935-1"
+						],
+						"visible": true
+					},
+					"l-1772773828391-ppqoleu8": {
+						"holes": [],
+						"id": "l-1772773828391-ppqoleu8",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f9dd3809_bluemarble_HR_BaseColor.jpg",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D92C27",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773825935-1",
+							"v-1772773828391-1"
+						],
+						"visible": true
+					},
+					"l-1772773830136-kja1z1up": {
+						"holes": [],
+						"id": "l-1772773830136-kja1z1up",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D92C27",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f9dd3809_bluemarble_HR_BaseColor.jpg",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773828391-1",
+							"v-1772773830136-1"
+						],
+						"visible": true
+					},
+					"l-1772773831432-3he027wc": {
+						"holes": [],
+						"id": "l-1772773831432-3he027wc",
+						"inner_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773830136-1",
+							"v-1772773825935-0"
+						],
+						"visible": true
+					},
+					"l-1772881180578-9h84zmx8": {
+						"holes": [],
+						"id": "l-1772881180578-9h84zmx8",
+						"inner_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773830136-1",
+							"v-1772881180578-1"
+						],
+						"visible": true
+					},
+					"l-1772881182012-jrg28qmx": {
+						"holes": [],
+						"id": "l-1772881182012-jrg28qmx",
+						"inner_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772881180578-1",
+							"v-1772881182012-1"
+						],
+						"visible": true
+					},
+					"l-1772881183252-0ix6mn5g": {
+						"holes": [],
+						"id": "l-1772881183252-0ix6mn5g",
+						"inner_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"color": "#999999",
+								"repeat": [
+									1.0,
+									1.0
+								]
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772881182012-1",
+							"v-1772773828391-1"
+						],
+						"visible": true
+					}
+				},
+				"name": "First Floor",
+				"opacity": 1.0,
+				"order": 1.0,
+				"selected": {
+					"areas": [],
+					"dimensions": [],
+					"externalAreas": [],
+					"holes": [],
+					"items": [],
+					"lines": [],
+					"structures": [],
+					"vertices": []
+				},
+				"structures": {
+
+				},
+				"vertices": {
+					"v-1772773825935-0": {
+						"areas": [
+							"a-1772773831433-tn0jnjey"
+						],
+						"id": "v-1772773825935-0",
+						"lines": [
+							"l-1772773825935-let7e9pj",
+							"l-1772773831432-3he027wc"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": -156.0,
+						"y": -155.0
+					},
+					"v-1772773825935-1": {
+						"areas": [
+							"a-1772773831433-tn0jnjey"
+						],
+						"id": "v-1772773825935-1",
+						"lines": [
+							"l-1772773825935-let7e9pj",
+							"l-1772773828391-ppqoleu8"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": -156.0,
+						"y": 570.0
+					},
+					"v-1772773828391-1": {
+						"areas": [
+							"a-1772773831433-tn0jnjey",
+							"a-1772881183289-ixtb6yao"
+						],
+						"id": "v-1772773828391-1",
+						"lines": [
+							"l-1772773828391-ppqoleu8",
+							"l-1772773830136-kja1z1up",
+							"l-1772881183252-0ix6mn5g"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": 776.0,
+						"y": 570.0
+					},
+					"v-1772773830136-1": {
+						"areas": [
+							"a-1772773831433-tn0jnjey",
+							"a-1772881183289-ixtb6yao"
+						],
+						"id": "v-1772773830136-1",
+						"lines": [
+							"l-1772773830136-kja1z1up",
+							"l-1772773831432-3he027wc",
+							"l-1772881180578-9h84zmx8"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": 776.0,
+						"y": -155.0
+					},
+					"v-1772881180578-1": {
+						"areas": [
+							"a-1772881183289-ixtb6yao"
+						],
+						"id": "v-1772881180578-1",
+						"lines": [
+							"l-1772881180578-9h84zmx8",
+							"l-1772881182012-jrg28qmx"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": 1406.26429496086,
+						"y": -155.0
+					},
+					"v-1772881182012-1": {
+						"areas": [
+							"a-1772881183289-ixtb6yao"
+						],
+						"id": "v-1772881182012-1",
+						"lines": [
+							"l-1772881182012-jrg28qmx",
+							"l-1772881183252-0ix6mn5g"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": 1406.26429496086,
+						"y": 570.0
+					}
+				},
+				"visible": true
+			},
+			"layer-3": {
+				"altitude": 600.0,
+				"areas": {
+					"a-1772773868417-gyxfly7o": {
+						"ceiling_properties": {
+							"height": 300.0,
+							"isvisible": true,
+							"material": {
+								"color": "#ffffff",
+								"flipY": false,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0
+							},
+							"thickness": 15.24
+						},
+						"floor_properties": {
+							"height": 0.0,
+							"isvisible": true,
+							"material": {
+								"aoUrl": "",
+								"color": "#ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"flipY": false,
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\d6fbdb8d_Wood091A_4K-PNG_HR_Color.png",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": ""
+							},
+							"thickness": 10.0
+						},
+						"holes": [],
+						"id": "a-1772773868417-gyxfly7o",
+						"misc": {
+
+						},
+						"name": "Room",
+						"properties": {
+							"height": {
+								"length": 0.0
+							},
+							"texture": "none"
+						},
+						"prototype": "areas",
+						"selected": false,
+						"type": "area",
+						"vertices": [
+							"v-1772773850168-0",
+							"v-1772773850168-1",
+							"v-1772773853069-1",
+							"v-1772773855304-1"
+						],
+						"visible": true
+					}
+				},
+				"externalAreas": {
+
+				},
+				"gridLines": {
+
+				},
+				"holes": {
+
+				},
+				"id": "layer-3",
+				"items": {
+
+				},
+				"lines": {
+					"l-1772773850168-zt7l3l79": {
+						"holes": [],
+						"id": "l-1772773850168-zt7l3l79",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f9dd3809_bluemarble_HR_BaseColor.jpg",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D92C27",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773850168-0",
+							"v-1772773850168-1"
+						],
+						"visible": true
+					},
+					"l-1772773853069-l43mw57n": {
+						"holes": [],
+						"id": "l-1772773853069-l43mw57n",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f9dd3809_bluemarble_HR_BaseColor.jpg",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D92C27",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773850168-1",
+							"v-1772773853069-1"
+						],
+						"visible": true
+					},
+					"l-1772773855303-3bfeg8bz": {
+						"holes": [],
+						"id": "l-1772773855303-3bfeg8bz",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f9dd3809_bluemarble_HR_BaseColor.jpg",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D92C27",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773853069-1",
+							"v-1772773855304-1"
+						],
+						"visible": true
+					},
+					"l-1772773868381-rcwg9s4s": {
+						"holes": [],
+						"id": "l-1772773868381-rcwg9s4s",
+						"inner_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "ffffff",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f9dd3809_bluemarble_HR_BaseColor.jpg",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"misc": {
+							"_unitLength": "ft-in"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": "",
+								"color": "#D92C27",
+								"displacementUrl": "",
+								"emissionUrl": "",
+								"mapUrl": "",
+								"metalnessUrl": "",
+								"normalUrl": "",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"roughnessUrl": ""
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"textureA": "Brick",
+							"textureB": "Brick",
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1772773855304-1",
+							"v-1772773850168-0"
+						],
+						"visible": true
+					}
+				},
+				"name": "Second Floor",
+				"opacity": 1.0,
+				"order": 2.0,
+				"selected": {
+					"areas": [],
+					"dimensions": [],
+					"externalAreas": [],
+					"holes": [],
+					"items": [],
+					"lines": [],
+					"structures": [],
+					"vertices": []
+				},
+				"structures": {
+
+				},
+				"vertices": {
+					"v-1772773850168-0": {
+						"areas": [
+							"a-1772773868417-gyxfly7o"
+						],
+						"id": "v-1772773850168-0",
+						"lines": [
+							"l-1772773850168-zt7l3l79",
+							"l-1772773868381-rcwg9s4s"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": -158.0,
+						"y": -157.0
+					},
+					"v-1772773850168-1": {
+						"areas": [
+							"a-1772773868417-gyxfly7o"
+						],
+						"id": "v-1772773850168-1",
+						"lines": [
+							"l-1772773850168-zt7l3l79",
+							"l-1772773853069-l43mw57n"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": -158.0,
+						"y": 355.0
+					},
+					"v-1772773853069-1": {
+						"areas": [
+							"a-1772773868417-gyxfly7o"
+						],
+						"id": "v-1772773853069-1",
+						"lines": [
+							"l-1772773853069-l43mw57n",
+							"l-1772773855303-3bfeg8bz"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": 564.0,
+						"y": 355.0
+					},
+					"v-1772773855304-1": {
+						"areas": [
+							"a-1772773868417-gyxfly7o"
+						],
+						"id": "v-1772773855304-1",
+						"lines": [
+							"l-1772773855303-3bfeg8bz",
+							"l-1772773868381-rcwg9s4s"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "vertex",
+						"visible": true,
+						"x": 564.0,
+						"y": -157.0
+					}
+				},
+				"visible": true
+			}
+		},
+		"meta": {
+			"export_timestamp": "2026-03-06T05:09:59.495Z",
+			"format_version": "2.1",
+			"generated_by": "Site_Area_Generator",
+			"session_id": 1772773799495.0
+		},
+		"pendingSnapshot": null,
+		"redoStack": [],
+		"selectedLayer": "layer-2",
+		"showAllFloors": false,
+		"suspendUndo": false,
+		"undoStack": [],
+		"unit": "ft-in",
+		"width": 1363.10769865368
+	},
+	"night_render": false,
+	"render_quality": "4K",
+	"target_coordinate_system": "right_handed_z_up",
+	"threejs_camera": {
+		"far": 450.0,
+		"fov": 60.0,
+		"near": 0.1,
+		"position": {
+			"x": 3.1,
+			"y": 1.5,
+			"z": 17.53
+		},
+		"rotation": {
+			"x": 0.266921639199215,
+			"y": -0.208574649144641,
+			"z": 0.056561046365563
+		},
+		"target": {
+			"x": 5.17065651361114,
+			"y": 4.08046813168959,
+			"z": 8.09318031199206
+		}
+	},
+	"timestamp": 1772888792473.0
+}

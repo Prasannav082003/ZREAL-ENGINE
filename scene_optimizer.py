@@ -18,10 +18,29 @@ FLOOR_ITEM_KEYWORDS = ["floor", "slab", "ground", "terrain", "level"]
 # Exterior-only items — kept ONLY in EXTERIOR mode, removed in INTERIOR mode
 # These are identified by name/type keywords (case-insensitive substring match)
 EXTERIOR_ITEM_KEYWORDS = [
-    "roof", "grill", "balcony", "exterior", "facade", "chimney", "antenna", 
-    "gutter", "downspout", "tree", "plant", "garden", "pool", "outdoor", "landscape", 
-    "terrain", "road", "street", "car"
+    "roof", "grill", "balcony", "exterior", "facade", "chimney", "antenna",
+    "gutter", "downspout", "tree", "plant", "garden", "pool", "outdoor", "landscape",
+    "terrain", "road", "street", "car", "gate", "fence", "wall_cladding",
+    "pergola", "gazebo", "patio", "deck", "driveway", "pathway",
 ]
+
+# Elevation-type items — NEVER removed in ANY render mode (interior or exterior).
+# These are part of the building shell/facade and must always be present.
+ELEVATION_ITEM_KEYWORDS = ["elevation"]
+
+# Keywords that mark an item as definitively INDOOR — prevents false-positive
+# exterior keyword matches (e.g. "Indoor Snake Plant Pot" matching "plant").
+INDOOR_ITEM_KEYWORDS = [
+    "indoor", "interior", "ceiling", "sofa", "couch", "bed ", "wardrobe",
+    "cupboard", "dresser", "toilet", "shower", "washbasin", "fridge",
+    "washing machine", "curtain", "rug", "carpet", "bookshelf",
+    "bookcase", "desk", "ottoman", "chandelier",
+    "mirror", "cabinet", "shelf",
+]
+
+# GLB path prefix that marks an item as definitively exterior-facing even when
+# placed inside a room polygon (e.g. facade wall-mount lights, security cameras).
+EXTERIOR_GLB_PATH_PREFIXES = ["glb-assets/exterior/", "asset-library/exterior/"]
 
 # Item proximity rescue tolerance (cm) — catches items slightly outside polygon
 ITEM_RESCUE_TOLERANCE_CM = 85.0
@@ -37,6 +56,11 @@ DEFAULT_FOV_HALF_DEG = 30.0
 # Maximum sightline distance (cm).  Rooms whose portals (door/window centres)
 # are farther than this are never created.  30 m covers most indoor sightlines.
 DEFAULT_VIEW_DISTANCE_CM = 4500.0
+
+# Ceiling override switch.
+# True  -> use the current showAllFloors / camera-height ceiling logic.
+# False -> force all ceilings to stay visible, regardless of camera position.
+use_showall = False
 
 # Portal angle margin added on top of the camera FOV half-angle.
 # A door that sits just outside the nominal FOV can still be partially visible
@@ -271,10 +295,15 @@ def _collect_portal_visible_rooms(
     """
     log_fn(f"  🔭 Portal-visibility sweep from active room {active_area_id} ...")
 
-    # Collect the active room's vertex IDs
-    active_verts: Set[str] = set(
-        str(v) for v in areas[active_area_id].get("vertices", [])
-    )
+    # Collect the active room's vertex IDs and positions
+    active_area = areas[active_area_id]
+    active_verts: Set[str] = set(str(v) for v in active_area.get("vertices", []))
+    
+    active_positions: Set[Tuple[float, float]] = set()
+    for vid in active_verts:
+        v = vertices.get(vid)
+        if v:
+            active_positions.add((round(float(v["x"]), 0), round(float(v["y"]), 0)))
 
     visible_rooms: Set[str] = set()
     portal_margin_rad = math.radians(PORTAL_ANGLE_MARGIN_DEG)
@@ -285,14 +314,27 @@ def _collect_portal_visible_rooms(
         if len(v_ids) < 2:
             continue
 
-        # Wall must touch active room
-        if not any(vid in active_verts for vid in v_ids):
+        # Wall must touch active room (check IDs first, then positions)
+        touches_active = any(vid in active_verts for vid in v_ids)
+        if not touches_active:
+            for vid in v_ids:
+                v = vertices.get(vid)
+                if v:
+                    vpos = (round(float(v["x"]), 0), round(float(v["y"]), 0))
+                    if vpos in active_positions:
+                        touches_active = True
+                        break
+        
+        if not touches_active:
             continue
 
         line_holes = line.get("holes", [])
-        if not line_holes:
+        is_hidden  = line.get("visible") is False
+        
+        if not line_holes and not is_hidden:
             continue
 
+        # (a) Handle regular portals (doors/windows)
         for hole_id in line_holes:
             hid = str(hole_id)
             hole = holes.get(hid)
@@ -347,6 +389,26 @@ def _collect_portal_visible_rooms(
                     f"    ⚠️  Portal '{hole.get('name', hid)}' on wall {lid} "
                     f"angle={portal_angle:.1f}° — no room found beyond"
                 )
+
+        # (b) Handle hidden walls (treat entire wall as a portal)
+        if is_hidden:
+            vd1 = vertices.get(v_ids[0])
+            vd2 = vertices.get(v_ids[1])
+            if vd1 and vd2:
+                p1x, p1y = float(vd1["x"]), float(vd1["y"])
+                p2x, p2y = float(vd2["x"]), float(vd2["y"])
+                mid_x, mid_y = (p1x + p2x) / 2.0, (p1y + p2y) / 2.0
+                dist = math.hypot(mid_x - cam_x, mid_y - cam_y)
+                if dist <= max_dist_cm:
+                    if _portal_visible_in_fov(cam_x, cam_y, dir_x, dir_y, effective_fov, p1x, p1y, p2x, p2y):
+                        beyond = _rooms_beyond_portal(line, active_area_id, areas, vertices)
+                        if beyond:
+                            portal_angle = math.degrees(_angle_to_point(cam_x, cam_y, dir_x, dir_y, mid_x, mid_y))
+                            log_fn(
+                                f"    ✅ Hidden Wall {lid} angle={portal_angle:.1f}° dist={dist:.0f}cm → "
+                                f"reveal: {[areas[a].get('name', a) for a in beyond if a in areas]}"
+                            )
+                            visible_rooms.update(beyond)
 
     return visible_rooms
 
@@ -462,12 +524,50 @@ def _flood_fill_connected_rooms(
 # INTERIOR CULLING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _is_exterior_asset(item: dict) -> bool:
-    """Check if an item is an exterior-only asset by its name/type keywords."""
+def _is_elevation_asset(item: dict) -> bool:
+    """
+    Check if an item is an elevation-type asset.
+    Elevation assets are part of the building shell/facade and must NEVER be
+    removed in any render mode — neither INTERIOR nor EXTERIOR.
+    """
     item_type = str(item.get("type", "")).lower()
     item_name = str(item.get("name", "")).lower()
     full_desc = item_type + " " + item_name
+    return any(kw in full_desc for kw in ELEVATION_ITEM_KEYWORDS)
+
+
+def _is_exterior_asset(item: dict) -> bool:
+    """
+    Check if an item is an exterior-only asset by its name/type keywords.
+
+    Guards against false positives:
+      • If the name/type contains an INDOOR keyword (e.g. "Indoor Snake Plant"),
+        it is NOT treated as exterior even if it matches an exterior keyword.
+      • If the item's GLB path starts with a known exterior path prefix it IS
+        exterior, regardless of indoor keyword match.
+    """
+    item_type = str(item.get("type", "")).lower()
+    item_name = str(item.get("name", "")).lower()
+    full_desc = item_type + " " + item_name
+
+    # Check GLB path — items under Exterior/ folders are always exterior
+    glb_url = str(item.get("asset_urls", {}).get("GLB_File_URL", "")).lower()
+    if any(glb_url.startswith(pfx) for pfx in EXTERIOR_GLB_PATH_PREFIXES):
+        return True
+
+    # If it matches an indoor keyword, reject the exterior match
+    if any(kw in full_desc for kw in INDOOR_ITEM_KEYWORDS):
+        return False
+
     return any(kw in full_desc for kw in EXTERIOR_ITEM_KEYWORDS)
+
+
+def _item_altitude_m(item: dict) -> float:
+    """Return the item's altitude in metres (default 0)."""
+    raw = item.get("properties", {}).get("altitude", item.get("altitude", 0))
+    if isinstance(raw, dict):
+        return float(raw.get("length", 0)) / 100.0
+    return float(raw) / 100.0
 
 
 def _cull_interior(
@@ -659,8 +759,14 @@ def _cull_interior(
             log_fn(f"  🛡️  Floor asset kept: '{item.get('name')}' ({iid})")
             continue
 
-        # Remove exterior-only assets unconditionally in interior mode
-        if _is_exterior_asset(item):
+        # Always keep elevation assets — building shell, never culled in any mode
+        if _is_elevation_asset(item):
+            new_items[iid] = item
+            log_fn(f"  🏛️  Elevation asset kept (never culled): '{item.get('name')}' ({iid})")
+            continue
+
+        # Remove exterior-only assets unless use_showall is False in interior mode
+        if _is_exterior_asset(item) and use_showall:
             culled_items.append(f"{item.get('name', 'Unknown')} ({iid}) [exterior]")
             continue
 
@@ -742,6 +848,8 @@ def _cull_exterior(
     items: dict,
     holes: dict,
     log_fn,
+    layer_alt_m: float = 0.0,
+    layer_top_m: float = 999.0,
 ) -> Tuple[dict, dict, dict, dict, dict]:
     """
     EXTERIOR MODE — camera is completely outside all rooms.
@@ -751,21 +859,24 @@ def _cull_exterior(
       • ALL areas (floor/ceiling geometry needed for structural mesh)
       • ALL holes (doors/windows) — marked with is_exterior_black=true
         so the renderer fills openings with BLACK (no interior visible)
-      • Exterior-named items (roof, grill, balcony, etc.) — by keyword match
+      • Elevation-type items (always kept, never removed in any mode)
+      • Exterior-named items (roof, grill, balcony, etc.) — by keyword match,
+        with indoor-keyword exclusion guard and GLB path check
       • Items physically OUTSIDE all room polygons (garden, trees, etc.)
       • Floor assets always
 
     Remove:
       • ALL interior items that sit INSIDE any room polygon
         (sofas, fridges, lights, frames, pictures, mirrors, etc.)
-      • Wall fittings are NOT preserved — in exterior mode, nothing inside
-        the building should be visible through the black windows
+      • Altitude-aware: items whose altitude places them outside this layer's
+        vertical range are NOT used for polygon culling (they belong elsewhere)
 
     All holes (doors/windows/openings) are flagged is_exterior_black=true
     so the Godot renderer places a black blocker in the opening. This is
     purely geometry-based — no name matching is used for holes.
     """
-    log_fn(f"  ── Exterior Culling for {layer_id} ──")
+    log_fn(f"  ── Exterior Culling for {layer_id} "
+           f"[alt={layer_alt_m:.2f}m .. {layer_top_m:.2f}m] ──")
 
     # Keep all architectural geometry
     new_areas    = dict(areas)
@@ -779,9 +890,6 @@ def _cull_exterior(
         log_fn(f"     ✓ Area: {area.get('name', 'Unknown')} ({aid})")
 
     # ── Mark ALL holes as exterior-black ──────────────────────────────────────
-    # Every door/window/opening gets is_exterior_black=true so the renderer
-    # places a black plane in the opening. This uses geometry (holes dict),
-    # NOT name-based matching.
     new_holes = {}
     for hid, hole in holes.items():
         hole_copy = dict(hole)
@@ -792,11 +900,6 @@ def _cull_exterior(
     log_fn(f"  ⚫ Marked ALL {len(new_holes)} holes as is_exterior_black=true")
 
     # ── Filter items ─────────────────────────────────────────────────────────
-    # In exterior mode:
-    #   - Keep: floor assets, exterior-named items (roof/grill/balcony),
-    #           items physically outside all room polygons
-    #   - Remove: EVERYTHING else (all interior items, wall fittings,
-    #             frames, pictures, mirrors, etc.)
     new_items:           Dict[str, Any] = {}
     culled_items:        List[str]      = []
     kept_exterior_items: List[str]      = []
@@ -812,13 +915,39 @@ def _cull_exterior(
             log_fn(f"  🛡️ Preserving Floor Asset: '{item.get('name')}' ({iid})")
             continue
 
-        # Keep exterior-named assets (roof, grill, balcony, etc.) — by keyword
+        # Always keep elevation assets — building shell, never culled
+        if _is_elevation_asset(item):
+            new_items[iid] = item
+            log_fn(f"  🏛️ Preserving Elevation Asset (never culled): '{item.get('name')}' ({iid})")
+            continue
+
+        # Keep exterior-named assets (roof, grill, balcony, etc.)
+        # Indoor-keyword guard and GLB-path check are inside _is_exterior_asset
         if _is_exterior_asset(item):
             new_items[iid] = item
             kept_exterior_items.append(f"{item.get('name', 'Unknown')} ({iid}) [exterior keyword]")
             log_fn(
                 f"  🏠 Keeping exterior-named asset: "
                 f"'{item.get('name', 'Unknown')}' ({iid})"
+            )
+            continue
+
+        # ── Altitude-aware inside-room test ───────────────────────────────────
+        # Items whose altitude places them ABOVE this layer's ceiling do NOT
+        # belong to this layer's rooms — treat them as outside (keep them).
+        # This prevents upper-floor items being culled by ground-floor polygons
+        # when showAllFloors=True causes all layers to process simultaneously.
+        item_alt_m = _item_altitude_m(item)
+        # Items placed above the layer ceiling clearly don't belong here
+        layer_ceiling_m = layer_top_m - layer_alt_m  # relative ceiling height
+        if item_alt_m > layer_ceiling_m + 0.1:
+            new_items[iid] = item
+            kept_exterior_items.append(
+                f"{item.get('name', 'Unknown')} ({iid}) [altitude {item_alt_m:.2f}m > layer ceiling]"
+            )
+            log_fn(
+                f"  📐 Keeping item above layer ceiling: "
+                f"'{item.get('name', 'Unknown')}' ({iid}) alt={item_alt_m:.2f}m"
             )
             continue
 
@@ -833,7 +962,7 @@ def _cull_exterior(
             )
             continue
 
-        # Everything else inside rooms → cull (no wall-fitting exceptions)
+        # Everything else inside rooms → cull
         culled_items.append(f"{item.get('name', 'Unknown')} ({iid})")
         log_fn(f"  🗑️ Culling interior item: '{item.get('name', 'Unknown')}' ({iid})")
 
@@ -936,6 +1065,7 @@ class SceneOptimizer:
             "camera":            {},
             "render_mode":       "UNKNOWN",
             "show_all_floors":   None,
+            "use_showall":       None,
             "ceiling_decisions": [],
             "layers":            {},
             "summary":           {},
@@ -972,78 +1102,33 @@ class SceneOptimizer:
         Tags per-area ceiling visibility in fp_data (in-place) by setting
         ceiling_properties.isvisible.
 
-        showAllFloors=true  → all ceilings stay visible.
-        showAllFloors=false → hide ceilings where camera is above them
-                              (bird's-eye / exterior renders).
+        Always forces ALL ceilings visible regardless of showAllFloors,
+        camera height, or any other condition.  This is the simplest and
+        most reliable behaviour — the renderer always receives isvisible=True
+        for every room ceiling.
         """
-        if show_all_floors:
-            self.log("🏠 showAllFloors=true → all ceilings remain visible.")
-            return
-
         self.log(
-            f"🏠 showAllFloors=false | Camera height = {cam_height_m:.3f} m → "
-            "evaluating per-area ceiling visibility ..."
+            "🏠 _apply_ceiling_visibility → forcing ALL ceilings visible "
+            "(use_showall logic unified: ceiling always on) ..."
         )
-
         for layer_id, layer in fp_data.get("layers", {}).items():
-            raw_alt    = layer.get("altitude", 0)
-            layer_alt_m = (
-                float(raw_alt.get("length", 0)) / 100.0
-                if isinstance(raw_alt, dict)
-                else float(raw_alt) / 100.0
-            )
-
             for area_id, area in layer.get("areas", {}).items():
                 cp        = area.get("ceiling_properties")
                 area_name = area.get("name", area_id)
 
                 if cp is None:
-                    area["ceiling_properties"] = {"isvisible": False}
-                    self._log_data["ceiling_decisions"].append({
-                        "layer_id": layer_id, "area_id": area_id,
-                        "area_name": area_name, "isvisible": False,
-                        "reason": "no ceiling_properties — injected hidden default",
-                    })
-                    self.log(f"  📐 Area '{area_name}' ({layer_id}) — no ceiling_properties → isvisible=false")
-                    continue
-
-                raw_ceil_h = cp.get("height", 0)
-                ceil_h_m   = (
-                    float(raw_ceil_h.get("length", 0)) / 100.0
-                    if isinstance(raw_ceil_h, dict)
-                    else float(raw_ceil_h) / 100.0
-                )
-
-                fallback_used = False
-                if ceil_h_m < 0.1:
-                    max_wh = 0.0
-                    for line in layer.get("lines", {}).values():
-                        wh_raw = line.get("properties", {}).get("height", {})
-                        wh = (
-                            float(wh_raw.get("length", 0)) / 100.0
-                            if isinstance(wh_raw, dict) else float(wh_raw) / 100.0
-                        )
-                        if wh > max_wh:
-                            max_wh = wh
-                    ceil_h_m      = max_wh if max_wh > 0.1 else 2.8
-                    fallback_used = True
-
-                ceiling_world_y = layer_alt_m + ceil_h_m
-                visible         = cam_height_m < ceiling_world_y
-                cp["isvisible"] = visible
-
-                reason = (
-                    f"camera Y {cam_height_m:.3f} m {'<' if visible else '>='} "
-                    f"ceiling Y {ceiling_world_y:.3f} m → {'VISIBLE' if visible else 'HIDDEN'}"
-                )
-                if fallback_used:
-                    reason += "  [ceiling height derived from wall height fallback]"
+                    area["ceiling_properties"] = {"isvisible": True}
+                else:
+                    cp["isvisible"] = True
 
                 self._log_data["ceiling_decisions"].append({
-                    "layer_id": layer_id, "area_id": area_id,
-                    "area_name": area_name, "isvisible": visible, "reason": reason,
+                    "layer_id":  layer_id,
+                    "area_id":   area_id,
+                    "area_name": area_name,
+                    "isvisible": True,
+                    "reason":    "always-on ceiling policy → forced visible",
                 })
-                self.log(f"  {'✅' if visible else '🚫'} Area '{area_name}' ({layer_id}) — {reason}")
+                self.log(f"  ✅ Area '{area_name}' ({layer_id}) — ceiling forced visible")
 
     # ── Main Entry Point ──────────────────────────────────────────────────────
 
@@ -1086,7 +1171,7 @@ class SceneOptimizer:
 
             # ── 1b. Detect top_view mode ──────────────────────────────────────
             is_top_view = bool(payload.get("is_top_view", False))
-            show_all    = bool(payload.get("show_all", False))  # False = isolate camera layer; True = render all layers (top-view override)
+            show_all    = bool(payload.get("show_all", payload.get("showall", False)))  # False = isolate camera layer; True = render all layers (top-view override)
             self._log_data["is_top_view"] = is_top_view
             self._log_data["show_all"]    = show_all
 
@@ -1230,9 +1315,17 @@ class SceneOptimizer:
             # ── 3. showAllFloors / ceiling pass ───────────────────────────────
             show_all_floors = fp_data.get("showAllFloors", True)
             self._log_data["show_all_floors"] = show_all_floors
+            self._log_data["use_showall"] = use_showall
+            self.log(f"🏗️  use_showall = {use_showall}")
             self.log(f"🏗️  showAllFloors = {show_all_floors}")
+            # Stamp use_showall into fp_data so the Godot renderer (image_glb_creation.gd)
+            # can read it and skip the camera-height ceiling override when use_showall=False.
+            fp_data["use_showall"] = use_showall
             self._apply_ceiling_visibility(fp_data, cam_height_m, show_all_floors)
-            keep_all_layers = show_all or show_all_floors
+            # keep_all_layers: only True for explicit show_all flag or top-view.
+            # showAllFloors=true no longer bypasses layer isolation for INTERIOR renders —
+            # it only keeps all layers for EXTERIOR renders (where camera_layer_id is None).
+            keep_all_layers = show_all or is_top_view
 
             # ── 4. Per-layer culling ──────────────────────────────────────────
             layers = fp_data.get("layers", {})
@@ -1246,45 +1339,49 @@ class SceneOptimizer:
                 return new_payload
 
             # ── 4a. Pre-scan: find which layer the camera is in ───────────────
-            # If the camera is inside a room in any layer (INTERIOR mode) and
-            # show_all is False, we ONLY render that single layer and completely
-            # skip all others.  This avoids generating geometry for floors the
-            # camera cannot see at all.
-            # When show_all=True (TOP_VIEW or explicit override) all layers are
-            # processed as usual.
-            #
-            # PRIORITY: if selectedLayer is present in fp_data and matches an
-            # actual layer key (exact or prefix), use it directly — do NOT rely
-            # on the spatial scan.  The frontend already knows which layer is
-            # active; IDs like "layer-1-1769245501306" are the authoritative
-            # selected layer even if the spatial scan would map back to "layer-1".
+            # camera_layer_id is resolved regardless of showAllFloors so that:
+            #   • Cross-floor detection always has the camera's home layer.
+            #   • showAllFloors=true + INTERIOR: layer isolation still runs
+            #     (only that floor is rendered, matching the focused camera).
+            #   • showAllFloors=true + EXTERIOR: camera_layer_id stays None →
+            #     _do_layer_isolation=False → all floors are rendered (correct).
+            #   • showAllFloors=false: selectedLayer / spatial scan → isolate.
             camera_layer_id: Optional[str] = None
             _selected_layer_raw: str = str(fp_data.get("selectedLayer", "")).strip()
-            if show_all_floors:
-                self.log("  🏗️ showAllFloors=true: skipping selectedLayer isolation and spatial pre-scan.")
-            elif _selected_layer_raw and not is_top_view:
+            # True when camera_layer_id was set from the selectedLayer hint (not spatial scan).
+            # Cross-floor detection is fully disabled in this case — the caller explicitly
+            # named the layer they want rendered; we must not pull in neighbours even if
+            # the camera's physical height is near the selected layer's altitude boundary.
+            _camera_layer_from_hint: bool = False
+
+            # Try selectedLayer hint first (skip only for top-view)
+            # When showAllFloors=true we rely on the spatial polygon scan below —
+            # selectedLayer alone can't tell us if the camera is interior or exterior
+            # (it just records the active UI layer).  Trusting it for showAllFloors=true
+            # would incorrectly isolate exterior cameras to one floor.
+            if _selected_layer_raw and not is_top_view and not show_all_floors:
                 # Exact match first
                 if _selected_layer_raw in layers:
                     camera_layer_id = _selected_layer_raw
+                    _camera_layer_from_hint = True
                     self.log(
                         f"  ✅ selectedLayer exact match → camera_layer='{camera_layer_id}'"
                     )
                 else:
-                    # Prefix match: real key is a prefix of selectedLayer
-                    # e.g. selectedLayer="layer-1-1769245501306", key="layer-1"
                     for _lid in layers:
                         if _selected_layer_raw.startswith(str(_lid)):
                             camera_layer_id = _lid
+                            _camera_layer_from_hint = True
                             self.log(
                                 f"  ✅ selectedLayer prefix match: "
                                 f"'{_selected_layer_raw}' → camera_layer='{camera_layer_id}'"
                             )
                             break
-                    # Reverse prefix: key starts with selectedLayer
                     if not camera_layer_id:
                         for _lid in layers:
                             if str(_lid).startswith(_selected_layer_raw):
                                 camera_layer_id = _lid
+                                _camera_layer_from_hint = True
                                 self.log(
                                     f"  ✅ selectedLayer reverse-prefix match: "
                                     f"'{_selected_layer_raw}' → camera_layer='{camera_layer_id}'"
@@ -1292,25 +1389,26 @@ class SceneOptimizer:
                                 break
 
             if camera_layer_id:
+                _hint_note = " Cross-floor detection DISABLED (selectedLayer is authoritative)." if _camera_layer_from_hint else ""
                 self.log(
                     f"  📌 Using selectedLayer='{_selected_layer_raw}' "
-                    f"(resolved to '{camera_layer_id}') — skipping spatial pre-scan."
+                    f"(resolved to '{camera_layer_id}') — skipping spatial pre-scan.{_hint_note}"
                 )
 
-            if not camera_layer_id and not is_top_view and not show_all_floors:
+            # Spatial pre-scan — runs regardless of showAllFloors so that
+            # camera_layer_id is found for INTERIOR isolation and cross-floor detection.
+            # When showAllFloors=true + EXTERIOR (camera outside all rooms),
+            # camera_layer_id stays None and layer isolation is skipped automatically.
+            if not camera_layer_id and not is_top_view:
+                if show_all_floors:
+                    self.log("  🏗️ showAllFloors=true: running spatial pre-scan — isolation applies if camera is INTERIOR, skipped if EXTERIOR.")
                 for _lid, _layer in layers.items():
-                    # ── Height check: camera must sit within this layer's
-                    # vertical range [altitude .. altitude + wall_height].
-                    # This prevents a layer on a different floor from being
-                    # matched purely because its 2-D polygon overlaps the
-                    # camera's XY position.
                     _raw_alt = _layer.get("altitude", 0)
                     _layer_alt_m = (
                         float(_raw_alt.get("length", 0)) / 100.0
                         if isinstance(_raw_alt, dict)
                         else float(_raw_alt) / 100.0
                     )
-                    # Derive floor-to-ceiling height from wall heights
                     _wall_heights = []
                     for _wl in _layer.get("lines", {}).values():
                         _wh = _wl.get("properties", {}).get("height", {})
@@ -1324,7 +1422,6 @@ class SceneOptimizer:
                     _floor_height_m = max(_wall_heights) if _wall_heights else 3.0
                     _layer_top_m    = _layer_alt_m + _floor_height_m
 
-                    # Camera height must fall within [layer_alt .. layer_top]
                     if not (_layer_alt_m <= cam_height_m < _layer_top_m):
                         self.log(
                             f"  ↩ Pre-scan skip '{_lid}': cam_height={cam_height_m:.3f}m "
@@ -1332,7 +1429,6 @@ class SceneOptimizer:
                         )
                         continue
 
-                    # ── 2-D polygon test within the height-valid layer ────────
                     _verts = _layer.get("vertices", {})
                     for _area in _layer.get("areas", {}).values():
                         _poly = []
@@ -1356,15 +1452,146 @@ class SceneOptimizer:
                     if camera_layer_id:
                         break
 
-            if camera_layer_id and not keep_all_layers and not show_all_floors:
+            if _camera_layer_from_hint:
                 self.log(
-                    f"\n🎯 LAYER ISOLATION: Camera is inside layer '{camera_layer_id}' "
-                    f"— only this layer will be rendered. All other layers are SKIPPED."
+                    f"  🚫 Cross-floor detection SKIPPED — selectedLayer='{_selected_layer_raw}' "
+                    f"is an explicit directive. Only layer '{camera_layer_id}' will be rendered."
+                )
+
+            # ── Cross-floor transition detection ─────────────────────────────
+            # When the camera is genuinely near a floor boundary (e.g. looking from
+            # ground floor up toward first floor), include the adjacent layer so the
+            # transition zone is fully visible.
+            #
+            # DISABLED when selectedLayer is the source (showAllFloors=false):
+            #   The caller explicitly named the layer they want — we render ONLY that
+            #   layer, no matter what.  Cross-floor must not override an explicit
+            #   selectedLayer directive.  This is the root cause of the bug where
+            #   selectedLayer=layer-2 but layer-1 was also rendered because the
+            #   camera's physical height (1.345 m) happened to be < layer-2 alt
+            #   (3 m) + boundary_zone (0.6 m).
+            #
+            # ENABLED only when camera_layer_id was found by the SPATIAL SCAN —
+            #   meaning the camera is genuinely inside that layer's geometry.
+            cross_floor_layer_ids: Set[str] = set()
+            if camera_layer_id and not is_top_view and not _camera_layer_from_hint:
+                _cam_layer     = layers[camera_layer_id]
+                _raw_alt       = _cam_layer.get("altitude", 0)
+                _cam_alt_m     = (
+                    float(_raw_alt.get("length", 0)) / 100.0
+                    if isinstance(_raw_alt, dict)
+                    else float(_raw_alt) / 100.0
+                )
+                _cam_wh        = []
+                for _wl in _cam_layer.get("lines", {}).values():
+                    _wh = _wl.get("properties", {}).get("height", {})
+                    _wh_m = (
+                        float(_wh.get("length", 0)) / 100.0
+                        if isinstance(_wh, dict)
+                        else float(_wh) / 100.0
+                    )
+                    if _wh_m > 0.1:
+                        _cam_wh.append(_wh_m)
+                _cam_floor_h   = max(_cam_wh) if _cam_wh else 3.0
+                _cam_top_m     = _cam_alt_m + _cam_floor_h
+                _boundary_zone = _cam_floor_h * 0.20
+
+                # ── Cross-floor guard: camera must be within the layer's Z range ──
+                _cam_in_layer_range = _cam_alt_m <= cam_height_m < _cam_top_m
+                if not _cam_in_layer_range:
+                    self.log(
+                        f"  ↩ Cross-floor detection skipped: camera height={cam_height_m:.3f}m "
+                        f"is outside layer '{camera_layer_id}' Z range "
+                        f"[{_cam_alt_m:.3f}m .. {_cam_top_m:.3f}m]. "
+                        f"(camera is physically on a different floor.)"
+                    )
+
+                near_top    = _cam_in_layer_range and cam_height_m >= (_cam_top_m - _boundary_zone)
+                near_bottom = _cam_in_layer_range and cam_height_m <= (_cam_alt_m + _boundary_zone)
+
+                if near_top or near_bottom:
+                    for _lid, _layer in layers.items():
+                        if _lid == camera_layer_id:
+                            continue
+                        _raw_alt2    = _layer.get("altitude", 0)
+                        _other_alt_m = (
+                            float(_raw_alt2.get("length", 0)) / 100.0
+                            if isinstance(_raw_alt2, dict)
+                            else float(_raw_alt2) / 100.0
+                        )
+                        _other_wh = []
+                        for _wl in _layer.get("lines", {}).values():
+                            _wh = _wl.get("properties", {}).get("height", {})
+                            _wh_m2 = (
+                                float(_wh.get("length", 0)) / 100.0
+                                if isinstance(_wh, dict)
+                                else float(_wh) / 100.0
+                            )
+                            if _wh_m2 > 0.1:
+                                _other_wh.append(_wh_m2)
+                        _other_floor_h = max(_other_wh) if _other_wh else 3.0
+                        _other_top_m   = _other_alt_m + _other_floor_h
+                        is_directly_above = abs(_other_alt_m - _cam_top_m) < 0.5
+                        is_directly_below = abs(_other_top_m - _cam_alt_m) < 0.5
+                        if (near_top and is_directly_above) or (near_bottom and is_directly_below):
+                            cross_floor_layer_ids.add(_lid)
+                            self.log(
+                                f"  🔀 CROSS-FLOOR: camera near "
+                                f"{'top' if near_top else 'bottom'} of layer '{camera_layer_id}' "
+                                f"→ also rendering adjacent layer '{_lid}'"
+                            )
+                if cross_floor_layer_ids:
+                    self.log(f"  🔀 Cross-floor layers: {list(cross_floor_layer_ids)}")
+
+            # ── Layer isolation decision ──────────────────────────────────────
+            #
+            # LOGIC:
+            #   showAllFloors=true + INTERIOR  (camera_layer_id is set)
+            #     → isolate to the camera's layer + any cross-floor neighbours.
+            #       The camera is focused on one floor — only that floor is built.
+            #
+            #   showAllFloors=true + EXTERIOR  (camera_layer_id is None)
+            #     → render ALL floors.  The camera is outside the building shell;
+            #       we need every floor's geometry to show the full facade.
+            #
+            #   showAllFloors=false  (camera_layer_id is set from selectedLayer)
+            #     → isolate to the selectedLayer only (classic single-floor render).
+            #
+            #   show_all=True or is_top_view
+            #     → always render all layers regardless (existing override).
+            #
+            # The key insight: when showAllFloors=true the isolation now DEPENDS on
+            # whether the render is INTERIOR or EXTERIOR, which is naturally encoded
+            # by whether camera_layer_id was found (interior) or not (exterior).
+            _do_layer_isolation = (
+                camera_layer_id is not None
+                and not keep_all_layers   # False when show_all=True or is_top_view
+                # Isolate for BOTH showAllFloors=true (camera inside room → only that floor)
+                # AND showAllFloors=false (selectedLayer directive → only that floor).
+                # Previously this required show_all_floors=True which was wrong — it meant
+                # showAllFloors=false never isolated layers, causing all floors to render
+                # and making ceiling visibility unreliable.
+            )
+
+            if _do_layer_isolation:
+                _isolation_reason = (
+                    f"showAllFloors={'true' if show_all_floors else 'false'} + "
+                    f"{'selectedLayer' if _camera_layer_from_hint else 'INTERIOR'}"
+                )
+                self.log(
+                    f"\n🎯 LAYER ISOLATION [{_isolation_reason}]: "
+                    f"Camera is inside layer '{camera_layer_id}' "
+                    f"— only this layer (+ cross-floor neighbours) will be rendered."
                 )
             elif is_top_view:
                 self.log(f"\n🔭 TOP VIEW: Processing all {len(layers)} layers.")
             elif show_all:
                 self.log(f"\n🌍 show_all=True: Processing all {len(layers)} layers.")
+            elif show_all_floors and camera_layer_id is None:
+                self.log(
+                    f"\n🏗️ showAllFloors=true + EXTERIOR: Camera is outside all rooms — "
+                    f"processing all {len(layers)} layers (full facade render)."
+                )
             else:
                 self.log(
                     f"\n🌍 EXTERIOR: Camera not found inside any layer — "
@@ -1384,11 +1611,11 @@ class SceneOptimizer:
                 self.log(f"🔍 Inspecting Layer: {layer_id}")
                 self.log(f"{'─'*60}")
 
-                # ── LAYER SKIP: camera is in a different layer ────────────────
-                # When the camera is placed inside a specific layer (INTERIOR),
-                # every other layer is irrelevant — skip it entirely so its
-                # geometry is not sent to the renderer at all.
-                if camera_layer_id and not keep_all_layers and layer_id != camera_layer_id:
+                # ── LAYER SKIP ────────────────────────────────────────────────
+                # Only blank a layer when layer isolation is active AND this
+                # layer is neither the camera layer nor a cross-floor neighbour.
+                if _do_layer_isolation and layer_id != camera_layer_id \
+                        and layer_id not in cross_floor_layer_ids:
                     self.log(
                         f"  ⏭️  SKIPPED — camera is in layer '{camera_layer_id}', "
                         f"not '{layer_id}'. Removing entire layer from output."
@@ -1414,6 +1641,31 @@ class SceneOptimizer:
                 areas    = layer.get("areas",    {})
                 items    = layer.get("items",    {})
                 holes    = layer.get("holes",    {})
+
+                totals["areas_before"] += len(areas)
+                totals["items_before"] += len(items)
+                totals["lines_before"] += len(lines)
+                totals["holes_before"] += len(holes)
+
+                # ── Compute this layer's vertical range ───────────────────────
+                _raw_layer_alt = layer.get("altitude", 0)
+                _layer_alt_m   = (
+                    float(_raw_layer_alt.get("length", 0)) / 100.0
+                    if isinstance(_raw_layer_alt, dict)
+                    else float(_raw_layer_alt) / 100.0
+                )
+                _layer_wh = []
+                for _wl in lines.values():
+                    _wh = _wl.get("properties", {}).get("height", {})
+                    _wh_m = (
+                        float(_wh.get("length", 0)) / 100.0
+                        if isinstance(_wh, dict)
+                        else float(_wh) / 100.0
+                    )
+                    if _wh_m > 0.1:
+                        _layer_wh.append(_wh_m)
+                _layer_floor_h = max(_layer_wh) if _layer_wh else 3.0
+                _layer_top_m   = _layer_alt_m + _layer_floor_h
 
                 totals["areas_before"] += len(areas)
                 totals["items_before"] += len(items)
@@ -1456,7 +1708,48 @@ class SceneOptimizer:
                             )
 
                 # ── Branch: Top-view / Interior / Exterior ────────────────────
-                if is_top_view:
+                # ── showAllFloors=false: Strict Exterior Culling ──────────────
+                # When use_showall=False, keep the current culling logic but
+                # skip the "camera above the ceiling" fallback so ceilings
+                # stay visible even for higher camera positions.
+                if not show_all_floors:
+                    if use_showall and cam_height_m > (_layer_top_m + 0.5):
+                        is_above_ceiling = True
+                    else:
+                        is_above_ceiling = False
+
+                    if active_area_id and not is_top_view and not is_above_ceiling:
+                        # Eye-level interior shot: Keep room assets
+                        render_mode = "INTERIOR"
+                        if use_showall:
+                            self.log(f"\n  🏠 MODE: INTERIOR (showAllFloors=false) — Camera inside '{areas[active_area_id].get('name')}': Interior assets PRESERVED.")
+                        else:
+                            self.log(f"\n  🏠 MODE: INTERIOR (use_showall=False override) — Camera inside '{areas[active_area_id].get('name')}': Ceiling visibility preserved.")
+                        new_vertices, new_lines, new_areas, new_items, new_holes = _cull_interior(
+                            layer_id, active_area_id,
+                            vertices, lines, areas, items, holes,
+                            self.log,
+                            cam_x=cam_x, cam_y=cam_y,
+                            cam_dir_x=cam_dir_x, cam_dir_y=cam_dir_y,
+                            fov_half_deg=cam_fov_half_deg,
+                            max_view_dist_cm=cam_view_dist_cm,
+                        )
+                    else:
+                        # Top View or Exterior: Remove all interior assets
+                        render_mode = "EXTERIOR_CLEAN"
+                        mode_name = "TOP VIEW" if is_top_view else "EXTERIOR"
+                        if use_showall:
+                            self.log(f"\n  🌍 MODE: {mode_name} (showAllFloors=false) — Facade view: REMOVING all interior assets.")
+                        else:
+                            self.log(f"\n  🌍 MODE: {mode_name} (use_showall=False override) — Facade view: REMOVING all interior assets.")
+                        new_vertices, new_lines, new_areas, new_items, new_holes = _cull_exterior(
+                            layer_id,
+                            vertices, lines, areas, items, holes,
+                            self.log,
+                            layer_alt_m=_layer_alt_m,
+                            layer_top_m=_layer_top_m,
+                        )
+                elif is_top_view:
                     render_mode = "TOP_VIEW"
                     self.log(f"\n  🔭 MODE: TOP VIEW RENDER (show_all={show_all})")
                     if not show_all:
@@ -1476,6 +1769,8 @@ class SceneOptimizer:
                             layer_id,
                             vertices, lines, areas, items, holes,
                             self.log,
+                            layer_alt_m=_layer_alt_m,
+                            layer_top_m=_layer_top_m,
                         )
                 elif active_area_id:
                     render_mode = "INTERIOR"
@@ -1498,6 +1793,8 @@ class SceneOptimizer:
                         layer_id,
                         vertices, lines, areas, items, holes,
                         self.log,
+                        layer_alt_m=_layer_alt_m,
+                        layer_top_m=_layer_top_m,
                     )
 
                 self.log(f"\n  ✂️  Optimisation Results for {layer_id}:")
