@@ -49,7 +49,6 @@ ASSETS_AND_TEXTURE_API_HEADER_NAME = "ZRealtyServiceApiKey"
 ASSET_ENDPOINT = "http://216.48.182.24:4050/api/v1/AssetMaster/GetAllAssets3D"
 TEXTURE_ENDPOINT = "http://216.48.182.24:4050/api/v1/TextureMaster/GetAllTextureLibraries"
 
-
 # Global Cache for Master Data
 _CACHED_ASSETS_MAP = {}
 _CACHED_TEXTURES_MAP = {}

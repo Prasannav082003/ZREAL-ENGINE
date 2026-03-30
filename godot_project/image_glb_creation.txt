@@ -4,12 +4,21 @@ extends Node3D
 # Handles the construction of the scene: Architecture (Walls, Floors, Ceilings) and Asset Loading.
 var _tracked_assets = []
 var _window_sunlight_data = []  # Collected during hole building, used to place window sunlights
+var _dir_light: DirectionalLight3D = null
 var day_render = true
 var lighting_profile = "day"
+const ENABLE_PROCEDURAL_WINDOW_GRID_CASTER = false
+var _camera_pose = {
+	"position": Vector3.ZERO,
+	"target": Vector3.ZERO
+}
+var _camera_height_m: float = 0.0
 
 func build_scene(data):
 	lighting_profile = _resolve_lighting_profile(data)
 	day_render = lighting_profile != "night"
+	_camera_pose = _extract_camera_pose(data)
+	_camera_height_m = float(_camera_pose["position"].y)
 	
 	var geom_data = data
 	if data.has("floor_plan_data"):
@@ -29,7 +38,9 @@ func build_scene(data):
 		
 	_window_sunlight_data.clear()
 	build_architecture(geom_data)
-	_create_window_sunlights()  # Place sunlights through detected windows
+	if _dir_light != null:
+		_orient_directional_light_from_windows(_dir_light)
+	# _create_window_sunlights()  # Place sunlights through detected windows
 	build_structures(geom_data)
 	load_assets(geom_data)
 	# setup_camera(data) - Moved to render_image.gd
@@ -81,6 +92,7 @@ func setup_lighting(data, geom_data = {}):
 	# CRITICAL FIX: add_child(dir_light) BEFORE any look_at() call.
 	# look_at() requires the node to be inside the scene tree.
 	add_child(dir_light)
+	_dir_light = dir_light
 
 	# Now safe to orient — node is in the tree
 	if data.has("directional_light"):
@@ -96,26 +108,14 @@ func setup_lighting(data, geom_data = {}):
 		else:
 			dir_light.light_color = lighting["dir_color"]
 		if l.has("position"):
+			# Optionally keep position from JSON, but _orient_directional_light_from_windows 
+			# will overwrite it momentarily to guarantee light enters the windows correctly.
 			dir_light.position = parse_vec3(l["position"])
-			if l.has("target"):
-				var look_target = parse_vec3(l["target"])
-				if dir_light.position.distance_to(look_target) > 0.001:
-					dir_light.look_at(look_target, Vector3.UP)
-			else:
-				if dir_light.position.distance_to(light_anchor) > 0.001:
-					dir_light.look_at(light_anchor, Vector3.UP)
 	else:
 		dir_light.light_energy = lighting["dir_energy"]
 		dir_light.light_color  = lighting["dir_color"]
-		if lighting_profile == "day":
-			dir_light.position = light_anchor + cam_right * 18.0 + Vector3.UP * 5.0 - cam_forward * 4.0
-		elif lighting_profile == "sunset":
-			dir_light.position = light_anchor - cam_forward * 9.0 + cam_right * 9.0 + Vector3.UP * 8.5
-		else:
-			dir_light.position = light_anchor - cam_forward * 10.0 - cam_right * 4.0 + Vector3.UP * 18.0
-		var look_dest = light_anchor if lighting_profile != "sunset" else light_anchor + Vector3(0, -1.4, 0)
-		if dir_light.position.distance_to(look_dest) > 0.001:
-			dir_light.look_at(look_dest, Vector3.UP)
+		# Position will be set in _orient_directional_light_from_windows()
+		# after build_architecture() populates _window_sunlight_data
 
 	# ── Sky / Environment ──────────────────────────────────────────────────
 	var env = Environment.new()
@@ -494,90 +494,60 @@ func _extract_room_lighting_bounds(geom_data: Dictionary) -> Dictionary:
 	return out
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _create_window_sunlights
+# _orient_directional_light_from_windows
 # ─────────────────────────────────────────────────────────────────────────────
-# Places SpotLight3D outside each detected window opening, aimed inward at a
-# realistic downward angle.  Shadows are enabled so the window frame / mullion
-# GLB casts a light-and-shadow pattern on the floor and furniture — exactly
-# like real sunlight passing through a window.
-func _create_window_sunlights():
+func _orient_directional_light_from_windows(dir_light: DirectionalLight3D):
 	if _window_sunlight_data.size() == 0:
-		print("No windows detected — skipping window sunlight placement.")
 		return
 
-	# High-intensity light parameters to reach deep into the room
-	var sun_energy := 20.0
-	var sun_color  := Color(1.0, 0.95, 0.85)   # bright warm daylight
-	var sun_range  := 30.0
+	# ── Step 1: Average outer_dir across ALL windows ──────────────────────
+	# Using all windows avoids one window dominating the light direction.
+	# Rooms with windows on multiple walls get a blended, natural sun angle.
+	var avg_outer_dir := Vector3.ZERO
+	for win in _window_sunlight_data:
+		avg_outer_dir += (win["outer_dir"] as Vector3)
+	avg_outer_dir = avg_outer_dir / float(_window_sunlight_data.size())
+	avg_outer_dir.y = 0.0  # flatten — elevation handled separately below
+	if avg_outer_dir.length() < 0.001:
+		avg_outer_dir = Vector3(1, 0, 0)  # safe fallback
+	avg_outer_dir = avg_outer_dir.normalized()
 
+	# ── Step 2: Sun elevation per lighting profile ────────────────────────
+	# This is the downward angle of sunlight — not position, just direction.
+	var elevation_deg: float
 	match lighting_profile:
-		"sunset":
-			sun_energy = 15.0
-			sun_color  = Color(1.0, 0.65, 0.35)
-		"night":
-			sun_energy = 0.5
-			sun_color  = Color(0.60, 0.70, 0.98)
+		"day":    elevation_deg = 35.0   # mid-morning sun, natural shadows
+		"sunset": elevation_deg = 8.0    # low grazing golden hour light
+		"night":  elevation_deg = 55.0   # moon, steep and cool
+		_:        elevation_deg = 35.0
 
-	print("Creating ", _window_sunlight_data.size(), " window sunlight(s)  profile=", lighting_profile)
+	# ── Step 3: Build a direction vector from outer_dir + elevation ───────
+	# outer_dir points FROM outside → INTO the room (through the window).
+	# We rotate it downward by elevation_deg to get the sun ray direction.
+	var elevation_rad := deg_to_rad(elevation_deg)
+	# Sun ray direction: horizontal component = -avg_outer_dir (sun comes from outside)
+	# vertical component = -sin(elevation) (sun rays go downward)
+	var sun_dir := Vector3(
+		-avg_outer_dir.x,
+		-sin(elevation_rad),      # negative = pointing downward
+		-avg_outer_dir.z
+	).normalized()
 
-	for idx in range(_window_sunlight_data.size()):
-		var win        = _window_sunlight_data[idx]
-		var win_center : Vector3 = win["center"]
-		var win_width  : float   = win["width"]
-		var win_height : float   = win["height"]
-		var outer_dir  : Vector3 = win["outer_dir"]
-		var inner_dir  : Vector3 = win["inner_dir"]
+	# ── Step 4: Orient the directional light ─────────────────────────────
+	# For DirectionalLight3D, position is irrelevant — only rotation matters.
+	# Place it at a neutral position and look_at along the sun_dir.
+	var room_center := Vector3.ZERO
+	for win in _window_sunlight_data:
+		room_center += (win["center"] as Vector3)
+	room_center /= float(_window_sunlight_data.size())
 
-		# ── 1. Place SpotLight 6m outside ───────────────────────────────
-		# 12m was too far (might intersect exterior bounds or skybox).
-		# 6m is far enough for parallel-looking rays, close enough to be safe.
-		var light_dist := 6.0
-		var light_pos   = win_center + outer_dir * light_dist
+	# Light source is far away in the OPPOSITE of sun_dir
+	dir_light.position = room_center - sun_dir * 50.0
+	if dir_light.position.distance_to(room_center) > 0.001:
+		dir_light.look_at(room_center, Vector3.UP)
 
-		# Determine sun elevation angle
-		var win_alt: float = win.get("altitude", 0.0)
-		if win_alt > 0.20:
-			light_pos.y += 4.5   # Steep downward angle for windows
-		else:
-			light_pos.y += 5.5   # Even steeper for ground-level doors
-
-		# ── 2. Target point inside the room ─────────────────────────────
-		var floor_y: float = win.get("layer_altitude", 0.0)
-		# Aim through the center of the window down to the floor
-		var target_inside  = win_center + inner_dir * 5.0
-		target_inside.y    = floor_y
-
-		var spot = SpotLight3D.new()
-		spot.name = "WindowSunlight_%d" % idx
-
-		spot.position     = light_pos
-		spot.light_energy = sun_energy
-		spot.light_color  = sun_color
-		spot.spot_range   = sun_range
-
-		# ── 3. Spot Cone ────────────────────────────────────────────────
-		# Use a wide fixed cone (60 degrees) that guarantees the entire window
-		# is covered. The solid CSG wall will naturally block/clip the light 
-		# precisely to the exact shape of the window hole!
-		spot.spot_angle = 60.0
-
-		# ── 4. Shadow settings ──────────────────────────────────────────
-		spot.shadow_enabled     = true
-		spot.shadow_bias        = 0.1
-		spot.shadow_normal_bias = 3.0
-		spot.shadow_blur        = 0.1   # slightly soft edges for realism
-
-		# Turn specular way down so to not wash out the light patch on glossy floors
-		spot.light_specular = 0.2
-
-		spot.add_to_group("window_sunlights")
-		add_child(spot)
-
-		if light_pos.distance_to(target_inside) > 0.001:
-			spot.look_at(target_inside, Vector3.UP)
-
-		print("  Window sunlight #", idx, " at ", light_pos,
-			" cone=60deg energy=", sun_energy)
+	print("DirectionalLight oriented from windows: outer_dir=", avg_outer_dir,
+		  " elevation=", elevation_deg, "deg  sun_dir=", sun_dir)
 
 func build_architecture(data):
 	print("Building Architecture...")
@@ -588,7 +558,39 @@ func build_architecture(data):
 		# Determine which layers to process based on showAllFloors / selectedLayer
 		var show_all_floors = data.get("showAllFloors", true)
 		var selected_layer = data.get("selectedLayer", "")
+		var camera_layer_id = ""
 		var keep_all_layers = show_all_floors
+		# use_showall=False means scene_optimizer.py has forced all ceilings visible.
+		# Read it from fp_data (stamped by the optimizer) — default true = normal culling.
+		var use_showall_flag: bool = bool(data.get("use_showall", true))
+
+		# In single-layer mode the caller explicitly chose the floor to render.
+		# Do not let camera-height heuristics swap it to another layer.
+		if show_all_floors:
+			camera_layer_id = _resolve_camera_layer_id(data)
+		elif selected_layer == "":
+			# Fallback only when the input forgot to provide a selected layer.
+			camera_layer_id = _resolve_camera_layer_id(data)
+
+		if camera_layer_id != "":
+			var layers_dict: Dictionary = data.get("layers", {})
+			var camera_layer = layers_dict.get(camera_layer_id, {})
+			var camera_layer_mode = str(camera_layer.get("render_mode", "INTERIOR")).to_upper()
+
+			if camera_layer_mode == "INTERIOR":
+				if not show_all_floors:
+					if selected_layer == "" or str(selected_layer) != camera_layer_id:
+						print("Camera is inside layer ", camera_layer_id, " - overriding selectedLayer=", selected_layer)
+					# Interior renders should favor the camera's actual layer so we do not
+					# render the floor slab above the camera as the visible ceiling.
+					print("Interior camera layer resolved to ", camera_layer_id, " - isolating this layer for ceiling correctness.")
+					show_all_floors = false
+					keep_all_layers = false
+					selected_layer = camera_layer_id
+			else:
+				print("Camera layer ", camera_layer_id, " is EXTERIOR - keeping all layers enabled.")
+				show_all_floors = true
+				keep_all_layers = true
 		
 		if show_all_floors:
 			print("showAllFloors is true — building ALL layers.")
@@ -623,13 +625,87 @@ func build_architecture(data):
 				var layer_render_mode = layer.get("render_mode",
 					data.get("render_mode", "INTERIOR"))
 				print("Layer ", layer_id, " render_mode: ", layer_render_mode)
-				_build_layer_geometry(layer, layer_alt, show_all_floors, layer_render_mode)
+				_build_layer_geometry(layer, layer_alt, show_all_floors, layer_render_mode, use_showall_flag)
 	elif data.has("lines") and data.has("vertices"):
 		print("Found lines/vertices in root data.")
 		var root_render_mode = data.get("render_mode", "INTERIOR")
-		_build_layer_geometry(data, 0.0, data.get("showAllFloors", true), root_render_mode)
+		_build_layer_geometry(data, 0.0, data.get("showAllFloors", true), root_render_mode, bool(data.get("use_showall", true)))
 	else:
 		print("Warning: No lines or vertices found in floor plan data.")
+
+func _resolve_camera_layer_id(data: Dictionary) -> String:
+	if not data.has("layers") or typeof(data["layers"]) != TYPE_DICTIONARY:
+		return ""
+
+	var layers = data["layers"]
+	var selected = str(data.get("selectedLayer", "")).strip_edges()
+	if selected != "" and layers.has(selected):
+		var selected_layer = layers[selected]
+		if typeof(selected_layer) == TYPE_DICTIONARY:
+			var selected_alt_m = 0.0
+			if selected_layer.has("altitude"):
+				var selected_alt = selected_layer["altitude"]
+				if typeof(selected_alt) == TYPE_DICTIONARY and selected_alt.has("length"):
+					selected_alt_m = float(selected_alt["length"]) * 0.01
+				else:
+					selected_alt_m = float(selected_alt) * 0.01
+
+			var selected_height_m = 3.0
+			if selected_layer.has("lines") and typeof(selected_layer["lines"]) == TYPE_DICTIONARY:
+				for line in selected_layer["lines"].values():
+					if typeof(line) != TYPE_DICTIONARY:
+						continue
+					if line.has("properties") and typeof(line["properties"]) == TYPE_DICTIONARY and line["properties"].has("height"):
+						var h_prop = line["properties"]["height"]
+						var wall_h_m = 0.0
+						if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
+							wall_h_m = float(h_prop["length"]) * 0.01
+						else:
+							wall_h_m = float(h_prop) * 0.01
+						if wall_h_m > selected_height_m:
+							selected_height_m = wall_h_m
+
+			var selected_top_m = selected_alt_m + selected_height_m
+			if _camera_height_m >= selected_alt_m and _camera_height_m < selected_top_m:
+				return selected
+
+	for layer_id in layers:
+		var layer = layers[layer_id]
+		if typeof(layer) != TYPE_DICTIONARY:
+			continue
+
+		var layer_alt_m = 0.0
+		if layer.has("altitude"):
+			var alt_val = layer["altitude"]
+			if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
+				layer_alt_m = float(alt_val["length"]) * 0.01
+			else:
+				layer_alt_m = float(alt_val) * 0.01
+
+		var wall_heights: Array = []
+		if layer.has("lines") and typeof(layer["lines"]) == TYPE_DICTIONARY:
+			for line in layer["lines"].values():
+				if typeof(line) != TYPE_DICTIONARY:
+					continue
+				if line.has("properties") and typeof(line["properties"]) == TYPE_DICTIONARY and line["properties"].has("height"):
+					var h_prop = line["properties"]["height"]
+					var wall_h_m = 0.0
+					if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
+						wall_h_m = float(h_prop["length"]) * 0.01
+					else:
+						wall_h_m = float(h_prop) * 0.01
+					if wall_h_m > 0.1:
+						wall_heights.append(wall_h_m)
+
+		var layer_height_m = 3.0
+		for h in wall_heights:
+			if float(h) > layer_height_m:
+				layer_height_m = float(h)
+		var layer_top_m = layer_alt_m + layer_height_m
+		if _camera_height_m >= layer_alt_m and _camera_height_m < layer_top_m:
+			return str(layer_id)
+
+	return ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _get_wall_facing_direction
@@ -745,7 +821,7 @@ func _is_point_in_polygon(point: Vector2, polygon: Array) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # _build_layer_geometry  (updated — matches frontend inner/outer assignment)
 # ─────────────────────────────────────────────────────────────────────────────
-func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, render_mode: String = "INTERIOR"):
+func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, render_mode: String = "INTERIOR", use_showall: bool = true):
 	var csg = CSGCombiner3D.new()
 	csg.use_collision = true
 	add_child(csg)
@@ -1093,11 +1169,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 									_disable_shadow_casting_recursive(asset_node)
 									print("Loaded hole asset: ", model_path, " final scale: ", asset_node.scale, " (smart shadow: frame=ON glass=OFF)")
 									
-									# If the GLB has NO shadow-casting frame meshes at all
-									# (pure-glass or fully disabled asset), add a procedural
-									# grid shadow caster so we always get a window grid pattern.
+									# Keep the actual window GLB only.
+									# The procedural grid fallback can add visible extra bars
+									# around windows, so it stays opt-in.
 									var frame_casters := _count_shadow_casters(asset_node)
-									if frame_casters == 0 and h_alt > 0.15:
+									if ENABLE_PROCEDURAL_WINDOW_GRID_CASTER and frame_casters == 0 and h_alt > 0.15:
 										var wall_basis_g = Basis(Vector3.UP, wall_angle)
 										var outer_dir_g  = wall_basis_g * Vector3(0, 0, 1) * (-inner_sign)
 										_add_window_grid_shadow_caster(
@@ -1190,90 +1266,122 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 			var uv_polygon = polygon.duplicate()
 			polygon = _expand_polygon_outward(polygon, max_wall_thickness / 2.0)
 			
-			# Floor
-			var floor_depth = 0.1
-			if area.has("floor_properties") and area["floor_properties"].has("thickness"):
-				var t = float(area["floor_properties"]["thickness"]) * scale_factor
-				if t > 0.001: floor_depth = t
-			if floor_depth < 0.05:
-				floor_depth = 0.05
+			# ── 1. Floor ────────────────────────────────────────────────────────
+			var floor_props = area.get("floor_properties", {})
+			var floor_is_visible = true
+			if floor_props.has("isvisible"):
+				floor_is_visible = bool(floor_props["isvisible"])
+			elif floor_props.has("isVisible"):
+				floor_is_visible = bool(floor_props["isVisible"])
 			
-			var floor_poly = CSGPolygon3D.new()
-			floor_poly.polygon    = polygon
-			floor_poly.mode       = CSGPolygon3D.MODE_DEPTH
-			floor_poly.depth      = floor_depth
-			floor_poly.rotation.x = PI / 2
-			floor_poly.position.y = layer_altitude - floor_depth
-			_apply_polygon_uv_world_scale(floor_poly, uv_polygon)
+			print("[VISIBILITY] Area: ", area_id, " | Floor visible: ", floor_is_visible, " (Found property: ", floor_props.has("isvisible") or floor_props.has("isVisible"), ")")
 			
-			if area.has("floor_properties") and area["floor_properties"].has("material"):
-				var f_mat = create_material(area["floor_properties"]["material"])
-				# Enhance floor reflectivity so the ReflectionProbe shows on the surface
-				f_mat.roughness = min(f_mat.roughness, 0.35)
-				f_mat.metallic_specular = 0.6
-				floor_poly.material = f_mat
-			else:
-				var floor_mat = StandardMaterial3D.new()
-				floor_mat.albedo_color = Color(0.8, 0.8, 0.8)
-				# Default floor gets some reflectivity for the reflection probe
-				floor_mat.roughness = 0.3
-				floor_mat.metallic_specular = 0.6
-				floor_poly.material    = floor_mat
+			if floor_is_visible:
+				var floor_depth = 0.1
+				if floor_props.has("thickness"):
+					var t = float(floor_props["thickness"]) * scale_factor
+					if t > 0.001: floor_depth = t
+				if floor_depth < 0.05:
+					floor_depth = 0.05
+				
+				var floor_poly = CSGPolygon3D.new()
+				floor_poly.polygon    = polygon
+				floor_poly.mode       = CSGPolygon3D.MODE_DEPTH
+				floor_poly.depth      = floor_depth
+				floor_poly.rotation.x = PI / 2
+				floor_poly.position.y = layer_altitude - floor_depth
+				_apply_polygon_uv_world_scale(floor_poly, uv_polygon)
+				
+				if floor_props.has("material"):
+					var f_mat = create_material(floor_props["material"])
+					f_mat.roughness = min(f_mat.roughness, 0.35)
+					f_mat.metallic_specular = 0.6
+					floor_poly.material = f_mat
+				else:
+					var floor_mat = StandardMaterial3D.new()
+					floor_mat.albedo_color = Color(0.8, 0.8, 0.8)
+					floor_mat.roughness = 0.3
+					floor_mat.metallic_specular = 0.6
+					floor_poly.material    = floor_mat
 
-			# Subtract floor openings that belong to this area before adding the slab.
-			_add_floor_opening_cutters(csg, structures, str(area_id), layer_altitude, floor_depth, scale_factor)
+				_add_floor_opening_cutters(csg, structures, str(area_id), layer_altitude, floor_depth, scale_factor)
+				csg.add_child(floor_poly)
+
+			# ── 2. Ceiling ──────────────────────────────────────────────────────
+			var ceiling_props = area.get("ceiling_properties", {})
+			# Ceiling visibility rules:
+			#   showAllFloors=true  → ceiling visible by default, hidden ONLY if isvisible=false
+			#   showAllFloors=false → ceiling hidden by default (removed), kept ONLY if isvisible=true
+			var has_visibility_prop = ceiling_props.has("isvisible") or ceiling_props.has("isVisible")
+			var ceil_is_visible: bool
+			if has_visibility_prop:
+				# Explicit property takes priority regardless of showAllFloors
+				if ceiling_props.has("isvisible"):
+					ceil_is_visible = bool(ceiling_props["isvisible"])
+				else:
+					ceil_is_visible = bool(ceiling_props["isVisible"])
+			else:
+				# No explicit property → use showAllFloors as default
+				ceil_is_visible = show_all_floors
 			
-			csg.add_child(floor_poly)
+			print("[VISIBILITY] Area: ", area_id, " | Ceiling visible: ", ceil_is_visible, " | showAllFloors: ", show_all_floors, " | has_prop: ", has_visibility_prop)
 			
-			# Ceiling
-			var ceil_height = global_ceil_height
-			if not force_uniform_ceiling_height:
-				ceil_height = max_wall_height
-				if area.has("ceiling_properties"):
-					var cp = area["ceiling_properties"]
-					if cp.has("height"):
-						var ch = float(cp["height"]) * scale_factor
+			if ceil_is_visible:
+				# Resolve ceiling elevation
+				var ceil_height = global_ceil_height
+				if not force_uniform_ceiling_height:
+					ceil_height = max_wall_height
+					if ceiling_props.has("height"):
+						var ch = float(ceiling_props["height"]) * scale_factor
 						if ch > 0.1: ceil_height = min(ch, max_wall_height)
-				elif area.has("properties") and area["properties"].has("height"):
-					var h_prop = area["properties"]["height"]
-					var ch = 0.0
-					if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
-						ch = float(h_prop["length"]) * scale_factor
+					elif area.has("properties") and area["properties"].has("height"):
+						var h_prop = area["properties"]["height"]
+						var ch = 0.0
+						if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
+							ch = float(h_prop["length"]) * scale_factor
+						else:
+							ch = float(h_prop) * scale_factor
+						if ch > 0.1: ceil_height = min(ch, max_wall_height)
+				
+				var ceiling_world_y = layer_altitude + ceil_height
+				
+				# EXTRA EXCEPTION: Hide ceiling if camera is ABOVE it — but ONLY when
+				# showAllFloors is false AND use_showall is true (normal culling mode).
+				# When use_showall=False, scene_optimizer.py has explicitly forced
+				# isvisible=True for ALL ceilings — that decision must NOT be overridden
+				# here by a camera-height check. This was the root cause of ceilings
+				# disappearing even when use_showall=False was set.
+				if use_showall and not show_all_floors and _camera_height_m > (ceiling_world_y + 0.1):
+					ceil_is_visible = false
+					print("[VISIBILITY] Hiding Ceiling automatically (showAllFloors=false): Camera height (", _camera_height_m, ") is above ceiling Y (", ceiling_world_y, ")")
+				
+				if ceil_is_visible:
+					var ceil_depth = 0.1
+					if ceiling_props.has("thickness"):
+						var t = float(ceiling_props["thickness"]) * scale_factor
+						if t > 0.001: ceil_depth = t
+					if ceil_depth < 0.05:
+						ceil_depth = 0.05
+
+					var ceil_poly = CSGPolygon3D.new()
+					ceil_poly.polygon    = polygon
+					ceil_poly.mode       = CSGPolygon3D.MODE_DEPTH
+					ceil_poly.depth      = ceil_depth
+					ceil_poly.rotation.x = PI / 2
+					ceil_poly.position.y = ceiling_world_y
+					_apply_polygon_uv_world_scale(ceil_poly, uv_polygon)
+					
+					if ceiling_props.has("material"):
+						ceil_poly.material = create_material(ceiling_props["material"])
 					else:
-						ch = float(h_prop) * scale_factor
-					if ch > 0.1: ceil_height = min(ch, max_wall_height)
-			
-			var ceil_depth = 0.1
-			if area.has("ceiling_properties") and area["ceiling_properties"].has("thickness"):
-				var t = float(area["ceiling_properties"]["thickness"]) * scale_factor
-				if t > 0.001: ceil_depth = t
-			if ceil_depth < 0.05:
-				ceil_depth = 0.05
+						var ceil_mat = StandardMaterial3D.new()
+						ceil_mat.albedo_color = Color(0.82, 0.82, 0.82)
+						ceil_poly.material    = ceil_mat
+					
+					csg.add_child(ceil_poly)
+					print("[INFO] Created ceiling for area: ", area_id, " at Y=", ceiling_world_y)
 
-			var ceil_poly = CSGPolygon3D.new()
-			ceil_poly.polygon    = polygon
-			ceil_poly.mode       = CSGPolygon3D.MODE_DEPTH
-			ceil_poly.depth      = ceil_depth
-			ceil_poly.rotation.x = PI / 2
-			ceil_poly.position.y = layer_altitude + ceil_height
-			_apply_polygon_uv_world_scale(ceil_poly, uv_polygon)
-			
-			if area.has("ceiling_properties") and area["ceiling_properties"].has("material"):
-				ceil_poly.material = create_material(area["ceiling_properties"]["material"])
-			else:
-				var ceil_mat = StandardMaterial3D.new()
-				ceil_mat.albedo_color = Color(0.82, 0.82, 0.82)
-				ceil_poly.material    = ceil_mat
-			
-			var is_visible = show_all_floors
-			if area.has("ceiling_properties") and area["ceiling_properties"].has("isvisible"):
-				is_visible = area["ceiling_properties"]["isvisible"]
-			
-			if not is_visible:
-				continue
 
-			csg.add_child(ceil_poly)
-			print("Added floor/ceiling for area: ", area_id, " Height: ", ceil_height)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _resolve_wall_face_material
@@ -1747,25 +1855,50 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 		flights = stair["flights"]
 
 	var step_material = mat_data
+	var total_height = height
 
 	if flights.size() == 0:
 		var fallback_width = width
 		if fallback_width <= 0.05:
 			fallback_width = 1.0
-		_add_stair_flight(parent, 12, 0.1524, 0.254, fallback_width, Vector3.ZERO, Vector3(0, 0, 1), step_material)
+		var fallback_steps = 12
+		var fallback_riser = 0.1524
+		var fallback_tread = 0.254
+		var fallback_dir = _resolve_stair_travel_direction("forward")
+		var fallback_start = Vector3.ZERO
+		_add_stair_flight(parent, fallback_steps, fallback_riser, fallback_tread, fallback_width, fallback_start, fallback_dir, 0.0, step_material)
 		return
 
 	var first_flight = flights[0]
-	var first_steps = int(first_flight.get("step_count", 12))
-	var first_riser = height / max(first_steps, 1)
-	if float(first_flight.get("riser_height", 0.0)) > 0:
-		first_riser = float(first_flight.get("riser_height", 0.0)) * 0.01
+	var first_steps = max(int(first_flight.get("step_count", 12)), 1)
+	var first_riser = float(first_flight.get("riser_height", 15.24)) * 0.01
+	if first_riser <= 0.0:
+		first_riser = total_height / float(max(first_steps, 1))
 	var first_tread = depth / max(first_steps, 1)
 	if float(first_flight.get("tread_depth", 0.0)) > 0:
 		first_tread = float(first_flight.get("tread_depth", 0.0)) * 0.01
-	var stair_width = float(first_flight.get("width", get_dimension_value(props.get("width", 100)))) * 0.01
+	var stair_width = width
+	var first_direction = str(first_flight.get("direction", "forward")).to_lower()
+	var first_travel_dir = _resolve_stair_travel_direction(first_direction)
+	var first_step_rot_y = _resolve_stair_step_rotation(first_direction)
+	var first_run_length = first_tread * float(first_steps)
+	var first_start_pos = Vector3.ZERO
+	if stair_type == "straight" or flights.size() == 1:
+		# Straight flights are centered on the placement point so the run
+		# crosses the wall like the frontend preview.
+		first_start_pos = -first_travel_dir * (first_run_length * 0.5)
 
-	_add_stair_flight(parent, first_steps, first_riser, first_tread, stair_width, Vector3.ZERO, Vector3(0, 0, 1), step_material)
+	_add_stair_flight(
+		parent,
+		first_steps,
+		first_riser,
+		first_tread,
+		stair_width,
+		first_start_pos,
+		first_travel_dir,
+		first_step_rot_y,
+		step_material
+	)
 
 	var current_height = first_steps * first_riser
 	var first_run = first_steps * first_tread
@@ -1786,7 +1919,7 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_tread = first_tread
 			if float(second_flight.get("tread_depth", 0.0)) > 0:
 				second_tread = float(second_flight.get("tread_depth", 0.0)) * 0.01
-			_add_stair_flight(parent, second_steps, second_riser, second_tread, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(0, 0, -1), step_material)
+			_add_stair_flight(parent, second_steps, second_riser, second_tread, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(0, 0, -1), 0.0, step_material)
 	elif stair_type == "winder":
 		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(-stair_width * 0.25, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
 		if flights.size() > 1:
@@ -1798,7 +1931,7 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_tread_w = first_tread
 			if float(second_flight_w.get("tread_depth", 0.0)) > 0:
 				second_tread_w = float(second_flight_w.get("tread_depth", 0.0)) * 0.01
-			_add_stair_flight(parent, second_steps_w, second_riser_w, second_tread_w, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
+			_add_stair_flight(parent, second_steps_w, second_riser_w, second_tread_w, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), PI / 2.0, step_material)
 	else:
 		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(0, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
 		if flights.size() > 1:
@@ -1810,9 +1943,9 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_tread_l = first_tread
 			if float(second_flight_l.get("tread_depth", 0.0)) > 0:
 				second_tread_l = float(second_flight_l.get("tread_depth", 0.0)) * 0.01
-			_add_stair_flight(parent, second_steps_l, second_riser_l, second_tread_l, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
+			_add_stair_flight(parent, second_steps_l, second_riser_l, second_tread_l, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), PI / 2.0, step_material)
 
-func _add_stair_flight(parent: Node3D, step_count: int, riser: float, tread: float, stair_width: float, start_pos: Vector3, travel_dir: Vector3, mat_data: Dictionary) -> void:
+func _add_stair_flight(parent: Node3D, step_count: int, riser: float, tread: float, stair_width: float, start_pos: Vector3, travel_dir: Vector3, step_rot_y: float, mat_data: Dictionary) -> void:
 	var steps = max(step_count, 1)
 	var step_w = max(stair_width, 0.05)
 	var step_h = max(riser, 0.03)
@@ -1827,6 +1960,27 @@ func _add_stair_flight(parent: Node3D, step_count: int, riser: float, tread: flo
 		pos += dir * (step_d * (i + 0.5))
 		pos.y += step_h * (i + 0.5)
 		_add_box_part(parent, Vector3(step_w, step_h, step_d), mat_data, pos)
+		parent.get_child(parent.get_child_count() - 1).rotation.y = step_rot_y
+
+func _resolve_stair_travel_direction(direction: String) -> Vector3:
+	match direction:
+		"backward", "back", "reverse":
+			return Vector3(0, 0, -1)
+		"left":
+			return Vector3(-1, 0, 0)
+		"right":
+			return Vector3(1, 0, 0)
+		_:
+			return Vector3(0, 0, 1)
+
+func _resolve_stair_step_rotation(direction: String) -> float:
+	match direction:
+		"left":
+			return -PI / 2.0
+		"right":
+			return PI / 2.0
+		_:
+			return 0.0
 
 func _add_floor_opening_frame(parent: Node3D, structure: Dictionary, width: float, depth: float, mat_data: Dictionary) -> void:
 	var frame = max(min(width, depth) * 0.08, 0.04)

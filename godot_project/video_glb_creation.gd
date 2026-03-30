@@ -11,11 +11,13 @@ var _tracked_assets = []
 var _window_sunlight_data = []  # Collected during hole building, used to place window sunlights
 var day_render = true
 var lighting_profile = "day"
+const ENABLE_PROCEDURAL_WINDOW_GRID_CASTER = false
 var _lighting_locked = false
 var _lighting_setup_done = false
 var _frozen_lighting_profile = "day"
 var _frozen_camera_pose = null
 var _scene_built = false  # TRUE after first full build — prevents light/asset accumulation
+var _dir_light = null
 
 # ─────────────────────────────────────────────────────────────────
 # Entry-point (called by video_render.gd)
@@ -93,12 +95,27 @@ func build_scene(data):
 
 	_window_sunlight_data.clear()
 	build_architecture(geom_data, cam_pose.get("position", Vector3.ZERO), show_all_floors)
-	_create_window_sunlights()  # Place sunlights through detected windows
+	if _dir_light != null:
+		_orient_directional_light_from_windows(_dir_light)
+	# _create_window_sunlights()  # Removed in favor of DirectionalLight orientation
 	build_structures(geom_data)
 	load_assets(geom_data)
+	
+	_apply_anisotropic_filtering_to_all(self)
 
 	# Mark scene as fully built — all subsequent frames skip directly above ↑
 	_scene_built = true
+
+func _apply_anisotropic_filtering_to_all(node: Node) -> void:
+	var meshes = _get_all_meshes(node)
+	for m in meshes:
+		if not m.mesh: continue
+		for i in range(m.mesh.get_surface_count()):
+			var mat = m.get_active_material(i)
+			if mat == null:
+				mat = m.mesh.surface_get_material(i)
+			if mat and mat is BaseMaterial3D:
+				mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 
 # ─────────────────────────────────────────────────────────────────
 # Lighting  — ported from image_glb_creation.gd (full photorealistic setup)
@@ -165,27 +182,12 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 			dir_light.light_color = lighting["dir_color"]
 		if l.has("position"):
 			dir_light.position = parse_vec3(l["position"])
-			if l.has("target"):
-				dir_light.look_at(parse_vec3(l["target"]))
-			else:
-				dir_light.look_at(light_anchor)
 	else:
-		if lighting_profile == "day":
-			dir_light.light_energy = lighting["dir_energy"]
-			dir_light.light_color  = lighting["dir_color"]
-			dir_light.position     = light_anchor - cam_forward * 12.0 + cam_right * 6.0 + Vector3.UP * 16.0
-			dir_light.look_at(light_anchor)
-		elif lighting_profile == "sunset":
-			dir_light.light_energy = lighting["dir_energy"]
-			dir_light.light_color  = lighting["dir_color"]
-			dir_light.position     = light_anchor - cam_forward * 9.0 + cam_right * 9.0 + Vector3.UP * 8.5
-			dir_light.look_at(light_anchor + Vector3(0, -1.4, 0))
-		else:
-			dir_light.light_energy = lighting["dir_energy"]
-			dir_light.light_color  = lighting["dir_color"]
-			dir_light.position     = light_anchor - cam_forward * 10.0 - cam_right * 4.0 + Vector3.UP * 18.0
-			dir_light.look_at(light_anchor)
+		dir_light.light_energy = lighting["dir_energy"]
+		dir_light.light_color  = lighting["dir_color"]
 
+	# Save to instance variable and add to tree
+	_dir_light = dir_light
 	add_child(dir_light)
 
 	# ── Sky / Environment ──────────────────────────────────────────────────────
@@ -262,18 +264,11 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	env.adjustment_saturation = 1.10
 
 # ── ReflectionProbe ────────────────────────────────────────────────────────
-	# UPDATE_ONCE on frame 0 captures an incomplete scene (no geometry yet) and
-	# bakes that overexposed sky reflection permanently — causing frame 0 blowout.
-	# Fix: lower intensity so the probe contribution is subtle, not dominant.
-	# In headless video renders the probe adds more overexposure than realism.
-	var room_height = max(2.8, (room_ceiling_y - room_center.y) * 2.0)
-	var probe = ReflectionProbe.new()
-	probe.size         = Vector3(max(room_extent.x + 4.0, 8.0), room_height + 2.0, max(room_extent.y + 4.0, 8.0))
-	probe.update_mode  = ReflectionProbe.UPDATE_ONCE
-	probe.intensity    = 0.0
-	probe.max_distance = max(room_extent.x, room_extent.y) * 1.5 + 12.0
-	probe.position     = room_center
-	add_child(probe)
+	# Removed entirely for video renders.
+	# Godot's ReflectionProbe UPDATE_ONCE takes exactly 6 frames to bake its cubemap.
+	# During frames 0-4, the ambient lighting falls back to a dark unbaked state,
+	# causing a visually jarring "pop" on frame 5 when the probe completes.
+	# For continuous video rendering, we rely exclusively on the WorldEnvironment.
 
 	var world_env = WorldEnvironment.new()
 	world_env.environment = env
@@ -327,67 +322,50 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	print("[VideoGLB] Photorealistic lighting setup complete. profile=", lighting_profile)
 
 # ─────────────────────────────────────────────────────────────────
-# _create_window_sunlights  (ported from image_glb_creation.gd)
-# ─────────────────────────────────────────────────────────────────
-func _create_window_sunlights():
+func _orient_directional_light_from_windows(dir_light: DirectionalLight3D):
 	if _window_sunlight_data.size() == 0:
-		print("[VideoGLB] No windows detected — skipping window sunlight placement.")
 		return
 
-	var sun_energy := 20.0
-	var sun_color  := Color(1.0, 0.95, 0.85)
-	var sun_range  := 30.0
+	# ── Step 1: Average outer_dir across ALL windows ──────────────────────
+	var avg_outer_dir := Vector3.ZERO
+	for win in _window_sunlight_data:
+		avg_outer_dir += (win["outer_dir"] as Vector3)
+	avg_outer_dir = avg_outer_dir / float(_window_sunlight_data.size())
+	avg_outer_dir.y = 0.0
+	if avg_outer_dir.length() < 0.001:
+		avg_outer_dir = Vector3(1, 0, 0)
+	avg_outer_dir = avg_outer_dir.normalized()
 
+	# ── Step 2: Sun elevation per lighting profile ────────────────────────
+	var elevation_deg: float
 	match lighting_profile:
-		"sunset":
-			sun_energy = 15.0
-			sun_color  = Color(1.0, 0.65, 0.35)
-		"night":
-			sun_energy = 0.5
-			sun_color  = Color(0.60, 0.70, 0.98)
+		"day":    elevation_deg = 35.0
+		"sunset": elevation_deg = 8.0
+		"night":  elevation_deg = 55.0
+		_:        elevation_deg = 35.0
 
-	print("[VideoGLB] Creating ", _window_sunlight_data.size(), " window sunlight(s)")
+	# ── Step 3: Build a direction vector from outer_dir + elevation ───────
+	var elevation_rad := deg_to_rad(elevation_deg)
+	var sun_dir := Vector3(
+		-avg_outer_dir.x,
+		-sin(elevation_rad),
+		-avg_outer_dir.z
+	).normalized()
 
-	for idx in range(_window_sunlight_data.size()):
-		var win        = _window_sunlight_data[idx]
-		var win_center : Vector3 = win["center"]
-		var inner_dir  : Vector3 = win["inner_dir"]
-		var outer_dir  : Vector3 = win["outer_dir"]
+	# ── Step 4: Orient the directional light ─────────────────────────────
+	var room_center := Vector3.ZERO
+	for win in _window_sunlight_data:
+		room_center += (win["center"] as Vector3)
+	room_center /= float(_window_sunlight_data.size())
 
-		var light_dist := 6.0
-		var light_pos   = win_center + outer_dir * light_dist
+	dir_light.position = room_center - sun_dir * 50.0
+	if dir_light.position.distance_to(room_center) > 0.001:
+		dir_light.look_at(room_center, Vector3.UP)
 
-		var win_alt: float = win.get("altitude", 0.0)
-		if win_alt > 0.20:
-			light_pos.y += 4.5
-		else:
-			light_pos.y += 5.5
+	print("[VideoGLB] DirectionalLight oriented from windows: outer_dir=", avg_outer_dir,
+		  " elevation=", elevation_deg, "deg  sun_dir=", sun_dir)
 
-		var floor_y: float = win.get("layer_altitude", 0.0)
-		var target_inside  = win_center + inner_dir * 5.0
-		target_inside.y    = floor_y
-
-		var spot = SpotLight3D.new()
-		spot.name = "WindowSunlight_%d" % idx
-		spot.position     = light_pos
-		spot.light_energy = sun_energy
-		spot.light_color  = sun_color
-		spot.spot_range   = sun_range
-		spot.spot_angle   = 60.0
-
-		spot.shadow_enabled     = true
-		spot.shadow_bias        = 0.1
-		spot.shadow_normal_bias = 3.0
-		spot.shadow_blur        = 0.1
-
-		spot.light_specular = 0.2
-		spot.add_to_group("window_sunlights")
-		add_child(spot)
-
-		if light_pos.distance_to(target_inside) > 0.001:
-			spot.look_at(target_inside, Vector3.UP)
-
-		print("[VideoGLB]   Window sunlight #", idx, " at ", light_pos.round())
+# Removed _create_window_sunlights (legacy SpotLight method) in favor of DirectionalLight.
 
 # ─────────────────────────────────────────────────────────────────
 # Parse vec3 helper
@@ -1678,11 +1656,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 									_disable_shadow_casting_recursive(asset_node)
 									print("[VideoGLB] Loaded hole asset: ", model_path, " scale: ", asset_node.scale, " (smart shadow: frame=ON glass=OFF)")
 
-									# If the GLB has NO shadow-casting frame meshes at all
-									# (pure-glass or fully disabled asset), add a procedural
-									# grid shadow caster so we always get a window grid pattern.
+									# Keep the actual window GLB only.
+									# The procedural grid fallback can add visible extra bars
+									# around windows, so it stays opt-in.
 									var frame_casters := _count_shadow_casters(asset_node)
-									if frame_casters == 0 and h_alt > 0.15:
+									if ENABLE_PROCEDURAL_WINDOW_GRID_CASTER and frame_casters == 0 and h_alt > 0.15:
 										var wall_basis_g = Basis(Vector3.UP, wall_angle)
 										var outer_dir_g  = wall_basis_g * Vector3(0, 0, 1) * (-inner_sign)
 										_add_window_grid_shadow_caster(
@@ -1855,9 +1833,22 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 
 			# Ceiling visibility gate
 			var is_visible = show_all_floors
-			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY and area["ceiling_properties"].has("isvisible"):
-				is_visible = bool(area["ceiling_properties"]["isvisible"])
-			elif not show_all_floors and cam_pos != null:
+			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY:
+				var cp = area["ceiling_properties"]
+				if cp.has("isvisible"):
+					is_visible = bool(cp["isvisible"])
+				elif cp.has("isVisible"):
+					is_visible = bool(cp["isVisible"])
+			
+			# EXTRA EXCEPTION: Hide ceiling if camera is ABOVE it (e.g. for top-down renders)
+			if is_visible and cam_pos != null:
+				var ceiling_world_y = layer_altitude + ceil_height
+				if cam_pos.y > (ceiling_world_y + 0.1): # Tiny margin
+					is_visible = false
+					print("[VideoGLB] Hiding Ceiling automatically: Camera height (", cam_pos.y, ") is above ceiling Y (", ceiling_world_y, ")")
+			
+			# Portal-based fallback for show_all_floors=false
+			if not is_visible and not show_all_floors and cam_pos != null:
 				if _camera_requires_ceiling(cam_pos, layer_altitude, ceil_height, polygon):
 					is_visible = true
 
@@ -2721,5 +2712,7 @@ func load_texture_from_path(path):
 func load_image_texture(path):
 	var img = Image.load_from_file(path)
 	if img:
+		if not img.has_mipmaps():
+			img.generate_mipmaps()
 		return ImageTexture.create_from_image(img)
 	return null

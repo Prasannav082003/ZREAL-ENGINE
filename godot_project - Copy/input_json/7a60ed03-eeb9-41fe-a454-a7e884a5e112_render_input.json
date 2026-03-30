@@ -1,0 +1,1356 @@
+{
+	"ambient_light": {
+		"intensity": 0.6
+	},
+	"aspect_ratio": "16:9",
+	"blender_camera": {
+		"clip_end": 450.0,
+		"clip_start": 0.1,
+		"lens": 60.0,
+		"lens_unit": "FOV",
+		"location": [
+			-2.56649560745708,
+			-0.710486573005378,
+			10.3108302371734
+		],
+		"rotation_euler": [
+			-0.244978663126864,
+			0.0,
+			3.14159265358979
+		],
+		"rotation_mode": "XYZ",
+		"sensor_fit": "AUTO",
+		"sensor_height": 18.0,
+		"sensor_width": 32.0,
+		"shift_x": 0.0,
+		"shift_y": 0.0,
+		"type": "PERSP"
+	},
+	"blender_script": "\nimport bpy\nimport bmesh\nfrom mathutils import Vector, Euler\n\n# Clear existing camera and target\nif \"Camera\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"Camera\"], do_unlink=True)\nif \"CameraTarget\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"CameraTarget\"], do_unlink=True)\n\n# Create camera\nbpy.ops.object.camera_add()\ncamera = bpy.context.object\ncamera.name = \"Camera\"\n\n# Set camera properties\ncamera.location = (-2.566495607457075, -0.7104865730053782, 10.310830237173386)\ncamera.rotation_euler = (-0.24497866312686425, 0, 3.141592653589793)\ncamera.rotation_mode = 'XYZ'\ncamera.data.type = 'PERSP'\ncamera.data.lens_unit = 'FOV'\ncamera.data.lens = 60\ncamera.data.clip_start = 0.1\ncamera.data.clip_end = 450\ncamera.data.sensor_width = 32\ncamera.data.sensor_height = 18\ncamera.data.sensor_fit = 'AUTO'\ncamera.data.shift_x = 0\ncamera.data.shift_y = 0\n\n# Create camera target (Empty object)\nbpy.ops.object.empty_add(type='PLAIN_AXES')\ntarget = bpy.context.object\ntarget.name = \"CameraTarget\"\ntarget.location = (-2.566495607457075, 1.7148696773579526, 0.6094052357200663)\ntarget.rotation_euler = (0, 0, 0)\ntarget.empty_display_size = 1\n\n# Set camera to track target\ncamera.constraints.new(type='TRACK_TO')\ncamera.constraints[\"Track To\"].target = target\ncamera.constraints[\"Track To\"].track_axis = 'TRACK_NEGATIVE_Z'\ncamera.constraints[\"Track To\"].up_axis = 'UP_Y'\n\n# Set camera as active camera\nbpy.context.scene.camera = camera\n\nprint(\"Camera setup complete!\")\nprint(f\"Camera location: {camera.location}\")\nprint(f\"Camera rotation: {camera.rotation_euler}\")\nprint(f\"Target location: {target.location}\")\nprint(f\"Camera FOV: {camera.data.lens}\")\n",
+	"blender_target": {
+		"empty_display_size": 1.0,
+		"empty_display_type": "PLAIN_AXES",
+		"location": [
+			-2.56649560745708,
+			1.71486967735795,
+			0.609405235720066
+		],
+		"rotation_euler": [
+			0.0,
+			0.0,
+			0.0
+		],
+		"rotation_mode": "XYZ",
+		"type": "EMPTY"
+	},
+	"coordinate_system": "right_handed_y_up",
+	"day_render": true,
+	"directional_light": {
+		"cast_shadow": false,
+		"color": {
+			"b": 0.871367119195957,
+			"g": 0.938685728456504,
+			"r": 1.0
+		},
+		"intensity": 0.8,
+		"position": {
+			"x": 25.0,
+			"y": 35.0,
+			"z": -10.0
+		},
+		"target": {
+			"x": 0.0,
+			"y": 0.0,
+			"z": 0.0
+		}
+	},
+	"floor_plan_data": {
+		"direction": "s",
+		"directionangle": 0.0,
+		"grids": {
+
+		},
+		"groups": {
+
+		},
+		"guides": {
+			"circular": {
+
+			},
+			"horizontal": {
+
+			},
+			"vertical": {
+
+			}
+		},
+		"height": 1363.10769865368,
+		"layers": {
+			"layer-1": {
+				"altitude": 0.0,
+				"areas": {
+					"a-1773053024033-ncnzrf4k": {
+						"ceiling_properties": {
+							"height": 300.0,
+							"isvisible": false,
+							"material": {
+								"aoUrl": null,
+								"color": "#d2d4cf",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							},
+							"thickness": 2.0
+						},
+						"floor_properties": {
+							"height": 0.0,
+							"isvisible": true,
+							"material": {
+								"aoUrl": null,
+								"color": "#ffffff",
+								"displacementUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\e8a711da_woodfine5_HR_displacement.jpg",
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\a585a15c_woodfine5_HR_Basecolor.jpg",
+								"metalnessUrl": null,
+								"normalUrl": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\241be387_woodfine5_HR_normal.jpg",
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": 412.0
+							},
+							"thickness": 5.0
+						},
+						"holes": [],
+						"id": "a-1773053024033-ncnzrf4k",
+						"misc": {
+
+						},
+						"name": "Room",
+						"properties": {
+							"height": {
+								"length": 304.8
+							}
+						},
+						"prototype": "areas",
+						"selected": false,
+						"type": "area",
+						"vertices": [
+							"v-1773053024032-miszqxg7",
+							"v-1773053024032-isurzosu",
+							"v-1773053024032-bqvpmfao",
+							"v-1773053024032-i1h2sot9"
+						],
+						"visible": true
+					}
+				},
+				"externalAreas": {
+
+				},
+				"holes": {
+
+				},
+				"id": "layer-1",
+				"items": {
+					"053ea066-68df-4e58-bc1d-69020db26177": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\18e395ec_MinimalistAC_HP.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "https://zrealtystoragedev.blob.core.windows.net/asset-library/AC/Minimalist_AC/Svg_MinimalisticAC.svg",
+							"assetId_3D": 140.0
+						},
+						"id": "053ea066-68df-4e58-bc1d-69020db26177",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "wall_mount",
+						"name": "Minimalist_AC",
+						"properties": {
+							"altitude": {
+								"length": 220.0
+							},
+							"depth": {
+								"length": 20.4
+							},
+							"height": {
+								"length": 29.8
+							},
+							"width": {
+								"length": 90.5
+							}
+						},
+						"prototype": "items",
+						"rotation": -180.0,
+						"selected": false,
+						"type": "Minimalist_AC",
+						"visible": true,
+						"x": 86.956531897591,
+						"y": 128.77
+					},
+					"14066897-708e-4680-9387-6d0f32801e7a": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\61ef8e6f_ModernOffice_CeilingLamp_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Ceiling_Lamps/Minimal_LED_Ceiling_Pendant_Light/Ceilinglamp.svg",
+							"assetId_3D": 496.0
+						},
+						"id": "14066897-708e-4680-9387-6d0f32801e7a",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "ceiling_mount",
+						"name": "Minimal LED Ceiling Pendant Light",
+						"properties": {
+							"altitude": {
+								"length": 214.8
+							},
+							"depth": {
+								"length": 60.0
+							},
+							"height": {
+								"length": 90.0
+							},
+							"width": {
+								"length": 120.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Minimal LED Ceiling Pendant Light",
+						"visible": true,
+						"x": -272.0,
+						"y": -190.97
+					},
+					"2da873d5-fc0d-4002-9375-14b8a31c7ab2": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\38bdc1f2_MetalFan_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Ceiling_Fan/Premium_Metallic_Ceiling_Fan/Screenshot 2026-03-02 170151_photorealistic.svg",
+							"assetId_3D": 471.0
+						},
+						"id": "2da873d5-fc0d-4002-9375-14b8a31c7ab2",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "ceiling_mount",
+						"name": "Premium Metallic Ceiling Fan",
+						"properties": {
+							"altitude": {
+								"length": 266.8
+							},
+							"depth": {
+								"length": 122.0
+							},
+							"height": {
+								"length": 38.0
+							},
+							"width": {
+								"length": 122.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Premium Metallic Ceiling Fan",
+						"visible": true,
+						"x": -350.268261162757,
+						"y": 41.47
+					},
+					"35bd73c4-a1a5-40ba-a7ea-c3a296498890": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\bdbd972b_ModernOffice_CeoTable_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Office_Table/Modern_Office_Desk/Officetable.svg",
+							"assetId_3D": 494.0
+						},
+						"id": "35bd73c4-a1a5-40ba-a7ea-c3a296498890",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Modern Office Desk",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 70.0
+							},
+							"height": {
+								"length": 75.0
+							},
+							"width": {
+								"length": 160.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Modern Office Desk",
+						"visible": true,
+						"x": -272.0,
+						"y": -190.97
+					},
+					"379ead11-98b7-420f-9aa4-55d1548f2a69": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\3fc7f15d_MinimalistCeilingLight_HP.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "https://zrealtystoragedev.blob.core.windows.net/asset-library/Ceiling_Lamps/Minimalistic_CeilingLight/Svg_MinimalisticCeilingLight.svg",
+							"assetId_3D": 159.0
+						},
+						"id": "379ead11-98b7-420f-9aa4-55d1548f2a69",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "ceiling_mount",
+						"name": "Minimalistic_CeilingLight",
+						"properties": {
+							"altitude": {
+								"length": 297.9
+							},
+							"depth": {
+								"length": 7.31
+							},
+							"height": {
+								"length": 6.9
+							},
+							"width": {
+								"length": 7.31
+							}
+						},
+						"prototype": "items",
+						"rotation": 270.0,
+						"selected": false,
+						"type": "Minimalistic_CeilingLight",
+						"visible": true,
+						"x": -640.633264408965,
+						"y": 96.6332644089655
+					},
+					"47835fbd-27ad-450c-b4e8-391d13bd9997": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\b924edec_ModernOffice_CoffeeTable_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Table/Grey_Marble_Top_Coffee_Table/Coffeetable.svg",
+							"assetId_3D": 492.0
+						},
+						"id": "47835fbd-27ad-450c-b4e8-391d13bd9997",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Grey Marble Top Coffee Table",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 60.0
+							},
+							"height": {
+								"length": 42.0
+							},
+							"width": {
+								"length": 110.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Grey Marble Top Coffee Table",
+						"visible": true,
+						"x": -350.268261162757,
+						"y": -16.03
+					},
+					"5804c707-3c3b-4f88-bd3d-8ae1ab5f3dc9": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\e2c0cf46_ModernOffice_CeoChair_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Chair/Cozy_Office_Chair/Ceochair.svg",
+							"assetId_3D": 495.0
+						},
+						"id": "5804c707-3c3b-4f88-bd3d-8ae1ab5f3dc9",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Cozy Office Chair",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 65.0
+							},
+							"height": {
+								"length": 120.0
+							},
+							"width": {
+								"length": 65.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 0.0,
+						"selected": false,
+						"type": "Cozy Office Chair",
+						"visible": true,
+						"x": -272.0,
+						"y": -293.47
+					},
+					"6b7a7161-e614-4a06-a297-8119779dd08b": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\f235be42_ModernOffice_StandingLamp_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Lamp/Modern_Arc_Floor_Lamp/Standinglamp.svg",
+							"assetId_3D": 488.0
+						},
+						"id": "6b7a7161-e614-4a06-a297-8119779dd08b",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Modern Arc Floor Lamp",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 45.0
+							},
+							"height": {
+								"length": 185.0
+							},
+							"width": {
+								"length": 45.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 0.0,
+						"selected": false,
+						"type": "Modern Arc Floor Lamp",
+						"visible": true,
+						"x": -207.768261162757,
+						"y": 91.47
+					},
+					"8614fd0a-a70d-4f17-b8bb-706435dc1772": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\229a5a5e_Rug_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Rug/Zebra_Pattern_Rug/Rug.svg",
+							"assetId_3D": 460.0
+						},
+						"id": "8614fd0a-a70d-4f17-b8bb-706435dc1772",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "floor_mount",
+						"name": "Zebra Pattern Rug",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 300.0
+							},
+							"height": {
+								"length": 2.0
+							},
+							"width": {
+								"length": 400.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Zebra Pattern Rug",
+						"visible": true,
+						"x": -272.0,
+						"y": -190.97
+					},
+					"8e2faa32-d16c-4b21-b91a-978a13bfe5f4": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\588c2580_ModernOffice_Frame_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Frame/Painting_Wall_Art_Frame/Frame.svg",
+							"assetId_3D": 490.0
+						},
+						"id": "8e2faa32-d16c-4b21-b91a-978a13bfe5f4",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "wall_mount",
+						"name": "Painting Wall Art Frame",
+						"properties": {
+							"altitude": {
+								"length": 95.0
+							},
+							"depth": {
+								"length": 3.0
+							},
+							"height": {
+								"length": 70.0
+							},
+							"width": {
+								"length": 120.0
+							}
+						},
+						"prototype": "items",
+						"rotation": -180.0,
+						"selected": false,
+						"type": "Painting Wall Art Frame",
+						"visible": true,
+						"x": -350.268261162757,
+						"y": 137.47
+					},
+					"a7a92735-c9a7-4311-98b9-cfb40565fe01": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\091fb88b_ModernOffice_Sofa_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Sofas/Modern_Office_3-Seater_Sofa/Sofa.svg",
+							"assetId_3D": 489.0
+						},
+						"id": "a7a92735-c9a7-4311-98b9-cfb40565fe01",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Modern Office 3-Seater Sofa",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 95.0
+							},
+							"height": {
+								"length": 82.0
+							},
+							"width": {
+								"length": 210.0
+							}
+						},
+						"prototype": "items",
+						"rotation": -180.0,
+						"selected": false,
+						"type": "Modern Office 3-Seater Sofa",
+						"visible": true,
+						"x": -350.268261162757,
+						"y": 91.47
+					},
+					"b6216eb2-0551-49b7-b6c3-2dd8616bdcf3": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\e64e3ae2_Sidetable1_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Ottoman/Modern_Leather_Pouf_Ottoman/sidetable1.svg",
+							"assetId_3D": 462.0
+						},
+						"id": "b6216eb2-0551-49b7-b6c3-2dd8616bdcf3",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Modern Leather Pouf Ottoman",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 45.0
+							},
+							"height": {
+								"length": 50.0
+							},
+							"width": {
+								"length": 45.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Modern Leather Pouf Ottoman",
+						"visible": true,
+						"x": -487.768261162757,
+						"y": 91.47
+					},
+					"cd228e3d-ed7d-435c-a77d-11f1176c30df": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\e88da528_ModernOffice_Clientchair_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Chair/Visitor_Chair/Clientchair.svg",
+							"assetId_3D": 493.0
+						},
+						"id": "cd228e3d-ed7d-435c-a77d-11f1176c30df",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Visitor Chair",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 55.0
+							},
+							"height": {
+								"length": 82.0
+							},
+							"width": {
+								"length": 55.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Visitor Chair",
+						"visible": true,
+						"x": -214.5,
+						"y": -125.97
+					},
+					"d33dd0a7-5b3f-4a15-8c20-e9f3daa843d0": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\e88da528_ModernOffice_Clientchair_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Chair/Visitor_Chair/Clientchair.svg",
+							"assetId_3D": 493.0
+						},
+						"id": "d33dd0a7-5b3f-4a15-8c20-e9f3daa843d0",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Visitor Chair",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 55.0
+							},
+							"height": {
+								"length": 82.0
+							},
+							"width": {
+								"length": 55.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Visitor Chair",
+						"visible": true,
+						"x": -329.5,
+						"y": -125.97
+					},
+					"d363f0c4-79ea-4559-85f9-93aaef649074": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\25e64f18_ModernOffice_Dustbin_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/garbage/Plastic_Office_Dustbin/Dustbin.svg",
+							"assetId_3D": 491.0
+						},
+						"id": "d363f0c4-79ea-4559-85f9-93aaef649074",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "general",
+						"name": "Plastic Office Dustbin",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 26.0
+							},
+							"height": {
+								"length": 30.0
+							},
+							"width": {
+								"length": 26.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Plastic Office Dustbin",
+						"visible": true,
+						"x": -272.0,
+						"y": -190.97
+					},
+					"d6dbc2c9-5641-454d-af7f-0bb139129a15": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\3fc7f15d_MinimalistCeilingLight_HP.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "https://zrealtystoragedev.blob.core.windows.net/asset-library/Ceiling_Lamps/Minimalistic_CeilingLight/Svg_MinimalisticCeilingLight.svg",
+							"assetId_3D": 159.0
+						},
+						"id": "d6dbc2c9-5641-454d-af7f-0bb139129a15",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "ceiling_mount",
+						"name": "Minimalistic_CeilingLight",
+						"properties": {
+							"altitude": {
+								"length": 297.9
+							},
+							"depth": {
+								"length": 7.31
+							},
+							"height": {
+								"length": 6.9
+							},
+							"width": {
+								"length": 7.31
+							}
+						},
+						"prototype": "items",
+						"rotation": 0.0,
+						"selected": false,
+						"type": "Minimalistic_CeilingLight",
+						"visible": true,
+						"x": 72.354517722226,
+						"y": -339.354517722226
+					},
+					"e520c8c2-7232-4eeb-95ce-62431c166eb7": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\3fc7f15d_MinimalistCeilingLight_HP.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "https://zrealtystoragedev.blob.core.windows.net/asset-library/Ceiling_Lamps/Minimalistic_CeilingLight/Svg_MinimalisticCeilingLight.svg",
+							"assetId_3D": 159.0
+						},
+						"id": "e520c8c2-7232-4eeb-95ce-62431c166eb7",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "ceiling_mount",
+						"name": "Minimalistic_CeilingLight",
+						"properties": {
+							"altitude": {
+								"length": 297.9
+							},
+							"depth": {
+								"length": 7.31
+							},
+							"height": {
+								"length": 6.9
+							},
+							"width": {
+								"length": 7.31
+							}
+						},
+						"prototype": "items",
+						"rotation": 90.0,
+						"selected": false,
+						"type": "Minimalistic_CeilingLight",
+						"visible": true,
+						"x": -637.087032917394,
+						"y": -360.087032917394
+					},
+					"ed65af47-0c1c-4a27-b1cd-1b53d87f409d": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\3fc7f15d_MinimalistCeilingLight_HP.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "https://zrealtystoragedev.blob.core.windows.net/asset-library/Ceiling_Lamps/Minimalistic_CeilingLight/Svg_MinimalisticCeilingLight.svg",
+							"assetId_3D": 159.0
+						},
+						"id": "ed65af47-0c1c-4a27-b1cd-1b53d87f409d",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "ceiling_mount",
+						"name": "Minimalistic_CeilingLight",
+						"properties": {
+							"altitude": {
+								"length": 297.9
+							},
+							"depth": {
+								"length": 7.31
+							},
+							"height": {
+								"length": 6.9
+							},
+							"width": {
+								"length": 7.31
+							}
+						},
+						"prototype": "items",
+						"rotation": 180.0,
+						"selected": false,
+						"type": "Minimalistic_CeilingLight",
+						"visible": true,
+						"x": 98.4951493355961,
+						"y": 98.4951493355961
+					},
+					"fe962ff6-5e2f-4c32-b8a8-31cf72a418f0": {
+						"asset_urls": {
+							"GLB_File_URL": "C:\\Zlendo2026\\4k_Unreal_Engine_v1 - godot\\asset_downloads\\e924e0f6_ModernOffice_BookShelf_HP_high.glb",
+							"MTL_File_URL": "",
+							"OBJ_File_URL": "",
+							"SVG_URL": "asset-library/Bookshelf/Modern_Wallshelf_Unit/Bookshelf.svg",
+							"assetId_3D": 497.0
+						},
+						"id": "fe962ff6-5e2f-4c32-b8a8-31cf72a418f0",
+						"materials": {
+
+						},
+						"misc": {
+
+						},
+						"mounting_type": "wall_mount",
+						"name": "Modern Wallshelf Unit",
+						"properties": {
+							"altitude": {
+								"length": 1.0
+							},
+							"depth": {
+								"length": 40.0
+							},
+							"height": {
+								"length": 210.0
+							},
+							"width": {
+								"length": 240.0
+							}
+						},
+						"prototype": "items",
+						"rotation": 0.0,
+						"selected": false,
+						"type": "Modern Wallshelf Unit",
+						"visible": true,
+						"x": -272.0,
+						"y": -385.97
+					}
+				},
+				"lines": {
+					"l-1773053024032-apd48y44": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1773053024032-apd48y44",
+						"inner_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#ccbeb1",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#7c8eae",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1773053024032-bqvpmfao",
+							"v-1773053024032-i1h2sot9"
+						],
+						"visible": true
+					},
+					"l-1773053024032-gf1go6au": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1773053024032-gf1go6au",
+						"inner_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#ccbeb1",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#7c8eae",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1773053024032-i1h2sot9",
+							"v-1773053024032-miszqxg7"
+						],
+						"visible": true
+					},
+					"l-1773053024032-kovfok9k": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1773053024032-kovfok9k",
+						"inner_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#ccbeb1",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#7c8eae",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1773053024032-miszqxg7",
+							"v-1773053024032-isurzosu"
+						],
+						"visible": true
+					},
+					"l-1773053024032-mlmakuvn": {
+						"asset_urls": {
+							"inner": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							},
+							"outer": {
+								"fallback_color": "#ffffff",
+								"textures": null
+							}
+						},
+						"holes": [],
+						"id": "l-1773053024032-mlmakuvn",
+						"inner_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#ccbeb1",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"misc": {
+							"_unitLength": "cm"
+						},
+						"name": "Wall",
+						"outer_properties": {
+							"material": {
+								"aoUrl": null,
+								"color": "#7c8eae",
+								"displacementUrl": null,
+								"emissionUrl": null,
+								"flipY": false,
+								"mapUrl": null,
+								"metalnessUrl": null,
+								"normalUrl": null,
+								"repeat": [
+									1.0,
+									1.0
+								],
+								"rotation": 0.0,
+								"roughnessUrl": null,
+								"textureId": null
+							}
+						},
+						"properties": {
+							"height": {
+								"length": 304.8
+							},
+							"thickness": {
+								"length": 22.86
+							}
+						},
+						"prototype": "lines",
+						"selected": false,
+						"type": "wall",
+						"vertices": [
+							"v-1773053024032-isurzosu",
+							"v-1773053024032-bqvpmfao"
+						],
+						"visible": true
+					}
+				},
+				"name": "Ground Floor",
+				"opacity": 1.0,
+				"order": 0.0,
+				"selected": {
+					"areas": [],
+					"dimensions": [],
+					"externalAreas": [],
+					"holes": [],
+					"items": [],
+					"lines": [],
+					"structures": [],
+					"vertices": []
+				},
+				"structures": {
+
+				},
+				"vertices": {
+					"v-1773053024032-bqvpmfao": {
+						"areas": [
+							"a-1773053024033-ncnzrf4k"
+						],
+						"externalAreas": [],
+						"id": "v-1773053024032-bqvpmfao",
+						"lines": [
+							"l-1773053024032-mlmakuvn",
+							"l-1773053024032-apd48y44"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": 152.400073742146,
+						"y": 152.400073742146
+					},
+					"v-1773053024032-i1h2sot9": {
+						"areas": [
+							"a-1773053024033-ncnzrf4k"
+						],
+						"externalAreas": [],
+						"id": "v-1773053024032-i1h2sot9",
+						"lines": [
+							"l-1773053024032-apd48y44",
+							"l-1773053024032-gf1go6au"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": -696.400073742146,
+						"y": 152.400073742146
+					},
+					"v-1773053024032-isurzosu": {
+						"areas": [
+							"a-1773053024033-ncnzrf4k"
+						],
+						"externalAreas": [],
+						"id": "v-1773053024032-isurzosu",
+						"lines": [
+							"l-1773053024032-kovfok9k",
+							"l-1773053024032-mlmakuvn"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": 152.400073742146,
+						"y": -419.400073742146
+					},
+					"v-1773053024032-miszqxg7": {
+						"areas": [
+							"a-1773053024033-ncnzrf4k"
+						],
+						"externalAreas": [],
+						"id": "v-1773053024032-miszqxg7",
+						"lines": [
+							"l-1773053024032-gf1go6au",
+							"l-1773053024032-kovfok9k"
+						],
+						"misc": {
+
+						},
+						"name": "Vertex",
+						"properties": {
+
+						},
+						"prototype": "vertices",
+						"selected": false,
+						"type": "",
+						"visible": true,
+						"x": -696.400073742146,
+						"y": -419.400073742146
+					}
+				},
+				"visible": true
+			}
+		},
+		"meta": {
+			"export_timestamp": "2026-03-09T10:43:44.033Z",
+			"format_version": "2.1",
+			"generated_by": "Site_Area_Generator",
+			"session_id": 1773053024033.0
+		},
+		"pendingSnapshot": null,
+		"redoStack": [],
+		"selectedLayer": "layer-1",
+		"showAllFloors": false,
+		"suspendUndo": false,
+		"undoStack": [],
+		"unit": "ft-in",
+		"width": 1363.10769865368
+	},
+	"night_render": false,
+	"render_quality": "4K",
+	"target_coordinate_system": "right_handed_z_up",
+	"threejs_camera": {
+		"far": 450.0,
+		"fov": 60.0,
+		"near": 0.1,
+		"position": {
+			"x": -2.56649560745708,
+			"y": 10.3108302371734,
+			"z": 0.710486573005378
+		},
+		"rotation": {
+			"x": -1.32581766366803,
+			"y": 0.0,
+			"z": 0.0
+		},
+		"target": {
+			"x": -2.56649560745708,
+			"y": 0.609405235720066,
+			"z": -1.71486967735795
+		}
+	},
+	"timestamp": 1773135285842.0
+}
