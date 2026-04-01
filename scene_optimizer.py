@@ -5,7 +5,7 @@ import time
 from typing import Dict, List, Any, Set, Tuple, Optional
 
 # Configuration
-# Plan coordinates are in CM. Blender/Camera coordinates are in Meters.
+# Plan coordinates are in CM. Camera coordinates are in Meters.
 SCALE_METERS_TO_CM = 100.0
 
 # Culling logs folder
@@ -49,7 +49,7 @@ ITEM_RESCUE_TOLERANCE_CM = 85.0
 POSITION_TOLERANCE_CM = 1.0
 
 # ── Interior precision-culling constants ──────────────────────────────────────
-# Default FOV half-angle.  Read from blender_camera.lens / threejs_camera.fov
+# Default FOV half-angle.  Read from threejs_camera.fov
 # when available.  30° = 60° full FOV, typical architectural camera.
 DEFAULT_FOV_HALF_DEG = 30.0
 
@@ -1182,18 +1182,7 @@ class SceneOptimizer:
             cam_x = cam_y = cam_height_m = 0.0
             cam_source = "none"
 
-            if "blender_camera" in payload and "location" in payload["blender_camera"]:
-                loc          = payload["blender_camera"]["location"]
-                cam_x        = loc[0] * SCALE_METERS_TO_CM
-                cam_y        = -loc[1] * SCALE_METERS_TO_CM   # Blender Y → plan Y (flip)
-                cam_height_m = float(loc[2])
-                cam_source   = "blender_camera"
-                self.log(
-                    f"📍 Camera (Blender): {loc} → "
-                    f"Plan XZ: ({cam_x:.1f}, {cam_y:.1f}) cm | Height: {cam_height_m:.3f} m"
-                )
-
-            elif "threejs_camera" in payload and "position" in payload["threejs_camera"]:
+            if "threejs_camera" in payload and "position" in payload["threejs_camera"]:
                 pos          = payload["threejs_camera"]["position"]
                 cam_x        = pos.get("x", 0) * SCALE_METERS_TO_CM
                 cam_y        = pos.get("z", 0) * SCALE_METERS_TO_CM   # ThreeJS z → plan y direct
@@ -1209,42 +1198,20 @@ class SceneOptimizer:
                 return payload
 
             # ── 2b. Extract camera forward direction ──────────────────────────
-            # Priority: blender_target.location → threejs_camera.target → rz fallback
+            # Priority: threejs_camera.target → fallback
             cam_dir_x, cam_dir_y = 1.0, 0.0
             dir_source = "fallback"
 
-            bt = payload.get("blender_target")
-            if isinstance(bt, dict):
-                bt = bt.get("location")
-            if bt and len(bt) >= 2:
-                tx = float(bt[0]) * SCALE_METERS_TO_CM
-                ty = -float(bt[1]) * SCALE_METERS_TO_CM
+            tj = payload.get("threejs_camera", {})
+            tgt = tj.get("target")
+            if isinstance(tgt, dict) and "x" in tgt and "z" in tgt:
+                tx = float(tgt["x"]) * SCALE_METERS_TO_CM
+                ty = float(tgt["z"]) * SCALE_METERS_TO_CM
                 fdx, fdy = tx - cam_x, ty - cam_y
                 mag = math.hypot(fdx, fdy)
                 if mag > 1e-6:
                     cam_dir_x, cam_dir_y = fdx / mag, fdy / mag
-                    dir_source = "blender_target"
-            else:
-                tj = payload.get("threejs_camera", {})
-                tgt = tj.get("target")
-                if isinstance(tgt, dict) and "x" in tgt and "z" in tgt:
-                    tx = float(tgt["x"]) * SCALE_METERS_TO_CM
-                    ty = float(tgt["z"]) * SCALE_METERS_TO_CM
-                    fdx, fdy = tx - cam_x, ty - cam_y
-                    mag = math.hypot(fdx, fdy)
-                    if mag > 1e-6:
-                        cam_dir_x, cam_dir_y = fdx / mag, fdy / mag
-                        dir_source = "threejs_target"
-                else:
-                    bc = payload.get("blender_camera", {})
-                    rot = bc.get("rotation_euler")
-                    if rot and len(rot) >= 3:
-                        rz = float(rot[2])
-                        fdx, fdy = math.sin(rz), -math.cos(rz)
-                        mag = math.hypot(fdx, fdy)
-                        if mag > 1e-6:
-                            cam_dir_x, cam_dir_y = fdx / mag, fdy / mag
-                            dir_source = "rotation_euler"
+                    dir_source = "threejs_target"
 
             self.log(
                 f"📐 Camera dir: ({cam_dir_x:.3f},{cam_dir_y:.3f})  "
@@ -1257,18 +1224,13 @@ class SceneOptimizer:
                 cam_fov_half_deg = float(payload["interior_fov_half_deg"])
                 self.log(f"📐 FOV: payload override ±{cam_fov_half_deg:.0f}°")
             else:
-                bc = payload.get("blender_camera", {})
-                if bc.get("lens_unit") == "FOV" and bc.get("lens"):
-                    cam_fov_half_deg = float(bc["lens"]) / 2.0
-                    self.log(f"📐 FOV: blender lens={bc['lens']}° → ±{cam_fov_half_deg:.0f}°")
+                tj_fov = payload.get("threejs_camera", {}).get("fov")
+                if tj_fov:
+                    cam_fov_half_deg = float(tj_fov) / 2.0
+                    self.log(f"📐 FOV: threejs fov={tj_fov}° → ±{cam_fov_half_deg:.0f}°")
                 else:
-                    tj_fov = payload.get("threejs_camera", {}).get("fov")
-                    if tj_fov:
-                        cam_fov_half_deg = float(tj_fov) / 2.0
-                        self.log(f"📐 FOV: threejs fov={tj_fov}° → ±{cam_fov_half_deg:.0f}°")
-                    else:
-                        cam_fov_half_deg = DEFAULT_FOV_HALF_DEG
-                        self.log(f"📐 FOV: default ±{cam_fov_half_deg:.0f}°")
+                    cam_fov_half_deg = DEFAULT_FOV_HALF_DEG
+                    self.log(f"📐 FOV: default ±{cam_fov_half_deg:.0f}°")
 
             cam_view_dist_cm = float(payload.get("interior_view_dist_cm", DEFAULT_VIEW_DISTANCE_CM))
 
@@ -1306,7 +1268,6 @@ class SceneOptimizer:
                 "dir_y":          round(cam_dir_y, 4),
                 "fov_half_deg":   cam_fov_half_deg,
                 "view_dist_cm":   cam_view_dist_cm,
-                "raw_blender":    payload.get("blender_camera", {}).get("location"),
                 "raw_threejs":    payload.get("threejs_camera", {}).get("position"),
                 "is_top_view":    is_top_view,
                 "show_all":       show_all,

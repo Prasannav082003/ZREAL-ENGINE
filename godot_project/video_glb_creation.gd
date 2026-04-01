@@ -142,16 +142,6 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	var room_extent: Vector2  = room_info.get("extent",     Vector2(6.0, 6.0))
 	var room_ceiling_y: float = room_info.get("ceiling_y",  room_center.y + 2.8)
 
-	# ── Window / ambient OmniLight ─────────────────────────────────────────────
-	var window_light = OmniLight3D.new()
-	window_light.position     = Vector3(room_center.x, room_ceiling_y - 1.25, room_center.z)
-	window_light.light_energy = lighting["window_energy"]
-	window_light.omni_range   = max(room_extent.x, room_extent.y) * 2.1 + 6.0
-	window_light.light_color  = lighting["window_color"]
-	window_light.light_specular = 0.0
-	window_light.shadow_enabled = false
-	add_child(window_light)
-
 	# ── Primary Directional Light (Sun / Moon) ─────────────────────────────────
 	var dir_light = DirectionalLight3D.new()
 	dir_light.name = "Sun"
@@ -400,8 +390,6 @@ func _get_lighting_profile_settings() -> Dictionary:
 		"night":
 			return {
 				"sky_exr": "res://night.exr",
-				"window_energy": 0.03,
-				"window_color": Color(0.72, 0.80, 1.0),
 				"dir_energy": 0.06,
 				"dir_color": Color(0.55, 0.62, 0.90),
 				"sky_top_color": Color(0.01, 0.02, 0.05),
@@ -426,8 +414,6 @@ func _get_lighting_profile_settings() -> Dictionary:
 		"sunset":
 			return {
 				"sky_exr": "res://day.exr",
-				"window_energy": 0.18,
-				"window_color": Color(1.0, 0.76, 0.56),
 				"dir_energy": 1.65,
 				"dir_color": Color(1.0, 0.63, 0.38),
 				"sky_top_color": Color(0.20, 0.24, 0.42),
@@ -452,8 +438,6 @@ func _get_lighting_profile_settings() -> Dictionary:
 		_:
 			return {
 				"sky_exr": "res://day.exr",
-				"window_energy": 0.06,
-				"window_color": Color(1.0, 0.95, 0.85),
 				"dir_energy": 1.0,
 				"dir_color": Color(1.0, 0.96, 0.88),
 				"sky_top_color": Color(0.25, 0.40, 0.78),
