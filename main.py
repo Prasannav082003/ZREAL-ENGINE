@@ -309,7 +309,7 @@ def _resolve_texture_urls(texture_id, show_details=False):
 
 
 # --- RENDER QUEUE SYSTEM ---
-# Queue to hold render jobs (processes one at a time to avoid Unreal Engine conflicts)
+# Queue to hold render jobs (processes one at a time to avoid render conflicts)
 render_queue = queue.Queue()
 queue_lock = Lock()
 active_jobs = {}  # Track job status: {job_id: {"status": "queued|processing|completed|failed", "position": int}}
@@ -482,20 +482,8 @@ def _graceful_shutdown(signum, frame):
                     active_jobs[job_id]['message'] = 'Sorry, the rendering process was interrupted.'
 
     
-    # 4. Terminate Unreal Engine processes
-    print(f"🛑 Terminating Unreal Engine processes...")
-    try:
-        subprocess.run(
-            ['taskkill', '/F', '/IM', 'UnrealEditor.exe'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5
-        )
-        print(f"  ✓ Unreal Engine processes terminated")
-    except Exception as e:
-        print(f"  ⚠️  Could not terminate Unreal Engine: {e}")
-    
-    # 5. Signal queue worker to stop
+    # 4. Signal queue worker to stop
+    print(f"Stopping render worker queue...")
     try:
         render_queue.put(None)  # Poison pill
     except:
@@ -574,7 +562,7 @@ def _save_failed_input(job_data: dict, error_msg: str, attempt: int):
 def render_queue_worker():
     """
     Background worker thread that processes render jobs one at a time from the queue.
-    This prevents multiple Godot/Unreal Engine instances from running simultaneously.
+    This prevents multiple render instances from running simultaneously.
 
     RETRY PIPELINE:
       • Each job is attempted up to MAX_RENDER_ATTEMPTS (3) times.
@@ -779,9 +767,9 @@ print(f"{COLOR_GREEN}✅ Graceful shutdown handlers registered via FastAPI{COLOR
 print(f"   Press Ctrl+C to gracefully shutdown the server\n")
 
 # --- DATABASE INITIALIZATION ---
-# Automatically create tables if they don't exist in render_4k_blender database
+# Automatically create tables if they don't exist in the render database
 try:
-    print(f"📊 Initializing database: render_4k_blender")
+    print(f"📊 Initializing database: render database")
     print(f"   Database URL: {session.DATABASE_URL}")
     models.Base.metadata.create_all(bind=session.engine)
     print(f"✅ Database tables ready (created or already exist)")
@@ -825,17 +813,9 @@ CurrentUser = Annotated[models.User, Depends(auth_service.get_user_from_api_key)
 
 # --- CONFIGURATION ---
 # --- CONFIGURATION ---
-# Load paths from .env with fallbacks (though they must exist in .env ideally)
-UNREAL_RENDER_SCRIPT = os.getenv("UNREAL_RENDER_SCRIPT", r"C:\Z_Realty_Engine_2025\4k_Unreal_Engine_v1\unreal_script\render_script.py")
-UNREAL_VIDEO_RENDER_SCRIPT = os.getenv("UNREAL_VIDEO_RENDER_SCRIPT", r"C:\Zlendo2025\4k_Unreal_Engine_v1\ur_4krendervideo.py")
-BLENDER_EXECUTABLE_PATH = os.getenv("BLENDER_EXECUTABLE_PATH", r"C:/Program Files/Blender Foundation/Blender 4.4/blender.exe")
-CONVERTER_SCRIPT_PATH = os.getenv("CONVERTER_SCRIPT_PATH", "blender_converter.py")
-VIDEO_CONVERTER_SCRIPT_PATH = os.getenv("VIDEO_CONVERTER_SCRIPT_PATH", "blender_video_converter.py")
-
 ASSET_DOWNLOAD_DIR = os.getenv("ASSET_DOWNLOAD_DIR", "asset_downloads")
 GLB_OUTPUT_DIR = os.getenv("GLB_OUTPUT_DIR", "output_glb")
 RENDER_OUTPUT_DIR = os.getenv("RENDER_OUTPUT_DIR", "output_renders")
-UNREAL_SCRIPT_HISTORY_DIR = os.path.join(tempfile.gettempdir(), "zrealty_unreal_history")
 RUNTIME_DIR = os.path.join(tempfile.gettempdir(), "zrealty_backend_runtime")
 ASSET_URL_MAP_FILE = os.path.join(ASSET_DOWNLOAD_DIR, "asset_url_map.json")
 
@@ -868,7 +848,6 @@ GODOT_PROJECT_PATH = os.getenv("GODOT_PROJECT_PATH", os.path.join(SCRIPT_DIR, "g
 os.makedirs(ASSET_DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(GLB_OUTPUT_DIR, exist_ok=True)
 os.makedirs(RENDER_OUTPUT_DIR, exist_ok=True)
-os.makedirs(UNREAL_SCRIPT_HISTORY_DIR, exist_ok=True)
 os.makedirs(RUNTIME_DIR, exist_ok=True)
 
 # --- API & TOKENS ---
@@ -930,7 +909,6 @@ class AmbientLight(BaseModel):
 
 class GenerationPayload(BaseModel):
     floor_plan_data: str
-    blender_script: str
     fov: float = 45.0
     directional_light: DirectionalLight
     ambient_light: Optional[AmbientLight] = None
@@ -940,8 +918,6 @@ class GenerationPayload(BaseModel):
     hdri_filename: Optional[str] = "kloppenheim_06_puresky_4k.exr"
     # Camera data fields (optional, will be extracted from JSON)
     threejs_camera: Optional[Dict[str, Any]] = None
-    blender_camera: Optional[Dict[str, Any]] = None
-    blender_target: Optional[Dict[str, Any]] = None
     enable_status_updates: bool = True  # If True, send status updates to UploadGallerAI endpoint at each step
     
     class Config:
@@ -972,9 +948,6 @@ class VideoGenerationPayload(BaseModel):
     """Payload model for video rendering with camera animation data."""
     video_animation: Optional[VideoAnimation] = None  # Optional — if missing, Godot auto-generates a horizontal pan
     threejs_camera: Optional[Dict[str, Any]] = None
-    blender_camera: Optional[Dict[str, Any]] = None
-    blender_target: Optional[Dict[str, Any]] = None
-    blender_script: Optional[str] = None
     coordinate_system: Optional[str] = "right_handed_y_up"
     target_coordinate_system: Optional[str] = "right_handed_z_up"
     ambient_light: Optional[AmbientLight] = None
@@ -1001,10 +974,7 @@ def _validate_image_payload(payload: GenerationPayload) -> tuple[bool, str]:
         # Check required fields
         if not payload.floor_plan_data:
             return False, "Missing required field: floor_plan_data"
-        
-        if not payload.blender_script:
-            return False, "Missing required field: blender_script"
-        
+
         # Validate floor_plan_data is valid JSON
         try:
             if isinstance(payload.floor_plan_data, str):
@@ -1024,15 +994,7 @@ def _validate_image_payload(payload: GenerationPayload) -> tuple[bool, str]:
         # Validate aspect ratio
         if not payload.aspect_ratio:
             return False, "Missing required field: aspect_ratio"
-        
-        # Validate camera data (at least one camera format should be present)
-        has_camera = (
-            payload.threejs_camera is not None or 
-            payload.blender_camera is not None
-        )
-        if not has_camera:
-            return False, "Missing camera data: at least one of threejs_camera or blender_camera is required"
-        
+
         return True, ""
         
     except Exception as e:
@@ -1177,76 +1139,15 @@ def _check_glb_for_webp(filepath: str) -> bool:
 
 def _repair_glb_file(filepath: str):
     """
-    Calls repair_glb.py via Blender to strip WebP textures.
-    Overwrites the original file with the repaired version.
-    Logs progress and timing to a file.
+    Godot-only pipeline: WebP repair is not performed here.
+    This function logs the condition and leaves the file unchanged.
     """
-    start_repair = time.monotonic()
-    print(f"{COLOR_YELLOW}  🛠️  Repairing GLB (WebP detected):{COLOR_RESET} {os.path.basename(filepath)}")
-    
-    # We'll save to a temp file first, then overwrite
-    repaired_path = filepath + ".repaired.glb"
-    
-    # Path to the repair script (relative to main.py)
-    repair_script = os.path.abspath("repair_glb.py")
-    
-    cmd = [
-        BLENDER_EXECUTABLE_PATH,
-        "--background",
-        "--python", repair_script,
-        "--", filepath, repaired_path
-    ]
-    
     try:
-        startupinfo = None
-        if sys.platform == 'win32':
-             startupinfo = subprocess.STARTUPINFO()
-             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            check=False,
-            startupinfo=startupinfo,
-            timeout=int(os.getenv("ASSET_INDIVIDUAL_TIMEOUT_SECONDS", "150")) # Configurable timeout
-        )
-        
-        duration = time.monotonic() - start_repair
-        
-        # Log to a persistent file
-        log_file = os.path.join(ASSET_DOWNLOAD_DIR, "asset_repair.log")
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"\n--- REPAIR LOG [{datetime.now().isoformat()}] ---\n")
-            f.write(f"Asset: {filepath}\n")
-            f.write(f"Duration: {duration:.2f}s\n")
-            f.write(f"Return Code: {result.returncode}\n")
-            f.write(f"STDOUT:\n{result.stdout}\n")
-            f.write(f"STDERR:\n{result.stderr}\n")
-            f.write("-" * 40 + "\n")
-
-        if result.returncode == 0 and os.path.exists(repaired_path):
-            # Success! Replace original with repaired version
-            os.replace(repaired_path, filepath)
-            print(f"{COLOR_GREEN}  ✅ GLB Repaired successfully! {COLOR_YELLOW}({duration:.2f}s){COLOR_RESET}")
-            return True
-        else:
-            print(f"{COLOR_RED}  ❌ Repair failed (Code {result.returncode}) {COLOR_YELLOW}({duration:.2f}s):{COLOR_RESET} {result.stderr}")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        duration = time.monotonic() - start_repair
-        print(f"{COLOR_RED}  ❌ Repair timed out {COLOR_YELLOW}({duration:.2f}s){COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  ⚠️  WebP detected in GLB, but automatic repair is disabled in the Godot pipeline:{COLOR_RESET} {os.path.basename(filepath)}")
         return False
     except Exception as e:
         print(f"{COLOR_RED}  ❌ Repair error: {e}{COLOR_RESET}")
         return False
-    finally:
-        if os.path.exists(repaired_path):
-            try: os.remove(repaired_path)
-            except: pass
-
-
 
 def _convert_glb_path_to_url(glb_path: str) -> str:
     """
@@ -1284,7 +1185,7 @@ def _timed_download_worker(url: str, context: str = ""):
     # Check if URL is already cached
     cached_path = _get_cached_asset_path(cleaned_url)
     if cached_path:
-        # --- NEW: Also check cached GLBs for WebP repair ---
+        # --- Also check cached GLBs for unsupported WebP textures ---
         if cached_path.lower().endswith('.glb'):
             if _check_glb_for_webp(cached_path):
                 _repair_glb_file(cached_path)
@@ -1314,7 +1215,7 @@ def _timed_download_worker(url: str, context: str = ""):
             with open(local_path, "wb") as f:
                 f.write(response.content)
 
-            # --- NEW: GLB REPAIR STEP ---
+            # --- Optional GLB compatibility check ---
             if cleaned_url.lower().endswith('.glb'):
                 if _check_glb_for_webp(local_path):
                     _repair_glb_file(local_path)
@@ -2976,7 +2877,7 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
         print(f"🎬 STEP 3/5: Running Video Render...\n{'─'*60}")
         
         # Optimization (Optional, kept from original logic if needed, but handled by Godot's throughput mostly)
-        # Note: Godot can handle unoptimized scenes better than Unreal in some aspects, but culling is always good.
+        # Note: Godot can handle unoptimized scenes better in some cases, but culling is always good.
         # We reused the optimizer in previous code. Let's skip it for simplicity unless requested, as it was complex.
         # If needed, we can re-add `VideoSceneOptimizer` usage here.
         
@@ -3087,7 +2988,7 @@ async def generate_glb_with_camera(
     current_user: CurrentUser
 ):
     """
-    Generates a fast, low-resolution GLB for preview purposes (without camera - camera handled by Unreal).
+    Generates a fast, low-resolution GLB for preview purposes (without camera - camera handled by Godot).
     
     **Authentication Required:** This endpoint requires a valid API key in the X-API-Key header.
     """
@@ -3105,7 +3006,7 @@ async def generate_glb_with_camera(
         logger.end_process(success=True)
         return FileResponse(path=base_glb, media_type='model/gltf-binary', filename=f"model_{job_id}.glb")
     except subprocess.CalledProcessError as e:
-        error_msg = f"Blender error:\n{e.stdout}\n{e.stderr}"
+        error_msg = f"Godot render prep error:\n{e.stdout}\n{e.stderr}"
         logger.end_process(success=False, error=error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
     except Exception as e:
@@ -3123,7 +3024,7 @@ async def generate_4k_render_async(
 ):
     """
     Accepts a render job, adds it to the queue, and immediately returns a confirmation.
-    Jobs are processed ONE AT A TIME to prevent Unreal Engine conflicts.
+    Jobs are processed ONE AT A TIME to prevent render conflicts.
     
     **Authentication Required:** This endpoint requires a valid API key in the X-API-Key header.
     """
@@ -3188,7 +3089,7 @@ async def generate_4k_video_async(
 ):
     """
     Accepts a video render job with camera animation, adds it to the queue, and immediately returns a confirmation.
-    Jobs are processed ONE AT A TIME to prevent Unreal Engine conflicts.
+    Jobs are processed ONE AT A TIME to prevent render conflicts.
     
     **Authentication Required:** This endpoint requires a valid API key in the X-API-Key header.
     """

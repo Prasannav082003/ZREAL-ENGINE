@@ -25,6 +25,7 @@ import json
 import time
 import hashlib
 import logging
+from datetime import datetime
 import requests
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -571,4 +572,27 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    SCHEDULED_TIME = "00:00"  # 12:00 AM
+    last_run_date = ""
+
+    log.info("=" * 70)
+    log.info(f" SCHEDULER STARTING — Waiting for {SCHEDULED_TIME} daily trigger")
+    log.info("=" * 70)
+
+    while True:
+        now = datetime.now()
+        current_time = now.strftime("%H:%M")
+        today_date = now.strftime("%Y-%m-%d")
+
+        # Check if it's 12:00 AM and we haven't run it yet today
+        if current_time == SCHEDULED_TIME and last_run_date != today_date:
+            log.info("⏰ Time is 12:00 AM! Starting automatic asset download...")
+            try:
+                main()
+                last_run_date = today_date
+                log.info("✅ Daily download task finished. Waiting for next 12:00 AM...")
+            except Exception as e:
+                log.error(f"❌ Critical error during scheduled run: {e}")
+        
+        # Check every 10 seconds
+        time.sleep(10)

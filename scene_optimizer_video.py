@@ -5,7 +5,7 @@ import time
 from typing import Dict, List, Any, Set, Tuple, Optional
 
 # Configuration
-# Plan coordinates are in CM. Blender/Camera coordinates are in Meters.
+# Plan coordinates are in CM. Camera coordinates are in Meters.
 SCALE_METERS_TO_CM = 100.0
 
 # Culling logs folder
@@ -937,44 +937,6 @@ class VideoSceneOptimizer:
                         "fov_half_deg": fov_half_deg,
                     })
                     self.log(f"📍 Using static ThreeJS camera: ({cam_x:.1f}, {cam_y:.1f})")
-                elif "blender_camera" in payload and payload["blender_camera"] is not None:
-                    camera = payload["blender_camera"]
-                    loc = camera.get("location", [0, 0, 0])
-                    cam_x = float(loc[0]) * SCALE_METERS_TO_CM
-                    cam_y = -float(loc[1]) * SCALE_METERS_TO_CM
-                    dir_x, dir_y = 1.0, 0.0
-                    bt = payload.get("blender_target")
-                    if isinstance(bt, dict):
-                        bt = bt.get("location")
-                    if bt and len(bt) >= 2:
-                        tx = float(bt[0]) * SCALE_METERS_TO_CM
-                        ty = -float(bt[1]) * SCALE_METERS_TO_CM
-                        dx, dy = tx - cam_x, ty - cam_y
-                        mag = math.hypot(dx, dy)
-                        if mag > 1e-6:
-                            dir_x, dir_y = dx / mag, dy / mag
-                    else:
-                        rot = camera.get("rotation_euler")
-                        if rot and len(rot) >= 3:
-                            rz = float(rot[2])
-                            dx, dy = math.sin(rz), -math.cos(rz)
-                            mag = math.hypot(dx, dy)
-                            if mag > 1e-6:
-                                dir_x, dir_y = dx / mag, dy / mag
-                    fov_half_deg = payload_fov_half_deg
-                    if fov_half_deg is None:
-                        if camera.get("lens_unit") == "FOV" and camera.get("lens"):
-                            fov_half_deg = float(camera["lens"]) / 2.0
-                        else:
-                            fov_half_deg = DEFAULT_FOV_HALF_DEG
-                    camera_samples.append({
-                        "cam_x": cam_x,
-                        "cam_y": cam_y,
-                        "cam_dir_x": dir_x,
-                        "cam_dir_y": dir_y,
-                        "fov_half_deg": fov_half_deg,
-                    })
-                    self.log(f"📍 Using static Blender camera: ({cam_x:.1f}, {cam_y:.1f})")
                 else:
                     self.log("⚠️ No camera data found. Skipping optimization.")
                     return payload
