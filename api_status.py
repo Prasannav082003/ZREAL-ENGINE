@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from app.services import auth_service
 from app.database import models
 
-def create_status_router(active_jobs: Dict[str, Any], render_queue: queue.Queue, queue_lock: Lock, current_status: Dict[str, Any] = None):
+def create_status_router(active_jobs: Dict[str, Any], render_queue: queue.Queue, queue_lock: Lock, current_status: Dict[str, Any] = None, ai_render_queue: Optional[queue.Queue] = None):
     """
     Creates a router for read-only status endpoints.
     """
@@ -26,13 +26,13 @@ def create_status_router(active_jobs: Dict[str, Any], render_queue: queue.Queue,
         with queue_lock:
             # 1. Identify currently Active Job (Processing or Starting)
             active_job_data = None
+            active_ai_job_data = None
             is_busy = False
             
             # Search for a job that is currently processing
             for job_id, job_info in active_jobs.items():
                 if job_info.get('status') in ['processing', 'starting', 'rendering', 'encoding', 'uploading']:
-                    # Found active job
-                    active_job_data = {
+                    job_data = {
                         "id": job_id,
                         "status": job_info.get('status'),
                         "step": job_info.get('current_step', 'processing'),
@@ -40,20 +40,35 @@ def create_status_router(active_jobs: Dict[str, Any], render_queue: queue.Queue,
                         "message": job_info.get('message', ''),
                         "started_at": job_info.get('started_at'),
                         "project_id": job_info.get('project_id'),  # Extra useful info
-                        "gallery_id": job_info.get('gallery_id')
+                        "gallery_id": job_info.get('gallery_id'),
+                        "render_type": job_info.get('render_type', 'IMAGE')
                     }
+                    is_ai = job_info.get('type') == 'ai render' or job_info.get('render_type') == 'AI_RENDER'
+                    
+                    if is_ai:
+                        active_ai_job_data = job_data
+                        # If NO regular job is active, also expose AI job as the main active job
+                        # to ensure UIs that only look at 'active_job' still show progress.
+                        if not active_job_data:
+                            active_job_data = job_data
+                    else:
+                        active_job_data = job_data
+                    
                     is_busy = True
-                    break
+                    # Don't break - we want to find both if they exist
             
             # If not processing, check if queue has items (still busy technically)
             queue_length = render_queue.qsize()
-            if not is_busy and queue_length > 0:
+            ai_queue_length = ai_render_queue.qsize() if ai_render_queue else 0
+            total_queue_length = queue_length + ai_queue_length
+            
+            if not is_busy and total_queue_length > 0:
                 is_busy = True
                 # We could expose the next queued item here if we wanted
             
             # 2. Identify Last Job (for error reporting or history)
             last_job_data = None
-            if not active_job_data:
+            if not active_job_data and not active_ai_job_data:
                 # Find the most recently modified job that is completed or failed
                 finished_jobs = []
                 for job_id, job_info in active_jobs.items():
@@ -73,14 +88,18 @@ def create_status_router(active_jobs: Dict[str, Any], render_queue: queue.Queue,
                         "error": last_info.get('error'), # Only present if failed
                         "failed_at": last_info.get('failed_at'),
                         "completed_at": last_info.get('completed_at'),
-                        "message": last_info.get('message')
+                        "message": last_info.get('message'),
+                        "render_type": last_info.get('render_type', 'IMAGE')
                     }
 
         # Construct Response
         response_content = {
             "is_busy": is_busy,
             "queue_length": queue_length,
-            "active_job": active_job_data, # Null if not busy
+            "ai_queue_length": ai_queue_length,
+            "total_queue_length": total_queue_length,
+            "active_job": active_job_data, # Null if not busy (regular render)
+            "active_ai_job": active_ai_job_data, # Null if not busy (AI render)
             "last_job": last_job_data      # Useful for error checking when idle
         }
 
@@ -108,6 +127,7 @@ def create_status_router(active_jobs: Dict[str, Any], render_queue: queue.Queue,
             status_code=200,
             content={
                 "queue_size": render_queue.qsize(),
+                "ai_queue_size": ai_render_queue.qsize() if ai_render_queue else 0,
                 "active_jobs_count": len(active_jobs),
                 "jobs": jobs_list,
                 "server_status": "online"
