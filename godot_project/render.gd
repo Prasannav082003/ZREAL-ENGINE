@@ -334,6 +334,8 @@ func render_video(data, output_base_path):
 		var t = float(frame) / float(total_frames - 1) if total_frames > 1 else 0.0
 		cam.position = start_pos.lerp(end_pos, t)
 		setup_smart_point_lights(cam)
+		if _dir_light != null:
+			_orient_directional_light_from_windows(_dir_light)
 		
 		await _wait_frames(1)
 		
@@ -391,7 +393,7 @@ func setup_smart_point_lights(cam: Camera3D):
 		light.position = safe_pos
 		light.light_energy = config["energy"]
 		light.omni_range = config["range"]
-		light.shadow_enabled = true
+		light.shadow_enabled = false
 		# Neutral slightly warm light
 		light.light_color = Color(1.0, 0.98, 0.92)
 		# Add to group so we can find and clean them up

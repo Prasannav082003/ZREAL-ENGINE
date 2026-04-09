@@ -282,7 +282,13 @@ func _apply_keyframe(frame_idx: int):
 			var blended = cur_q.slerp(next_quat.normalized(), smooth_t)
 			cam.basis = Basis(blended)
 
-	# Fixed lights are set up once — no per-frame update needed
+	# Dynamic sunlight: update sun orientation to favor windows in this frame's view
+	if _dir_light != null:
+		var cam_pose = {
+			"position": cam.position,
+			"target": cam.position - cam.basis.z * 5.0
+		}
+		_orient_directional_light_from_windows(_dir_light, cam_pose)
 
 # ─────────────────────────────────────────────────────────────────
 # Smooth Camera Helpers
