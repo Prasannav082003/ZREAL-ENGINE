@@ -30,6 +30,30 @@ import asyncio
 import logging
 from dotenv import load_dotenv
 
+# AI Render Imports
+try:
+    import torch
+    from pathlib import Path
+    from PIL import Image, ImageOps
+    import io
+    from diffusers import (
+        AutoencoderKL,
+        ControlNetModel,
+        DPMSolverMultistepScheduler,
+        StableDiffusionControlNetImg2ImgPipeline,
+    )
+    from huggingface_hub import hf_hub_download
+    from controlnet_aux import CannyDetector
+    AI_LIBRARIES_INSTALLED = True
+    AI_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    # Set torch dtype for inference (use float16 on GPU for speed/memory, float32 on CPU)
+    AI_TORCH_DTYPE = torch.float16 if AI_DEVICE == "cuda" else torch.float32
+except ImportError:
+    AI_LIBRARIES_INSTALLED = False
+    AI_DEVICE = "cpu"
+    AI_TORCH_DTYPE = None
+    print("\033[93m⚠️  Warning: AI render libraries (diffusers, torch, Pillow, etc.) not installed. AI rendering will be disabled.\033[0m")
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -48,6 +72,63 @@ ASSETS_AND_TEXTURE_API_KEY = "zrsk_dev_41fbb72c9a0e5f1c8d2a9b6d4e8f3c2"
 ASSETS_AND_TEXTURE_API_HEADER_NAME = "ZRealtyServiceApiKey"
 ASSET_ENDPOINT = "http://216.48.182.24:4050/api/v1/AssetMaster/GetAllAssets3D"
 TEXTURE_ENDPOINT = "http://216.48.182.24:4050/api/v1/TextureMaster/GetAllTextureLibraries"
+
+# --- AI RENDER CONFIGURATION ---
+BASE_DIR = Path(__file__).resolve().parent
+AI_INPUT_DIR = BASE_DIR / "uploads" / "ai-render" / "input"
+AI_OUTPUT_DIR = BASE_DIR / "uploads" / "ai-render" / "output"
+AI_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+AI_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+MODEL_PATH = Path(os.getenv("AI_RENDER_MODEL_PATH", str(BASE_DIR / "Realistic_Vision_V6.0_B1_noVAE" / "realisticVisionV60B1_v60B1VAE.safetensors")))
+VAE_PATH = Path(os.getenv("AI_RENDER_VAE_PATH", str(BASE_DIR / "Realistic_Vision_V6.0_B1_noVAE" / "vaeFtMse840000EmaPruned_vaeFtMse840k.safetensors")))
+MODEL_REPO_ID = os.getenv("AI_RENDER_MODEL_REPO_ID", "isaiahbjork/Realistic_Vision_V6.0_B1_noVAE")
+MODEL_FILENAME = os.getenv("AI_RENDER_MODEL_FILENAME", "realisticVisionV60B1_v60B1VAE.safetensors")
+VAE_REPO_ID = os.getenv("AI_RENDER_VAE_REPO_ID", "Eata/Vae_0")
+VAE_FILENAME = os.getenv("AI_RENDER_VAE_FILENAME", "vae-ft-mse-840000-ema-pruned.safetensors")
+CONTROLNET_MODEL_ID = os.getenv("AI_RENDER_CONTROLNET_MODEL", "lllyasviel/sd-controlnet-canny")
+
+AI_RENDER_MAX_INPUT_SIZE = int(os.getenv("AI_RENDER_MAX_INPUT_SIZE", "1024"))
+AI_RENDER_TARGET_LONG_SIDE = int(os.getenv("AI_RENDER_TARGET_LONG_SIDE", "3840"))
+AI_RENDER_STEPS = int(os.getenv("AI_RENDER_STEPS", "46"))
+AI_RENDER_GUIDANCE_SCALE = float(os.getenv("AI_RENDER_GUIDANCE_SCALE", "8"))
+AI_RENDER_CONTROL_SCALE = float(os.getenv("AI_RENDER_CONTROL_SCALE", "1.0"))
+AI_RENDER_DENOISING_STRENGTH = float(os.getenv("AI_RENDER_DENOISING_STRENGTH", "0.5"))
+AI_RENDER_CLIP_SKIP = int(os.getenv("AI_RENDER_CLIP_SKIP", "2"))
+AI_RENDER_MAX_FILE_MB = float(os.getenv("AI_RENDER_MAX_FILE_MB", "20"))
+AI_STORAGE_CONNECTION_STRING = (
+    os.getenv("AI_AZURE_STORAGE_CONNECTION_STRING", "").strip('"')
+    or os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip('"')
+)
+AI_BLOB_CONTAINER = (
+    os.getenv("AI_AZURE_CONTAINER_NAME", "").strip()
+    or os.getenv("AI_RENDER_BLOB_CONTAINER", "").strip()
+    or "ai-images"
+)
+AI_STATUS_RENDER_TYPE = os.getenv("AI_RENDER_TYPE", "AI_RENDER")
+
+AI_DEFAULT_PROMPT = (
+    "photorealistic interior photograph of the same room, same layout, same furniture, same objects, "
+    "same camera angle, realistic global illumination, natural shadows, crisp textures, DSLR interior photography, "
+    "daylight only through the window, cloudy sky outside, tall mature trees outside the window, "
+    "sunlight filtered through tree leaves, subtle volumetric light rays, existing ceiling lamps physically lit"
+)
+AI_DEFAULT_NEGATIVE_PROMPT = (
+    "emissive walls, glowing furniture, glowing photo frame, glowing window, fake light sources, "
+    "cartoon, cgi, render, stylized, unreal engine look, distorted geometry, warped, blurry, soft focus, "
+    "changed layout, new furniture, removed objects, modified colors, flat lighting, studio lighting, overexposed"
+)
+AI_PROMPT = os.getenv("AI_RENDER_PROMPT", AI_DEFAULT_PROMPT).strip()
+AI_NEGATIVE_PROMPT = os.getenv("AI_RENDER_NEGATIVE_PROMPT", AI_DEFAULT_NEGATIVE_PROMPT).strip()
+
+
+# AI Render Globals
+AI_PIPELINE_LOCK = Lock()
+AI_MODEL_SETUP_LOCK = Lock()
+AI_PIPELINE = None
+AI_CANNY_DETECTOR = None
+ai_render_queue = queue.Queue()
+ai_worker_thread = None
 
 # Global Cache for Master Data
 _CACHED_ASSETS_MAP = {}
@@ -379,6 +460,80 @@ def _update_global_status(job_id=None, status=None, step=None, progress=None, me
         # Reset
         CURRENT_STATUS["is_busy"] = False
         CURRENT_STATUS["active_job"] = None
+
+
+def _build_ai_job_snapshot(job_id: str, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a monitor-friendly snapshot of an AI render job."""
+    status = str(job.get("status") or "queued").lower()
+    progress = int(job.get("progress", 0) or 0)
+    queued_at = job.get("queued_at")
+    started_at = job.get("started_at")
+    completed_at = job.get("completed_at")
+    failed_at = job.get("failed_at")
+    details = job.get("details") or {}
+    if not isinstance(details, dict):
+        details = {"raw": details}
+
+    return {
+        "job_id": job_id,
+        "type": job.get("type") or job.get("render_type") or "ai render",
+        "display_type": job.get("display_type") or "ai render",
+        "render_type": job.get("render_type") or "AI_RENDER",
+        "status": status,
+        "project_id": job.get("project_id", 0),
+        "gallery_id": job.get("gallery_id", 0),
+        "user_id": job.get("user_id", 0),
+        "progress": progress,
+        "message": job.get("message") or "AI render job queued.",
+        "current_step": job.get("current_step") or ("completed" if status == "completed" else status),
+        "queued_at": queued_at,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "failed_at": failed_at,
+        "error": job.get("error"),
+        "image_url": job.get("image_url"),
+        "output_filename": job.get("output_filename"),
+        "input_filename": job.get("input_filename"),
+        "details": details,
+        "queue_source": job.get("queue_source", "External AI Engine"),
+        "is_ai_render": True,
+        "engine_name": "External 4K + AI Engine",
+        "engine_url": os.getenv("AI_RENDER_ENGINE_URL", "embedded://external-4k-ai-main"),
+        "estimated_eta_minutes": job.get("estimated_eta_minutes"),
+        "estimated_wait_minutes": job.get("estimated_wait_minutes"),
+        "completed": status == "completed",
+        "failed": status in {"failed", "error"},
+    }
+
+
+def _get_ai_jobs_snapshot() -> List[Dict[str, Any]]:
+    with queue_lock:
+        snapshot = [
+            _build_ai_job_snapshot(job_id, dict(job))
+            for job_id, job in active_jobs.items()
+        ]
+
+    def _sort_key(item: Dict[str, Any]):
+        status_rank = 0 if item["status"] in {"processing", "queued"} else 1
+        queued_at = item.get("queued_at") or ""
+        started_at = item.get("started_at") or ""
+        return (status_rank, queued_at, started_at, item["job_id"])
+
+    snapshot.sort(key=_sort_key)
+
+    queued = sum(1 for job in snapshot if job["status"] == "queued")
+    processing = sum(1 for job in snapshot if job["status"] == "processing")
+    completed = sum(1 for job in snapshot if job["status"] == "completed")
+    failed = sum(1 for job in snapshot if job["status"] in {"failed", "error"})
+    queued_jobs = [job for job in snapshot if job["status"] == "queued"]
+
+    for idx, job in enumerate(queued_jobs, start=1):
+        job["queue_position"] = idx
+        if job.get("estimated_eta_minutes") is None:
+            job["estimated_eta_minutes"] = round(max(1.0, idx * 2.0), 1)
+        job["estimated_wait_minutes"] = job["estimated_eta_minutes"]
+
+    return snapshot
 
 
 def _graceful_shutdown(signum, frame):
@@ -757,6 +912,316 @@ def render_queue_worker():
 queue_worker_thread = Thread(target=render_queue_worker, daemon=True)
 queue_worker_thread.start()
 
+# --- AI RENDER UTILITY FUNCTIONS ---
+
+def _ensure_ai_model_present() -> Path:
+    if not AI_LIBRARIES_INSTALLED: return MODEL_PATH
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if MODEL_PATH.exists():
+        return MODEL_PATH
+    with AI_MODEL_SETUP_LOCK:
+        if MODEL_PATH.exists():
+            return MODEL_PATH
+        print(f"{COLOR_YELLOW}AI render model not found locally. Downloading it now...{COLOR_RESET}")
+        try:
+            downloaded_path = Path(
+                hf_hub_download(
+                    repo_id=MODEL_REPO_ID,
+                    filename=MODEL_FILENAME,
+                    local_dir=str(MODEL_PATH.parent),
+                    local_dir_use_symlinks=False,
+                )
+            )
+        except Exception as exc:
+            print(f"{COLOR_RED}Failed to download AI render model: {exc}{COLOR_RESET}")
+            return MODEL_PATH
+        if downloaded_path != MODEL_PATH:
+            if MODEL_PATH.exists():
+                MODEL_PATH.unlink()
+            downloaded_path.replace(MODEL_PATH)
+        print(f"{COLOR_GREEN}AI render model ready: {MODEL_PATH}{COLOR_RESET}")
+        return MODEL_PATH
+
+def _ensure_ai_vae_present() -> Path:
+    if not AI_LIBRARIES_INSTALLED: return VAE_PATH
+    VAE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if VAE_PATH.exists():
+        return VAE_PATH
+    with AI_MODEL_SETUP_LOCK:
+        if VAE_PATH.exists():
+            return VAE_PATH
+        print(f"{COLOR_YELLOW}AI render VAE not found locally. Downloading it now...{COLOR_RESET}")
+        try:
+            downloaded_path = Path(
+                hf_hub_download(
+                    repo_id=VAE_REPO_ID,
+                    filename=VAE_FILENAME,
+                    local_dir=str(VAE_PATH.parent),
+                    local_dir_use_symlinks=False,
+                )
+            )
+        except Exception as exc:
+            print(f"{COLOR_RED}Failed to download AI render VAE: {exc}{COLOR_RESET}")
+            return VAE_PATH
+        if downloaded_path != VAE_PATH:
+            if VAE_PATH.exists():
+                VAE_PATH.unlink()
+            downloaded_path.replace(VAE_PATH)
+        print(f"{COLOR_GREEN}AI render VAE ready: {VAE_PATH}{COLOR_RESET}")
+        return VAE_PATH
+
+def _load_ai_pipeline():
+    global AI_PIPELINE, AI_CANNY_DETECTOR, AI_DEVICE, AI_TORCH_DTYPE
+    if not AI_LIBRARIES_INSTALLED: return None
+    if AI_PIPELINE is not None and AI_CANNY_DETECTOR is not None:
+        return AI_PIPELINE
+    
+    with AI_PIPELINE_LOCK:
+        if AI_PIPELINE is not None and AI_CANNY_DETECTOR is not None:
+            return AI_PIPELINE
+        
+        # Dynamic re-check for CUDA availability (sometimes needed in multi-process/uvicorn environments)
+        if AI_DEVICE == "cpu" and torch.cuda.is_available():
+            print(f"{COLOR_YELLOW}  ↳ GPU detected during late initialization. Switching to CUDA...{COLOR_RESET}")
+            AI_DEVICE = "cuda"
+            AI_TORCH_DTYPE = torch.float16
+
+        _ensure_ai_model_present()
+        _ensure_ai_vae_present()
+        print(f"{COLOR_BLUE}--- AI Pipeline Initialization Details ---{COLOR_RESET}")
+        print(f"    PyTorch Version: {torch.__version__}")
+        print(f"    Target Device: {AI_DEVICE} / Dtype: {AI_TORCH_DTYPE}")
+        print(f"    CUDA Available (Runtime): {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"    Device Name: {torch.cuda.get_device_name(0)}")
+        print(f"{COLOR_BLUE}----------------------------------------{COLOR_RESET}")
+        
+        controlnet = ControlNetModel.from_pretrained(CONTROLNET_MODEL_ID, torch_dtype=AI_TORCH_DTYPE).to(AI_DEVICE)
+        vae = AutoencoderKL.from_single_file(str(VAE_PATH), torch_dtype=AI_TORCH_DTYPE).to(AI_DEVICE)
+        pipeline = StableDiffusionControlNetImg2ImgPipeline.from_single_file(
+            str(MODEL_PATH),
+            controlnet=controlnet,
+            vae=vae,
+            torch_dtype=AI_TORCH_DTYPE,
+            safety_checker=None,
+            local_files_only=False,
+        )
+        # Force move to device
+        pipeline = pipeline.to(AI_DEVICE)
+        pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipeline.scheduler.config,
+            algorithm_type="dpmsolver++",
+            solver_order=2,
+            use_karras_sigmas=True,
+        )
+        if AI_DEVICE == "cuda":
+            try:
+                # Optimized GPU settings
+                pipeline.enable_xformers_memory_efficient_attention()
+                # Optional: Memory efficiency mode for lower VRAM
+                # pipeline.enable_model_cpu_offload() 
+                pipeline.enable_vae_slicing()
+                pipeline.enable_vae_tiling()
+            except Exception:
+                pass
+        AI_CANNY_DETECTOR = CannyDetector()
+        AI_PIPELINE = pipeline
+        return AI_PIPELINE
+
+def _resize_ai_for_generation(image: "Image.Image", max_size: int = AI_RENDER_MAX_INPUT_SIZE) -> "Image.Image":
+    width, height = image.size
+    scale = min(max_size / max(width, height), 1.0)
+    resized_width = max(8, (int(width * scale) // 8) * 8)
+    resized_height = max(8, (int(height * scale) // 8) * 8)
+    return image.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
+
+def _prepare_ai_control_image(image: "Image.Image") -> "Image.Image":
+    control_image = AI_CANNY_DETECTOR(image)
+    if not isinstance(control_image, Image.Image):
+        control_image = Image.fromarray(control_image)
+    control_image = control_image.convert("RGB")
+    if control_image.size != image.size:
+        control_image = control_image.resize(image.size, Image.Resampling.NEAREST)
+    return control_image
+
+def _resize_ai_for_delivery(image: "Image.Image", target_long_side: int = AI_RENDER_TARGET_LONG_SIDE) -> "Image.Image":
+    width, height = image.size
+    long_side = max(width, height)
+    if long_side >= target_long_side:
+        return image
+    scale = target_long_side / long_side
+    output_width = max(8, int(width * scale))
+    output_height = max(8, int(height * scale))
+    return image.resize((output_width, output_height), Image.Resampling.LANCZOS)
+
+def _render_image_ai(source_image: "Image.Image") -> "Image.Image":
+    pipeline = _load_ai_pipeline()
+    if AI_CANNY_DETECTOR is None:
+        raise RuntimeError("AI render detector not initialized")
+    prepared_image = _resize_ai_for_generation(ImageOps.exif_transpose(source_image.convert("RGB")))
+    control_image = _prepare_ai_control_image(prepared_image)
+    with AI_PIPELINE_LOCK:
+        rendered = pipeline(
+            prompt=AI_PROMPT,
+            negative_prompt=AI_NEGATIVE_PROMPT,
+            image=prepared_image,
+            control_image=control_image,
+            height=prepared_image.height,
+            width=prepared_image.width,
+            strength=AI_RENDER_DENOISING_STRENGTH,
+            num_inference_steps=AI_RENDER_STEPS,
+            guidance_scale=AI_RENDER_GUIDANCE_SCALE,
+            controlnet_conditioning_scale=AI_RENDER_CONTROL_SCALE,
+            clip_skip=AI_RENDER_CLIP_SKIP,
+        ).images[0]
+    return _resize_ai_for_delivery(rendered)
+
+def _upload_ai_to_blob(file_path: str, blob_container: Optional[str] = None) -> Optional[str]:
+    container_name = (
+        blob_container
+        or os.getenv("AI_AZURE_CONTAINER_NAME", "").strip()
+        or os.getenv("AI_RENDER_BLOB_CONTAINER", "").strip()
+        or os.getenv("AZURE_CONTAINER_NAME", "render-images")
+    )
+    conn_str = AI_STORAGE_CONNECTION_STRING
+
+    if conn_str:
+        try:
+            from azure.storage.blob import BlobServiceClient, ContentSettings
+        except ImportError as e:
+            print(f"{COLOR_YELLOW}⚠️  Azure SDK not installed: {e}. Falling back to SAS upload.{COLOR_RESET}")
+        else:
+            try:
+                filename = os.path.basename(file_path)
+                with open(file_path, "rb") as f:
+                    data = f.read()
+                blob_service_client = BlobServiceClient.from_connection_string(conn_str)
+                blob_client = blob_service_client.get_blob_client(container=container_name, blob=filename)
+                blob_client.upload_blob(data, overwrite=True, content_settings=ContentSettings(content_type="image/png"))
+                return blob_client.url
+            except Exception as e:
+                print(f"{COLOR_YELLOW}⚠️  Azure SDK upload failed: {e}. Falling back to SAS upload.{COLOR_RESET}")
+
+    if SAS_TOKEN:
+        uploaded_url = _upload_to_blob_storage(file_path, blob_container=container_name)
+        if uploaded_url:
+            return uploaded_url
+
+    print(f"{COLOR_RED}AI Blob upload failed: no Azure upload path available. Set AI_AZURE_STORAGE_CONNECTION_STRING (or AZURE_STORAGE_CONNECTION_STRING) or AZURE_SAS_TOKEN.{COLOR_RESET}")
+    return None
+
+
+def _background_ai_render_task_main(job_data: dict):
+    job_id = job_data["job_id"]
+    try:
+        with queue_lock:
+            if job_id in active_jobs:
+                active_jobs[job_id]["status"] = "processing"
+                active_jobs[job_id]["progress"] = 20
+                active_jobs[job_id]["render_type"] = AI_STATUS_RENDER_TYPE
+                active_jobs[job_id]["type"] = "ai render"
+                active_jobs[job_id]["current_step"] = "rendering"
+                active_jobs[job_id]["started_at"] = datetime.now().isoformat()
+        _send_status_update(
+            project_id=job_data["project_id"],
+            gallery_id=job_data["gallery_id"],
+            user_id=job_data["user_id"],
+            job_id=job_id,
+            status="processing",
+            step="rendering",
+            progress=20,
+            message="AI render is processing your image.",
+            render_type=AI_STATUS_RENDER_TYPE,
+            wait_for_delivery=True
+        )
+        source_image = Image.open(job_data["input_path"]).convert("RGB")
+        rendered_image = _render_image_ai(source_image)
+        rendered_image.save(job_data["output_path"], format="PNG")
+        
+        with queue_lock:
+            if job_id in active_jobs:
+                active_jobs[job_id]["progress"] = 80
+        _send_status_update(
+            project_id=job_data["project_id"],
+            gallery_id=job_data["gallery_id"],
+            user_id=job_data["user_id"],
+            job_id=job_id,
+            status="processing",
+            step="uploading",
+            progress=80,
+            message="Uploading rendered image.",
+            render_type=AI_STATUS_RENDER_TYPE,
+            wait_for_delivery=True
+        )
+        blob_url = _upload_ai_to_blob(job_data["output_path"], blob_container=AI_BLOB_CONTAINER)
+        if not blob_url: raise RuntimeError("Blob upload failed")
+        
+        with queue_lock:
+            if job_id in active_jobs:
+                active_jobs[job_id]["status"] = "completed"
+                active_jobs[job_id]["progress"] = 100
+                active_jobs[job_id]["image_url"] = blob_url
+                active_jobs[job_id]["current_step"] = "completed"
+                active_jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        _send_status_update(
+            project_id=job_data["project_id"],
+            gallery_id=job_data["gallery_id"],
+            user_id=job_data["user_id"],
+            job_id=job_id,
+            status="completed",
+            step="completed",
+            progress=100,
+            message="AI render completed successfully.",
+            blob_url=blob_url,
+            render_type=AI_STATUS_RENDER_TYPE,
+            wait_for_delivery=True,
+            details={
+                "image_url": blob_url,
+                "output_filename": os.path.basename(job_data["output_path"]),
+                "render_type": AI_STATUS_RENDER_TYPE,
+            }
+        )
+    except Exception as e:
+        error_msg = str(e)
+        with queue_lock:
+            if job_id in active_jobs:
+                active_jobs[job_id]["status"] = "failed"
+                active_jobs[job_id]["error"] = error_msg
+                active_jobs[job_id]["current_step"] = "failed"
+                active_jobs[job_id]["failed_at"] = datetime.now().isoformat()
+        _send_status_update(
+            project_id=job_data["project_id"],
+            gallery_id=job_data["gallery_id"],
+            user_id=job_data["user_id"],
+            job_id=job_id,
+            status="error",
+            step="error",
+            progress=0,
+            message=f"AI render failed: {error_msg}",
+            render_type=AI_STATUS_RENDER_TYPE,
+            wait_for_delivery=True
+        )
+
+def ai_render_worker():
+    print(f"{COLOR_GREEN}AI Render Worker Started{COLOR_RESET}")
+    while not is_shutting_down:
+        try:
+            job_data = ai_render_queue.get(timeout=1)
+            if job_data is None: break
+            _background_ai_render_task_main(job_data)
+            ai_render_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"{COLOR_RED}AI worker error: {e}{COLOR_RESET}")
+
+def _ensure_ai_worker_started():
+    global ai_worker_thread
+    if ai_worker_thread and ai_worker_thread.is_alive():
+        return
+    ai_worker_thread = Thread(target=ai_render_worker, daemon=True, name="ai-render-worker")
+    ai_worker_thread.start()
+
 # --- GRACEFUL SHUTDOWN HANDLERS ---
 # We use FastAPI's shutdown event instead of manual signal handling
 # to avoid conflicts with Uvicorn's signal handling.
@@ -795,6 +1260,13 @@ class EndpointFilter(logging.Filter):
 async def configure_logging():
     # Filter out /queue-status endpoint logs from uvicorn access logger
     logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+    
+    # AI Render Setup
+    if AI_LIBRARIES_INSTALLED:
+        print(f"{COLOR_BLUE}--- Initializing AI Render System ---{COLOR_RESET}")
+        Thread(target=_ensure_ai_model_present, daemon=True).start()
+        Thread(target=_ensure_ai_vae_present, daemon=True).start()
+        _ensure_ai_worker_started()
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -853,9 +1325,22 @@ os.makedirs(RUNTIME_DIR, exist_ok=True)
 # --- API & TOKENS ---
 # --- API & TOKENS ---
 SAS_TOKEN = os.getenv("AZURE_SAS_TOKEN", "sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-11-18T20:34:53Z&st=2025-09-12T12:19:53Z&spr=https,http&sig=KNQs7rhe81AeQfnd%2BS4QMPWWo55VbNICTufFVYe5KhA%3D")
-UPLOAD_API_URL = os.getenv("UPLOAD_API_URL", "http://216.48.178.133:4050/api/v1/Project/UploadProjectGalleryAI")
-VIDEO_UPLOAD_API_URL = os.getenv("VIDEO_UPLOAD_API_URL", "http://216.48.178.133:4050/api/v1/Project/UploadProjectVideoAI")
-MONITORING_API_URL = os.getenv("MONITORING_API_URL", "") # Optional monitoring endpoint
+UPLOAD_API_URL = (
+    os.getenv("UPLOAD_API_URL", "").strip()
+    or os.getenv("AI_CALLBACK_API_URL", "").strip()
+    or "http://216.48.178.133:4050/api/v1/Project/UploadProjectGalleryAI"
+)
+VIDEO_UPLOAD_API_URL = (
+    os.getenv("VIDEO_UPLOAD_API_URL", "").strip()
+    or os.getenv("AI_VIDEO_CALLBACK_API_URL", "").strip()
+    or "http://216.48.178.133:4050/api/v1/Project/UploadProjectVideoAI"
+)
+# Internal monitor callback URL. Keep legacy names supported because the .env
+# file in this repo uses MONITOR_UPLOAD_API_URL / MONITOR_VIDEO_UPLOAD_API_URL.
+MONITORING_API_URL = (
+    os.getenv("MONITOR_UPLOAD_API_URL", "").strip()
+    or os.getenv("MONITORING_API_URL", "").strip()
+)
 API_KEY = os.getenv("API_KEY", "")
 USE_API_KEY = os.getenv("USE_API_KEY", "false").lower() == "true"
 
@@ -883,7 +1368,7 @@ from api_status import create_status_router
 from scene_optimizer import SceneOptimizer, CULLING_LOGS_DIR
 from scene_optimizer_video import VideoSceneOptimizer
 
-status_router = create_status_router(active_jobs, render_queue, queue_lock, CURRENT_STATUS)
+status_router = create_status_router(active_jobs, render_queue, queue_lock, CURRENT_STATUS, ai_render_queue=ai_render_queue)
 app.include_router(status_router)
 
 # --- DATA MODELS (SCHEMA) ---
@@ -2300,7 +2785,8 @@ def _send_status_update(
     blob_url: Optional[str] = None,
     details: Optional[Dict[str, Any]] = None,
     logger: Optional[RenderLogger] = None,
-    api_endpoint: Optional[str] = None
+    api_endpoint: Optional[str] = None,
+    wait_for_delivery: bool = False
 ) -> bool:
     """
     Sends status update to UploadGallerAI endpoint in a NON-BLOCKING background thread.
@@ -2311,8 +2797,11 @@ def _send_status_update(
     - 3 = Rejected (for exceptional handling/validation failures)
     - 4 = Error (for errors/exceptions)
     
+    If wait_for_delivery is True, the status payload is sent synchronously so
+    the engine cannot reorder the AI job's in-progress and completed updates.
+
     Returns:
-        True immediately (queued successfully)
+        True immediately (queued successfully) unless wait_for_delivery is used.
     """
     
     # 1. Update active_jobs dictionary details IMMEDIATELY (synchronous)
@@ -2368,12 +2857,16 @@ def _send_status_update(
                 "Timestamp": datetime.now().isoformat()
             }
             
+            payload_details = dict(details or {})
             if blob_url:
                 url_field_name = "VideoUrl" if render_type == "VIDEO" else "ImageUrl"
                 status_payload_form[url_field_name] = blob_url
-            
-            if details:
-                status_payload_form["Details"] = json.dumps(details)
+                payload_details.setdefault("image_url", blob_url)
+                payload_details.setdefault("output_url", blob_url)
+                payload_details.setdefault("blob_url", blob_url)
+
+            if payload_details:
+                status_payload_form["Details"] = json.dumps(payload_details)
                 
             # Determine endpoint
             upload_url = api_endpoint if api_endpoint else (VIDEO_UPLOAD_API_URL if render_type == "VIDEO" else UPLOAD_API_URL)
@@ -2383,27 +2876,68 @@ def _send_status_update(
             print(f"   Payload: {json.dumps(status_payload_form, default=str)}")
             
             request_start_time = time.monotonic()
-            
-            # Send request to Primary API
-            files = {'UploadImage': (None, '')}
-            
+
             # Add API Key headers if enabled
             headers = {}
             if USE_API_KEY and API_KEY:
                 headers["ZRealtyServiceApiKey"] = API_KEY
                 # Also try adding it as a query param just in case, or stick to header?
                 # Sticking to header simply.
-            
-            response = requests.post(upload_url, data=status_payload_form, files=files, headers=headers, verify=False, timeout=60)
-            
+
+            # Always notify the local monitor first so the queue/UI can complete
+            # even if the public callback endpoint is slow or unavailable.
+            # If the monitor accepts the update, it becomes the single sender to
+            # the public API. That avoids duplicate or out-of-order status writes
+            # to UploadProjectGalleryAI / UploadProjectVideoAI.
+            files = {'UploadImage': (None, '')}
+            monitor_sent = False
+            if MONITORING_API_URL:
+                try:
+                    print(f"   📡 Broadcasting to Monitor: {MONITORING_API_URL}")
+                    monitor_response = None
+                    for attempt in range(1, 4):
+                        try:
+                            monitor_response = requests.post(
+                                MONITORING_API_URL,
+                                data=status_payload_form,
+                                files=files,
+                                headers=headers,
+                                verify=False,
+                                timeout=10,
+                            )
+                            print(f"   📡 Monitor broadcast response: {monitor_response.status_code} (attempt {attempt}/3)")
+                            if monitor_response.status_code in [200, 201, 202]:
+                                monitor_sent = True
+                                break
+                        except Exception as monitor_exc:
+                            print(f"   ⚠️ Monitor broadcast attempt {attempt}/3 failed: {monitor_exc}")
+                            time.sleep(1.5 * attempt)
+                except Exception as mon_e:
+                    print(f"   ⚠️ Monitoring broadcast failed: {mon_e}")
+
+            if monitor_sent:
+                request_duration = time.monotonic() - request_start_time
+                if logger:
+                    logger.add_status_update(step, f"{status_name}({status_code})", request_duration, 200)
+                print(f"{COLOR_GREEN}   ✓ Status accepted by monitor; skipping direct callback to avoid duplicate writes ({request_duration:.2f}s){COLOR_RESET}")
+                return
+
+            # Send request to Primary API
+            response = None
+            primary_error = None
+            try:
+                response = requests.post(upload_url, data=status_payload_form, files=files, headers=headers, verify=False, timeout=60)
+            except Exception as upload_exc:
+                primary_error = upload_exc
+
             request_duration = time.monotonic() - request_start_time
-            
-            if logger:
+
+            if logger and response is not None:
                 logger.add_status_update(step, f"{status_name}({status_code})", request_duration, response.status_code)
 
-            if response.status_code in [200, 201, 202]:
+            if response is not None and response.status_code in [200, 201, 202]:
                 print(f"{COLOR_GREEN}   ✓ Status sent successfully ({request_duration:.2f}s){COLOR_RESET}")
-            else:
+            elif response is not None:
                 # Try to parse JSON error message
                 error_detail = response.text[:200]
                 try:
@@ -2415,28 +2949,15 @@ def _send_status_update(
                 except:
                     pass
                 print(f"{COLOR_YELLOW}   ⚠️ Status API Error ({response.status_code}): {error_detail} ({request_duration:.2f}s){COLOR_RESET}")
-
-            # --- MONITORING BROADCAST (Optional) ---
-            if MONITORING_API_URL:
-                try:
-                    # Send simpler JSON payload to monitoring system
-                    monitoring_payload = {
-                        "job_id": job_id,
-                        "project_id": project_id,
-                        "status": status,
-                        "step": step,
-                        "progress": progress,
-                        "message": message,
-                        "timestamp": datetime.now().isoformat(),
-                        "is_error": status_code == 4
-                    }
-                    print(f"   📡 Broadcasting to Monitor: {MONITORING_API_URL}")
-                    requests.post(MONITORING_API_URL, json=monitoring_payload, timeout=5)
-                except Exception as mon_e:
-                    print(f"   ⚠️ Monitoring broadcast failed: {mon_e}")
+            elif primary_error is not None:
+                print(f"{COLOR_YELLOW}   ⚠️ Status API Request Failed: {primary_error} ({request_duration:.2f}s){COLOR_RESET}")
                 
         except Exception as e:
             print(f"{COLOR_YELLOW}   ⚠️ Background status update failed: {e}{COLOR_RESET}")
+
+    if wait_for_delivery:
+        _network_worker()
+        return True
 
     # 4. Start background thread
     try:
@@ -2473,7 +2994,8 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
                 progress=0,
                 message="Something went wrong. Please try again.",
                 render_type=render_type,
-                logger=logger
+                logger=logger,
+                wait_for_delivery=True
             )
             return False
 
@@ -2503,7 +3025,8 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
             render_type=render_type,
             blob_url=blob_url,  # Send blob URL in ImageUrl field
             logger=logger,
-            details=final_details
+            details=final_details,
+            wait_for_delivery=True
         )
         
         
@@ -2583,7 +3106,7 @@ def _background_render_task(project_id: int, gallery_id: int, payload: Generatio
 
         # Step 4/5: Adding final touches
         if enable_status_updates:
-             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "finalizing", 80, "Adding final touches...", render_type="IMAGE", logger=logger)
+             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "finalizing", 80, "Adding final touches...", render_type="IMAGE", logger=logger, wait_for_delivery=True)
         
         print(f"📤 STEP 4/5: Uploading to external API...\n{'─'*60}")
              
@@ -2890,7 +3413,7 @@ def _background_video_render_task(project_id: int, gallery_id: int, payload: Vid
 
         # Step 4/5: Processing your video
         if enable_status_updates:
-             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "finalizing", 80, "Processing your video...", render_type="VIDEO", logger=logger)
+             _send_status_update(project_id, gallery_id, user_id, job_id, "processing", "finalizing", 80, "Processing your video...", render_type="VIDEO", logger=logger, wait_for_delivery=True)
         
         print(f"📤 STEP 4/5: Uploading to external API...\n{'─'*60}")
              
@@ -3049,7 +3572,7 @@ async def generate_4k_render_async(
             'status': 'queued',
             'position': queue_position,
             'queued_at': datetime.now().isoformat(),
-            'type': 'image',
+            'render_type': 'IMAGE',
             'project_id': project_id,
             'gallery_id': id
         }
@@ -3118,7 +3641,7 @@ async def generate_4k_video_async(
             'status': 'queued',
             'position': queue_position,
             'queued_at': datetime.now().isoformat(),
-            'type': 'video',
+            'render_type': 'VIDEO',
             'project_id': project_id,
             'gallery_id': id,
             'duration': duration_seconds,
@@ -3161,3 +3684,171 @@ async def get_job_log(job_id: str):
         raise HTTPException(status_code=404, detail=f"Log file for job {job_id} not found")
     
     return FileResponse(log_path, media_type="application/json", filename=f"{job_id}_render.json")
+
+# --- AI RENDER ENDPOINT ---
+from fastapi import File, UploadFile
+
+@app.post("/ai-render/convert-day")
+async def sd_airender(
+    current_user: CurrentUser,
+    project_id: int = Query(..., alias="ProjectId", description="The master Project ID"),
+    id: int = Query(..., alias="Id", description="The specific gallery item ID"),
+    user_id: int = Query(..., alias="UserId", description="The user ID"),
+    job_id_param: Optional[str] = Query(None, alias="JobId", description="Optional existing Job ID"),
+    image: UploadFile = File(..., description="PNG image file to convert"),
+):
+    if not AI_LIBRARIES_INSTALLED:
+        raise HTTPException(status_code=503, detail="AI rendering is disabled - missing dependencies (diffusers, torch, etc.)")
+    
+    if image.content_type not in {"image/png", "image/x-png"}:
+        raise HTTPException(status_code=400, detail="Only PNG images are supported for ai render.")
+    
+    file_bytes = await image.read()
+    if len(file_bytes) / (1024 * 1024) > AI_RENDER_MAX_FILE_MB:
+        raise HTTPException(status_code=400, detail=f"File exceeds {AI_RENDER_MAX_FILE_MB}MB.")
+    
+    job_id = job_id_param if job_id_param else str(uuid.uuid4())
+    input_path = AI_INPUT_DIR / f"{job_id}_{Path(image.filename).stem}.png"
+    output_path = AI_OUTPUT_DIR / f"{job_id}_render.png"
+    
+    # Save uploaded file
+    try:
+        input_path.write_bytes(file_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save input image: {e}")
+    
+    with queue_lock:
+        active_jobs[job_id] = {
+            "status": "queued",
+            "type": "ai render",
+            "display_type": "ai render",
+            "render_type": "AI_RENDER",
+            "project_id": project_id,
+            "gallery_id": id,
+            "user_id": user_id,
+            "queued_at": datetime.now().isoformat(),
+            "progress": 0,
+            "message": "AI render job queued.",
+            "current_step": "queued",
+            "input_filename": image.filename,
+            "output_filename": output_path.name,
+            "started_at": None,
+            "completed_at": None,
+            "failed_at": None,
+        }
+    
+    job_data = {
+        "job_id": job_id,
+        "project_id": project_id,
+        "gallery_id": id,
+        "user_id": user_id,
+        "input_path": str(input_path),
+        "output_path": str(output_path),
+        "filename": image.filename,
+    }
+    
+    ai_render_queue.put(job_data)
+    
+    print(f"{COLOR_GREEN}✅ AI Render job added to queue: {job_id}{COLOR_RESET}")
+    
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "queued",
+            "job_id": job_id,
+            "ProjectId": project_id,
+            "Id": id,
+            "UserId": user_id,
+            "RenderType": "AI_RENDER"
+        }
+    )
+
+
+@app.get("/engine-status")
+def ai_engine_status():
+    jobs = _get_ai_jobs_snapshot()
+    queued = sum(1 for job in jobs if job.get("status") == "queued")
+    processing = sum(1 for job in jobs if job.get("status") == "processing")
+    completed = sum(1 for job in jobs if job.get("status") == "completed")
+    failed = sum(1 for job in jobs if job.get("status") in {"failed", "error"})
+
+    return {
+        "status": "ok",
+        "online": True,
+        "is_paused": False,
+        "is_busy": CURRENT_STATUS.get("is_busy", False),
+        "queue_size": queued,
+        "active_jobs": queued + processing,
+        "completed_jobs": completed,
+        "failed_jobs": failed,
+        "current_job": CURRENT_STATUS.get("active_job"),
+    }
+
+
+@app.get("/health")
+def ai_health():
+    return ai_engine_status()
+
+
+@app.get("/queue-status-public")
+def ai_queue_status_public():
+    jobs = _get_ai_jobs_snapshot()
+    queued = sum(1 for job in jobs if job.get("status") == "queued")
+    processing = sum(1 for job in jobs if job.get("status") == "processing")
+    completed = sum(1 for job in jobs if job.get("status") == "completed")
+    failed = sum(1 for job in jobs if job.get("status") in {"failed", "error"})
+
+    return JSONResponse(
+        content={
+            "queue_size": queued,
+            "active_jobs_count": queued + processing,
+            "processing_jobs_count": processing,
+            "completed_jobs_count": completed,
+            "failed_jobs_count": failed,
+            "is_paused": False,
+            "jobs": jobs,
+            "engine_online": True,
+            "engine_name": "External 4K + AI Engine",
+            "engine_url": os.getenv("AI_RENDER_ENGINE_URL", "embedded://external-4k-ai-main"),
+        }
+    )
+
+
+@app.get("/queue-status")
+def ai_queue_status():
+    return ai_queue_status_public()
+
+
+@app.get("/job-status/{job_id}")
+def ai_job_status(job_id: str):
+    with queue_lock:
+        job = active_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"AI job {job_id} not found")
+    return {"job_id": job_id, **_build_ai_job_snapshot(job_id, dict(job))}
+
+
+@app.get("/ai-render/health")
+def ai_render_health_alias():
+    return ai_engine_status()
+
+
+@app.get("/ai-render/")
+@app.get("/ai-render")
+def ai_render_root_alias():
+    return ai_engine_status()
+
+
+@app.get("/ai-render/queue-status-public")
+def ai_render_queue_status_public_alias():
+    return ai_queue_status_public()
+
+
+@app.get("/ai-render/queue-status")
+def ai_render_queue_status_alias():
+    return ai_queue_status_public()
+
+
+@app.get("/ai-render/job-status/{job_id}")
+def ai_render_job_status_alias(job_id: str):
+    return ai_job_status(job_id)

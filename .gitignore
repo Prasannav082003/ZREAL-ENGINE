@@ -96,6 +96,16 @@ temp/
 *.rar
 
 # -------------------------
+# Models (VERY IMPORTANT for YOU)
+# -------------------------
+Realistic_Vision_V6.0_B1_noVAE/
+
+# -------------------------
+# Batch & runtime logs
+# -------------------------
+*.log
+
+# -------------------------
 # Local credentials
 # -------------------------
 login_details.txt

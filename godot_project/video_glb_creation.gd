@@ -9,6 +9,7 @@ extends Node3D
 
 var _tracked_assets = []
 var _window_sunlight_data = []  # Collected during hole building, used to place window sunlights
+var _exterior_assets = []       # Tracks trees/plants/etc for shadow optimization
 var day_render = true
 var lighting_profile = "day"
 const ENABLE_PROCEDURAL_WINDOW_GRID_CASTER = false
@@ -95,11 +96,11 @@ func build_scene(data):
 
 	_window_sunlight_data.clear()
 	build_architecture(geom_data, cam_pose.get("position", Vector3.ZERO), show_all_floors)
-	if _dir_light != null:
-		_orient_directional_light_from_windows(_dir_light)
-	# _create_window_sunlights()  # Removed in favor of DirectionalLight orientation
 	build_structures(geom_data)
 	load_assets(geom_data)
+	
+	if _dir_light != null:
+		_orient_directional_light_from_windows(_dir_light, cam_pose)
 	
 	_apply_anisotropic_filtering_to_all(self)
 
@@ -312,48 +313,104 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	print("[VideoGLB] Photorealistic lighting setup complete. profile=", lighting_profile)
 
 # ─────────────────────────────────────────────────────────────────
-func _orient_directional_light_from_windows(dir_light: DirectionalLight3D):
+func _orient_directional_light_from_windows(dir_light: DirectionalLight3D, cam_pose_override = null):
 	if _window_sunlight_data.size() == 0:
 		return
 
-	# ── Step 1: Average outer_dir across ALL windows ──────────────────────
-	var avg_outer_dir := Vector3.ZERO
+	# ── Step 0: Camera Orientation ────────────────────────────────────────
+	# We want sunlight to favor windows the camera is looking at.
+	var cam_pose = cam_pose_override
+	if cam_pose == null:
+		cam_pose = _frozen_camera_pose
+	if cam_pose == null:
+		cam_pose = {"position": Vector3.ZERO, "target": Vector3(0, 0, -1)}
+	
+	var cam_pos: Vector3 = cam_pose["position"]
+	var cam_target: Vector3 = cam_pose["target"]
+	var cam_forward = (cam_target - cam_pos).normalized()
+	cam_forward.y = 0.0 # horizontal view direction
+	if cam_forward.length() < 0.001:
+		cam_forward = Vector3(0, 0, -1)
+	cam_forward = cam_forward.normalized()
+
+	# ── Step 1: Weighted outer_dir ────────────────────────────────────────
+	# Instead of a simple average, we weight windows based on their visibility 
+	# and alignment with the camera to create a "backlit/side-lit" cinematic look.
+	var weighted_outer_dir := Vector3.ZERO
+	var total_weight := 0.0
+	
 	for win in _window_sunlight_data:
-		avg_outer_dir += (win["outer_dir"] as Vector3)
-	avg_outer_dir = avg_outer_dir / float(_window_sunlight_data.size())
-	avg_outer_dir.y = 0.0
+		var win_center = win["center"] as Vector3
+		var win_inner  = win["inner_dir"] as Vector3
+		win_inner.y = 0.0
+		win_inner = win_inner.normalized()
+		
+		# Score 1: Is the window actually in front of the camera's lens?
+		var to_win = (win_center - cam_pos).normalized()
+		to_win.y = 0.0
+		var fov_score = max(0.0, cam_forward.dot(to_win)) # 1.0 = directly in center of view
+		
+		# Score 2: Is the window on a wall the camera is facing?
+		# (If looking at a window, its inner_dir points back at the camera)
+		var visibility_score = max(0.0, win_inner.dot(-cam_forward))
+		
+		# Score 3: Are there exterior assets (trees/plants) outside this window?
+		# We want to favor windows that will cast interesting shadows.
+		var asset_bonus = 0.0
+		for ext in _exterior_assets:
+			var asset_pos = ext["position"] as Vector3
+			var dist_to_win = win_center.distance_to(asset_pos)
+			if dist_to_win < 6.0: # within 6 meters of window
+				# Check if asset is actually "outside" the window (in the direction of outer_dir)
+				var to_asset = (asset_pos - win_center).normalized()
+				var alignment = (win["outer_dir"] as Vector3).dot(to_asset)
+				if alignment > 0.0: # asset is outside
+					asset_bonus += 2.5 * (1.0 - dist_to_win / 6.0) * alignment
+
+		# Weight calculation: prioritize windows in FOV and on facing walls.
+		# This ensures light "shines back" towards the camera through windows.
+		var weight = (fov_score * 2.0) + (visibility_score * 3.5) + asset_bonus + 0.1 # 0.1 baseline fallback
+		
+		weighted_outer_dir += (win["outer_dir"] as Vector3) * weight
+		total_weight += weight
+
+	var avg_outer_dir = weighted_outer_dir / total_weight
+	avg_outer_dir.y = 0.0  # flatten — elevation handled separately below
 	if avg_outer_dir.length() < 0.001:
-		avg_outer_dir = Vector3(1, 0, 0)
+		avg_outer_dir = Vector3(1, 0, 0)  # safe fallback
 	avg_outer_dir = avg_outer_dir.normalized()
 
 	# ── Step 2: Sun elevation per lighting profile ────────────────────────
+	# This is the downward angle of sunlight.
 	var elevation_deg: float
 	match lighting_profile:
-		"day":    elevation_deg = 35.0
-		"sunset": elevation_deg = 8.0
-		"night":  elevation_deg = 55.0
-		_:        elevation_deg = 35.0
+		"day":    elevation_deg = 28.0   # slightly lower for longer, more dramatic shadows
+		"sunset": elevation_deg = 8.0    # high grazing golden hour light
+		"night":  elevation_deg = 55.0   # moon, steep and cool
+		_:        elevation_deg = 28.0
 
 	# ── Step 3: Build a direction vector from outer_dir + elevation ───────
+	# Sun ray direction: horizontal component = -avg_outer_dir (sun comes from outside)
 	var elevation_rad := deg_to_rad(elevation_deg)
 	var sun_dir := Vector3(
 		-avg_outer_dir.x,
-		-sin(elevation_rad),
+		-sin(elevation_rad),      # negative = pointing downward
 		-avg_outer_dir.z
 	).normalized()
 
 	# ── Step 4: Orient the directional light ─────────────────────────────
-	var room_center := Vector3.ZERO
+	# Place the virtual sun far away and look_at the weighted center of openings.
+	var weighted_center := Vector3.ZERO
 	for win in _window_sunlight_data:
-		room_center += (win["center"] as Vector3)
-	room_center /= float(_window_sunlight_data.size())
+		weighted_center += (win["center"] as Vector3)
+	weighted_center /= float(_window_sunlight_data.size())
 
-	dir_light.position = room_center - sun_dir * 50.0
-	if dir_light.position.distance_to(room_center) > 0.001:
-		dir_light.look_at(room_center, Vector3.UP)
+	dir_light.position = weighted_center - sun_dir * 50.0
+	if dir_light.position.distance_to(weighted_center) > 0.001:
+		dir_light.look_at(weighted_center, Vector3.UP)
 
-	print("[VideoGLB] DirectionalLight oriented from windows: outer_dir=", avg_outer_dir,
-		  " elevation=", elevation_deg, "deg  sun_dir=", sun_dir)
+	print("[VideoGLB] Dynamic Sunlight oriented: cam_forward=", cam_forward, 
+		  " weighted_outer=", avg_outer_dir, " elevation=", elevation_deg)
 
 # Removed _create_window_sunlights (legacy SpotLight method) in favor of DirectionalLight.
 
@@ -1749,10 +1806,19 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 			floor_poly.depth      = floor_depth
 			floor_poly.rotation.x = PI / 2
 			floor_poly.position.y = layer_altitude - floor_depth
-			_apply_polygon_uv_world_scale(floor_poly, uv_polygon)
+			var floor_span = _get_polygon_world_span(uv_polygon)
 
 			if area.has("floor_properties") and typeof(area["floor_properties"]) == TYPE_DICTIONARY and area["floor_properties"].has("material"):
-				floor_poly.material = create_material(area["floor_properties"]["material"])
+				var f_mat = create_material(area["floor_properties"]["material"])
+				# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
+				# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
+				# produce physically correct tile sizes:
+				#   tile_size = 2.4 / repeat  →  repeat=2 → 1.2 m tiles
+				f_mat.uv1_scale = Vector3(
+					f_mat.uv1_scale.x * floor_span.x / 2.4,
+					f_mat.uv1_scale.y * floor_span.y / 2.4,
+					1.0)
+				floor_poly.material = f_mat
 			else:
 				var floor_mat = StandardMaterial3D.new()
 				floor_mat.albedo_color = Color(0.8, 0.8, 0.8)
@@ -1806,10 +1872,19 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 			ceil_poly.depth      = ceil_depth
 			ceil_poly.rotation.x = PI / 2
 			ceil_poly.position.y = layer_altitude + ceil_height
-			_apply_polygon_uv_world_scale(ceil_poly, uv_polygon)
+			var ceil_span = _get_polygon_world_span(uv_polygon)
 
 			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY and area["ceiling_properties"].has("material"):
-				ceil_poly.material = create_material(area["ceiling_properties"]["material"])
+				var c_mat = create_material(area["ceiling_properties"]["material"])
+				# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
+				# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
+				# produce physically correct tile sizes:
+				#   tile_size = 2.4 / repeat  →  repeat=2 → 1.2 m tiles
+				c_mat.uv1_scale = Vector3(
+					c_mat.uv1_scale.x * ceil_span.x / 2.4,
+					c_mat.uv1_scale.y * ceil_span.y / 2.4,
+					1.0)
+				ceil_poly.material = c_mat
 			else:
 				var ceil_mat = StandardMaterial3D.new()
 				ceil_mat.albedo_color = Color(0.95, 0.95, 0.95)
@@ -1877,9 +1952,14 @@ func _expand_polygon_outward(polygon: PackedVector2Array, offset: float) -> Pack
 
 	return expanded
 
-func _apply_polygon_uv_world_scale(poly: CSGPolygon3D, polygon: PackedVector2Array) -> void:
+# Returns the world-space span (width, depth) of a polygon in metres.
+# CSGPolygon3D normalises UVs to [0,1] and does NOT expose a uv_xform
+# property, so texture tiling must be controlled through the material's
+# uv1_scale instead.  The caller multiplies uv1_scale by this span so
+# that the JSON repeat values tile per metre, not per polygon.
+func _get_polygon_world_span(polygon: PackedVector2Array) -> Vector2:
 	if polygon.size() < 3:
-		return
+		return Vector2(1.0, 1.0)
 
 	var min_x = 1e20; var max_x = -1e20
 	var min_y = 1e20; var max_y = -1e20
@@ -1887,13 +1967,7 @@ func _apply_polygon_uv_world_scale(poly: CSGPolygon3D, polygon: PackedVector2Arr
 		min_x = min(min_x, p.x); max_x = max(max_x, p.x)
 		min_y = min(min_y, p.y); max_y = max(max_y, p.y)
 
-	var span_u = max(0.001, max_x - min_x)
-	var span_v = max(0.001, max_y - min_y)
-
-	var uv = Transform2D.IDENTITY
-	uv = uv.scaled(Vector2(1.0 / span_u, 1.0 / span_v))
-	uv = uv.translated(-Vector2(min_x, min_y) / Vector2(span_u, span_v))
-	poly.uv_xform = uv
+	return Vector2(max(0.001, max_x - min_x), max(0.001, max_y - min_y))
 
 # ─────────────────────────────────────────────────────────────────
 # Asset loading — mirrors image_glb_creation.gd load_assets / _load_layer_items
@@ -2287,6 +2361,22 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 						node.scale = final_scale
 						var bounds_y_min = aabb.position.y * final_scale.y
 						node.position.y  = pz - bounds_y_min
+						
+						# Track exterior assets for sunlight optimization
+						var item_name_l = str(item.get("name", "")).to_lower()
+						var item_type_l = str(item.get("type", "")).to_lower()
+						var ext_keywords = ["tree", "plant", "garden", "outdoor", "landscape", "bush", "shrub", "vegetat", "flower"]
+						var is_ext = false
+						for kw in ext_keywords:
+							if kw in item_type_l or kw in item_name_l:
+								is_ext = true
+								break
+						if is_ext:
+							_exterior_assets.append({
+								"node": node,
+								"position": node.global_position,
+								"name": item.get("name", "unknown")
+							})
 
 						# Force-black for exterior items
 						if item.get("is_exterior_black", false):

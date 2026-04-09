@@ -4,6 +4,7 @@ extends Node3D
 # Handles the construction of the scene: Architecture (Walls, Floors, Ceilings) and Asset Loading.
 var _tracked_assets = []
 var _window_sunlight_data = []  # Collected during hole building, used to place window sunlights
+var _exterior_assets = []       # Tracks trees/plants/etc for shadow optimization
 var _dir_light: DirectionalLight3D = null
 var day_render = true
 var lighting_profile = "day"
@@ -43,6 +44,8 @@ func build_scene(data):
 	# _create_window_sunlights()  # Place sunlights through detected windows
 	build_structures(geom_data)
 	load_assets(geom_data)
+	if _dir_light != null:
+		_orient_directional_light_from_windows(_dir_light)
 	# setup_camera(data) - Moved to render_image.gd
 
 func setup_lighting(data, geom_data = {}):
@@ -69,6 +72,7 @@ func setup_lighting(data, geom_data = {}):
 	dir_light.name = "Sun"
 	# Enable shadows so sunlight through windows casts realistic shadow patterns
 	dir_light.shadow_enabled = true
+	dir_light.light_specular = 1.0 # Ensure sun casts specular highlights
 
 	# High-quality shadow settings for photorealistic renders
 	dir_light.light_angular_distance = 0.5
@@ -143,10 +147,10 @@ func setup_lighting(data, geom_data = {}):
 		print("Using fallback procedural sky")
 
 	# ── Ambient Light ──────────────────────────────────────────────────────
-	# Use color ambient for enclosed rooms to avoid sky-light leaking at wall/ceiling corners.
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	# Use sky ambient to allow environmental reflections to contribute correctly.
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_color = lighting["ambient_color"]
-	env.ambient_light_energy = lighting["ambient_energy"]
+	env.ambient_light_energy = 1.0 # Boost ambient energy for better probe capture
 
 	# ── Tone Mapping ──────────────────────────────────────────────────────
 	# CRITICAL: exposure must be set high enough that headless render is NOT black.
@@ -156,11 +160,11 @@ func setup_lighting(data, geom_data = {}):
 	env.tonemap_white    = lighting["tonemap_white"]
 
 	# ── SDFGI: DISABLED — crashes / produces black in headless Godot export ─
-	# Use SSAO + SSIL for safe indirect-light approximation instead.
+	# SDFGI also blocks proper ReflectionProbe updates in some headless scenarios.
 	env.sdfgi_enabled = false
 
 	# ── Screen-Space Indirect Light (safe GI replacement for headless) ────
-	env.ssil_enabled   = false
+	env.ssil_enabled   = true
 
 	# ── Screen-Space Reflections: DISABLED in headless (depth buffer missing) ─
 	env.ssr_enabled = false
@@ -193,17 +197,16 @@ func setup_lighting(data, geom_data = {}):
 	# ── Reflection Probe — placed at room center for realistic interior reflections ──
 	# Interior mode + box projection give accurate parallax-corrected reflections
 	# on the floor surface. Shadows enabled so window light shadows are captured.
-	var room_height = max(2.8, (room_ceiling_y - room_center.y) * 2.0)
 	var probe = ReflectionProbe.new()
 	probe.name = "RoomReflectionProbe"
-	probe.size = Vector3(
-		max(room_extent.x + 4.0, 8.0),
-		room_height + 2.0,
-		max(room_extent.y + 4.0, 8.0)
-	)
-	probe.update_mode = ReflectionProbe.UPDATE_ONCE
-	probe.intensity = 1.0
-	probe.max_distance = max(room_extent.x, room_extent.y) * 1.5 + 12.0
+	
+	# Match the requested settings from the manual setup image (20x20x20 box)
+	probe.size = Vector3(20.0, 20.0, 20.0) 
+	probe.update_mode = ReflectionProbe.UPDATE_ALWAYS # Corresponds to "Always (Slow)"
+	probe.intensity = 2.5 # Boosted intensity for stronger, visible reflections
+	probe.max_distance = 0.0   # Matches manual image: 0.0
+	probe.blend_distance = 1.0 # Matches manual image: 1.0
+	
 	# Place at the exact center of the room
 	probe.position = room_center
 	# Interior mode: treats the probe as an enclosed space (no sky leaking)
@@ -212,9 +215,11 @@ func setup_lighting(data, geom_data = {}):
 	probe.box_projection = true
 	# Enable shadows in the probe capture — window shadows appear in reflections
 	probe.enable_shadows = true
+	
 	add_child(probe)
-	print("ReflectionProbe placed at room center: ", room_center,
-		" size: ", probe.size, " interior=true, box_projection=true, shadows=true")
+	print("ReflectionProbe (ALWAYS) placed at room center: ", room_center,
+		" size: (20,20,20) interior=true, box_projection=true, shadows=true")
+	print("Probe added and verified at: ", probe.get_path())
 	
 	world_env.environment = env
 	add_child(world_env)
@@ -230,7 +235,7 @@ func setup_lighting(data, geom_data = {}):
 		fill.light_energy   = lighting["fill_energy"]
 		fill.omni_range     = max(room_extent.x, room_extent.y) * 2.5 + 10.0
 		fill.light_color    = lighting["fill_color"]
-		fill.light_specular = 0.0
+		fill.light_specular = 1.0
 		fill.shadow_enabled = false
 		add_child(fill)
 
@@ -242,7 +247,7 @@ func setup_lighting(data, geom_data = {}):
 		fill_front.light_energy   = lighting["front_back_fill_energy"]
 		fill_front.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
 		fill_front.light_color    = lighting["front_back_fill_color"]
-		fill_front.light_specular = 0.0
+		fill_front.light_specular = 1.0
 		fill_front.shadow_enabled = false
 		add_child(fill_front)
 
@@ -252,7 +257,7 @@ func setup_lighting(data, geom_data = {}):
 		fill_back.light_energy   = lighting["front_back_fill_energy"]
 		fill_back.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
 		fill_back.light_color    = lighting["front_back_fill_color"]
-		fill_back.light_specular = 0.0
+		fill_back.light_specular = 1.0
 		fill_back.shadow_enabled = false
 		add_child(fill_back)
 	else:
@@ -485,33 +490,75 @@ func _orient_directional_light_from_windows(dir_light: DirectionalLight3D):
 	if _window_sunlight_data.size() == 0:
 		return
 
-	# ── Step 1: Average outer_dir across ALL windows ──────────────────────
-	# Using all windows avoids one window dominating the light direction.
-	# Rooms with windows on multiple walls get a blended, natural sun angle.
-	var avg_outer_dir := Vector3.ZERO
+	# ── Step 0: Camera Orientation ────────────────────────────────────────
+	# We want sunlight to favor windows the camera is looking at.
+	var cam_pos = _camera_pose["position"]
+	var cam_target = _camera_pose["target"]
+	var cam_forward = (cam_target - cam_pos).normalized()
+	cam_forward.y = 0.0 # horizontal view direction
+	if cam_forward.length() < 0.001:
+		cam_forward = Vector3(0, 0, -1)
+	cam_forward = cam_forward.normalized()
+
+	# ── Step 1: Weighted outer_dir ────────────────────────────────────────
+	# Instead of a simple average, we weight windows based on their visibility 
+	# and alignment with the camera to create a "backlit/side-lit" cinematic look.
+	var weighted_outer_dir := Vector3.ZERO
+	var total_weight := 0.0
+	
 	for win in _window_sunlight_data:
-		avg_outer_dir += (win["outer_dir"] as Vector3)
-	avg_outer_dir = avg_outer_dir / float(_window_sunlight_data.size())
+		var win_center = win["center"] as Vector3
+		var win_inner  = win["inner_dir"] as Vector3
+		win_inner.y = 0.0
+		win_inner = win_inner.normalized()
+		
+		# Score 1: Is the window actually in front of the camera's lens?
+		var to_win = (win_center - cam_pos).normalized()
+		to_win.y = 0.0
+		var fov_score = max(0.0, cam_forward.dot(to_win)) # 1.0 = directly in center of view
+		
+		# Score 2: Is the window on a wall the camera is facing?
+		# (If looking at a window, its inner_dir points back at the camera)
+		var visibility_score = max(0.0, win_inner.dot(-cam_forward))
+		
+		# Score 3: Are there exterior assets (trees/plants) outside this window?
+		# We want to favor windows that will cast interesting shadows.
+		var asset_bonus = 0.0
+		for ext in _exterior_assets:
+			var asset_pos = ext["position"] as Vector3
+			var dist_to_win = win_center.distance_to(asset_pos)
+			if dist_to_win < 6.0: # within 6 meters of window
+				# Check if asset is actually "outside" the window (in the direction of outer_dir)
+				var to_asset = (asset_pos - win_center).normalized()
+				var alignment = (win["outer_dir"] as Vector3).dot(to_asset)
+				if alignment > 0.0: # asset is outside
+					asset_bonus += 2.5 * (1.0 - dist_to_win / 6.0) * alignment
+
+		# Weight calculation: prioritize windows in FOV and on facing walls.
+		# This ensures light "shines back" towards the camera through windows.
+		var weight = (fov_score * 2.0) + (visibility_score * 3.5) + asset_bonus + 0.1 # 0.1 baseline fallback
+		
+		weighted_outer_dir += (win["outer_dir"] as Vector3) * weight
+		total_weight += weight
+
+	var avg_outer_dir = weighted_outer_dir / total_weight
 	avg_outer_dir.y = 0.0  # flatten — elevation handled separately below
 	if avg_outer_dir.length() < 0.001:
 		avg_outer_dir = Vector3(1, 0, 0)  # safe fallback
 	avg_outer_dir = avg_outer_dir.normalized()
 
 	# ── Step 2: Sun elevation per lighting profile ────────────────────────
-	# This is the downward angle of sunlight — not position, just direction.
+	# This is the downward angle of sunlight.
 	var elevation_deg: float
 	match lighting_profile:
-		"day":    elevation_deg = 35.0   # mid-morning sun, natural shadows
-		"sunset": elevation_deg = 8.0    # low grazing golden hour light
+		"day":    elevation_deg = 28.0   # slightly lower for longer, more dramatic shadows
+		"sunset": elevation_deg = 8.0    # high grazing golden hour light
 		"night":  elevation_deg = 55.0   # moon, steep and cool
-		_:        elevation_deg = 35.0
+		_:        elevation_deg = 28.0
 
 	# ── Step 3: Build a direction vector from outer_dir + elevation ───────
-	# outer_dir points FROM outside → INTO the room (through the window).
-	# We rotate it downward by elevation_deg to get the sun ray direction.
-	var elevation_rad := deg_to_rad(elevation_deg)
 	# Sun ray direction: horizontal component = -avg_outer_dir (sun comes from outside)
-	# vertical component = -sin(elevation) (sun rays go downward)
+	var elevation_rad := deg_to_rad(elevation_deg)
 	var sun_dir := Vector3(
 		-avg_outer_dir.x,
 		-sin(elevation_rad),      # negative = pointing downward
@@ -519,20 +566,18 @@ func _orient_directional_light_from_windows(dir_light: DirectionalLight3D):
 	).normalized()
 
 	# ── Step 4: Orient the directional light ─────────────────────────────
-	# For DirectionalLight3D, position is irrelevant — only rotation matters.
-	# Place it at a neutral position and look_at along the sun_dir.
-	var room_center := Vector3.ZERO
+	# Place the virtual sun far away and look_at the center of the windows.
+	var weighted_center := Vector3.ZERO
 	for win in _window_sunlight_data:
-		room_center += (win["center"] as Vector3)
-	room_center /= float(_window_sunlight_data.size())
+		weighted_center += (win["center"] as Vector3)
+	weighted_center /= float(_window_sunlight_data.size())
 
-	# Light source is far away in the OPPOSITE of sun_dir
-	dir_light.position = room_center - sun_dir * 50.0
-	if dir_light.position.distance_to(room_center) > 0.001:
-		dir_light.look_at(room_center, Vector3.UP)
+	dir_light.position = weighted_center - sun_dir * 50.0
+	if dir_light.position.distance_to(weighted_center) > 0.001:
+		dir_light.look_at(weighted_center, Vector3.UP)
 
-	print("DirectionalLight oriented from windows: outer_dir=", avg_outer_dir,
-		  " elevation=", elevation_deg, "deg  sun_dir=", sun_dir)
+	print("Dynamic Sunlight oriented: cam_forward=", cam_forward, 
+		  " weighted_outer=", avg_outer_dir, " elevation=", elevation_deg)
 
 func build_architecture(data):
 	print("Building Architecture...")
@@ -951,17 +996,21 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 
 		var outer_mat: StandardMaterial3D
 		if outer_mat_data != null:
-			outer_mat = create_material(outer_mat_data)
+			outer_mat = create_material(outer_mat_data, "wall")
 		else:
 			outer_mat = StandardMaterial3D.new()
 			outer_mat.albedo_color = Color(0.82, 0.82, 0.82)
+			# Apply optimizer for default walls too
+			outer_mat = optimize_material(outer_mat, {}, "wall")
 
 		var inner_mat_for_wall: StandardMaterial3D
 		if inner_mat_data != null:
-			inner_mat_for_wall = create_material(inner_mat_data)
+			inner_mat_for_wall = create_material(inner_mat_data, "wall")
 		else:
 			inner_mat_for_wall = StandardMaterial3D.new()
 			inner_mat_for_wall.albedo_color = Color(0.82, 0.82, 0.82)
+			# Apply optimizer for default walls too
+			inner_mat_for_wall = optimize_material(inner_mat_for_wall, {}, "wall")
 
 		if render_mode == "INTERIOR":
 			# INTERIOR: apply inner material on the structural wall.
@@ -1009,7 +1058,7 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 
 				var inner_box = CSGBox3D.new()
 				inner_box.size = Vector3(corner_length, height, face_t)
-				var inner_mat  = create_material(inner_mat_data)
+				var inner_mat  = create_material(inner_mat_data, "wall")
 				inner_mat.cull_mode = BaseMaterial3D.CULL_BACK
 				inner_box.material  = inner_mat
 				inner_csg.add_child(inner_box)
@@ -1031,7 +1080,7 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 
 				var outer_box = CSGBox3D.new()
 				outer_box.size = Vector3(corner_length, height, face_t)
-				var outer_panel_mat = create_material(outer_mat_data)
+				var outer_panel_mat = create_material(outer_mat_data, "wall")
 				outer_panel_mat.cull_mode = BaseMaterial3D.CULL_BACK
 				outer_box.material  = outer_panel_mat
 				outer_csg.add_child(outer_box)
@@ -1275,18 +1324,25 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 				floor_poly.depth      = floor_depth
 				floor_poly.rotation.x = PI / 2
 				floor_poly.position.y = layer_altitude - floor_depth
-				_apply_polygon_uv_world_scale(floor_poly, uv_polygon)
+				var floor_span = _get_polygon_world_span(uv_polygon)
 				
 				if floor_props.has("material"):
-					var f_mat = create_material(floor_props["material"])
-					f_mat.roughness = min(f_mat.roughness, 0.35)
-					f_mat.metallic_specular = 0.6
+					var f_mat = create_material(floor_props["material"], "floor")
+					
+					# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
+					# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
+					# produce physically correct tile sizes.
+					f_mat.uv1_scale = Vector3(
+						f_mat.uv1_scale.x * floor_span.x / 2.4,
+						f_mat.uv1_scale.y * floor_span.y / 2.4,
+						1.0)
 					floor_poly.material = f_mat
+					print("Floor Material Optimized: ", floor_props["material"].get("mapUrl", "default"))
 				else:
 					var floor_mat = StandardMaterial3D.new()
 					floor_mat.albedo_color = Color(0.8, 0.8, 0.8)
-					floor_mat.roughness = 0.3
-					floor_mat.metallic_specular = 0.6
+					# Apply default optimizer logic to fallback floor with context
+					floor_mat = optimize_material(floor_mat, {"color": "#cccccc"}, "floor")
 					floor_poly.material    = floor_mat
 
 				_add_floor_opening_cutters(csg, structures, str(area_id), layer_altitude, floor_depth, scale_factor)
@@ -1354,13 +1410,24 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 					ceil_poly.depth      = ceil_depth
 					ceil_poly.rotation.x = PI / 2
 					ceil_poly.position.y = ceiling_world_y
-					_apply_polygon_uv_world_scale(ceil_poly, uv_polygon)
+					var ceil_span = _get_polygon_world_span(uv_polygon)
 					
 					if ceiling_props.has("material"):
-						ceil_poly.material = create_material(ceiling_props["material"])
+						var c_mat = create_material(ceiling_props["material"], "ceiling")
+						# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
+						# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
+						# produce physically correct tile sizes:
+						#   tile_size = 2.4 / repeat  →  repeat=2 → 1.2 m tiles
+						c_mat.uv1_scale = Vector3(
+							c_mat.uv1_scale.x * ceil_span.x / 2.4,
+							c_mat.uv1_scale.y * ceil_span.y / 2.4,
+							1.0)
+						ceil_poly.material = c_mat
 					else:
 						var ceil_mat = StandardMaterial3D.new()
 						ceil_mat.albedo_color = Color(0.82, 0.82, 0.82)
+						# Optimize fallback ceiling
+						ceil_mat = optimize_material(ceil_mat, {"color": "#d1d1d1"}, "ceiling")
 						ceil_poly.material    = ceil_mat
 					
 					csg.add_child(ceil_poly)
@@ -2445,6 +2512,22 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 					node.scale = final_scale
 					var bounds_y_min = aabb.position.y * final_scale.y
 					node.position.y  = pz - bounds_y_min
+
+					# Track exterior assets for sunlight optimization
+					var item_name_track = str(item.get("name", "")).to_lower()
+					var item_type_track = str(item.get("type", "")).to_lower()
+					var ext_keywords = ["tree", "plant", "garden", "outdoor", "landscape", "bush", "shrub", "vegetat", "flower"]
+					var is_ext = false
+					for kw in ext_keywords:
+						if kw in item_type_track or kw in item_name_track:
+							is_ext = true
+							break
+					if is_ext:
+						_exterior_assets.append({
+							"node": node,
+							"position": node.global_position,
+							"name": item.get("name", "unknown")
+						})
 					
 					if item.get("is_exterior_black", false):
 						var meshes    = _get_all_meshes(node)
@@ -2569,7 +2652,11 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 												modified = true
 
 											if modified:
+												# Apply Optimizer with context (item)
+												new_mat = optimize_material(new_mat, mat_opt, "item")
 												m.set_surface_override_material(i, new_mat)
+												# Force material override to ensure it takes precedence over asset defaults
+												m.material_override = new_mat
 
 					_add_light_fixture_effect(node, item, aabb, final_scale)
 					
@@ -2623,9 +2710,14 @@ func _expand_polygon_outward(polygon: PackedVector2Array, offset: float) -> Pack
 	
 	return expanded
 
-func _apply_polygon_uv_world_scale(poly: CSGPolygon3D, polygon: PackedVector2Array) -> void:
+# Returns the world-space span (width, depth) of a polygon in metres.
+# CSGPolygon3D normalises UVs to [0,1] and does NOT expose a uv_xform
+# property, so texture tiling must be controlled through the material's
+# uv1_scale instead.  The caller multiplies uv1_scale by this span so
+# that the JSON repeat values tile per metre, not per polygon.
+func _get_polygon_world_span(polygon: PackedVector2Array) -> Vector2:
 	if polygon.size() < 3:
-		return
+		return Vector2(1.0, 1.0)
 
 	var min_x = 1e20; var max_x = -1e20
 	var min_y = 1e20; var max_y = -1e20
@@ -2633,13 +2725,7 @@ func _apply_polygon_uv_world_scale(poly: CSGPolygon3D, polygon: PackedVector2Arr
 		min_x = min(min_x, p.x); max_x = max(max_x, p.x)
 		min_y = min(min_y, p.y); max_y = max(max_y, p.y)
 
-	var span_u = max(0.001, max_x - min_x)
-	var span_v = max(0.001, max_y - min_y)
-
-	var uv = Transform2D.IDENTITY
-	uv = uv.scaled(Vector2(1.0 / span_u, 1.0 / span_v))
-	uv = uv.translated(-Vector2(min_x, min_y) / Vector2(span_u, span_v))
-	poly.uv_xform = uv
+	return Vector2(max(0.001, max_x - min_x), max(0.001, max_y - min_y))
 
 func get_dimension_value(prop_value, default_val = 100.0) -> float:
 	if typeof(prop_value) == TYPE_ARRAY and prop_value.size() > 0:
@@ -2825,7 +2911,7 @@ func _add_window_grid_shadow_caster(win_center: Vector3, win_width: float,
 
 	print("  Added procedural window grid shadow caster at ", grid_pos)
 
-func create_material(mat_data):
+func create_material(mat_data, surface_type: String = "item"):
 	var mat = StandardMaterial3D.new()
 	mat.cull_mode       = BaseMaterial3D.CULL_DISABLED
 	mat.roughness       = mat_data.get("roughness", 0.65)
@@ -2897,6 +2983,93 @@ func create_material(mat_data):
 				scale_u = sf; scale_v = sf
 
 	mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+	
+	# Apply late-stage material optimization based on texture type AND surface category
+	mat = optimize_material(mat, mat_data, surface_type)
+	
+	return mat
+
+# ─────────────────────────────────────────────────────────────────────────────
+# optimize_material (Production-Level Smart Material System)
+# ─────────────────────────────────────────────────────────────────────────────
+# Automatically detects material categories from texture paths and surface context
+# to apply high-fidelity physical properties (Roughness, Metallic, Clearcoat).
+func optimize_material(mat: StandardMaterial3D, mat_data: Dictionary, surface_type: String = "item") -> StandardMaterial3D:
+	var path          = str(mat_data.get("mapUrl", "")).to_lower()
+	var has_metalness = mat_data.has("metalnessUrl") and str(mat_data["metalnessUrl"]) != ""
+	
+	# --- BASE ARCHITECTURAL DEFAULTS BY SURFACE TYPE ---
+	match surface_type:
+		"ceiling":
+			# Ceilings must NEVER be dead matte. They need soft specular for GI bounce.
+			mat.metallic = 0.0
+			mat.metallic_specular = 0.2
+			mat.roughness = 0.35 # Realistic soft light spread
+			print("  [Optimizer] Ceiling context -> applying soft-diffuse properties.")
+			return mat # Ceilings rarely need texture-based overriding for roughness
+			
+		"wall":
+			mat.metallic = 0.0
+			mat.metallic_specular = 0.3
+			mat.roughness = 0.75 # Flat matte walls
+			
+		"floor":
+			mat.metallic = 0.0
+			mat.metallic_specular = 0.6
+			mat.roughness = 0.3 # Default for carpet/wood tiles
+			
+		_: # "item"
+			mat.metallic = 0.0
+			mat.metallic_specular = 0.5
+			mat.roughness = 0.6
+	
+	# --- SMART DETECTION OVERRIDES (Based on texture path keywords) ---
+	if "marble" in path or "tile" in path or "granite" in path or "polished" in path or "porcelain" in path:
+		# 🔥 High-Gloss Interior Surfaces
+		mat.roughness = 0.02
+		mat.metallic_specular = 1.0
+		mat.clearcoat_enabled = true
+		mat.clearcoat = 1.0
+		mat.clearcoat_roughness = 0.05
+		print("  [Optimizer] Glossy Surface detected -> clearcoat enabled.")
+		
+	elif "wood" in path or "parquet" in path or "plank" in path or "floor" in path:
+		# Realistic wood
+		mat.roughness = 0.32
+		mat.metallic_specular = 0.55
+		# Boost wood floor reflections significantly for better probe interaction
+		if surface_type == "floor": 
+			mat.roughness = 0.08
+			mat.clearcoat_enabled = true
+			mat.clearcoat = 0.4
+		print("  [Optimizer] Wood detected -> semi-gloss preset.")
+
+	elif "metal" in path or "steel" in path or "chrome" in path or "gold" in path or has_metalness:
+		# Hard Metals
+		mat.metallic = 1.0
+		mat.roughness = 0.18
+		mat.metallic_specular = 1.0
+		print("  [Optimizer] Metal detected -> full metallic reflections.")
+
+	elif "fabric" in path or "rug" in path or "cloth" in path or "textile" in path or "upholster" in path:
+		# Dead-flat Fabrics
+		mat.roughness = 0.95
+		mat.metallic_specular = 0.1
+		mat.clearcoat_enabled = false
+		print("  [Optimizer] Fabric/Textile detected -> forcing matte surfacing.")
+
+	elif "glass" in path or "glaz" in path or "window" in path:
+		# High-Gloss Glass
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.roughness = 0.01
+		mat.metallic_specular = 1.0
+		if mat.albedo_color.a > 0.95: mat.albedo_color.a = 0.4
+		print("  [Optimizer] Glass detected -> enabling alpha-transparency.")
+
+	# --- NORMAL MAP OPTIMIZATION ---
+	if mat.normal_enabled:
+		mat.normal_scale = 0.35
+
 	return mat
 
 func _resolve_local_texture(url: String) -> String:
