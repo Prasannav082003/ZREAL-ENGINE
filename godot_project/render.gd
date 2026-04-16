@@ -96,7 +96,7 @@ func set_resolution(data):
 	print("Setting Resolution to: ", w, "x", h)
 	get_viewport().size = Vector2i(w, h)
 	
-	get_viewport().msaa_3d = Viewport.MSAA_4X
+	get_viewport().msaa_3d = Viewport.MSAA_8X
 	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
 	get_viewport().use_taa = true
 	get_viewport().use_debanding = true
@@ -334,8 +334,6 @@ func render_video(data, output_base_path):
 		var t = float(frame) / float(total_frames - 1) if total_frames > 1 else 0.0
 		cam.position = start_pos.lerp(end_pos, t)
 		setup_smart_point_lights(cam)
-		if _dir_light != null:
-			_orient_directional_light_from_windows(_dir_light)
 		
 		await _wait_frames(1)
 		
@@ -375,11 +373,11 @@ func setup_smart_point_lights(cam: Camera3D):
 	# Define a set of light offsets relative to the camera
 	# We want to illuminate the scene around and in front of the camera
 	var light_configs = [
-		{"offset": Vector3(0, 0.5, 0), "energy": 1.5, "range": 15.0, "name": "Near"},
-		{"offset": forward * 2.5 + up * 0.5, "energy": 1.2, "range": 12.0, "name": "Ahead"},
-		{"offset": right * 1.8 + up * 0.2, "energy": 0.8, "range": 10.0, "name": "Right"},
-		{"offset": -right * 1.8 + up * 0.2, "energy": 0.8, "range": 10.0, "name": "Left"},
-		{"offset": -forward * 1.2 + up * 1.0, "energy": 0.6, "range": 10.0, "name": "Behind"}
+		{"offset": Vector3(0, 0.5, 0), "energy": 0.9, "range": 14.0, "name": "Near"},
+		{"offset": forward * 2.5 + up * 0.5, "energy": 0.75, "range": 12.0, "name": "Ahead"},
+		{"offset": right * 1.8 + up * 0.2, "energy": 0.55, "range": 10.0, "name": "Right"},
+		{"offset": -right * 1.8 + up * 0.2, "energy": 0.55, "range": 10.0, "name": "Left"},
+		{"offset": -forward * 1.2 + up * 1.0, "energy": 0.45, "range": 10.0, "name": "Behind"}
 	]
 	
 	print("Placing ", light_configs.size(), " smart point lights...")
@@ -393,7 +391,7 @@ func setup_smart_point_lights(cam: Camera3D):
 		light.position = safe_pos
 		light.light_energy = config["energy"]
 		light.omni_range = config["range"]
-		light.shadow_enabled = false
+		light.shadow_enabled = false  # Smart fill lights NEVER cast shadows
 		# Neutral slightly warm light
 		light.light_color = Color(1.0, 0.98, 0.92)
 		# Add to group so we can find and clean them up

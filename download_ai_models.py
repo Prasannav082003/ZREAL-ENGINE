@@ -6,11 +6,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = Path(os.getenv("AI_RENDER_MODEL_PATH", str(BASE_DIR / "Realistic_Vision_V6.0_B1_noVAE" / "realisticVisionV60B1_v60B1VAE.safetensors")))
-VAE_PATH = Path(os.getenv("AI_RENDER_VAE_PATH", str(BASE_DIR / "Realistic_Vision_V6.0_B1_noVAE" / "vaeFtMse840000EmaPruned_vaeFtMse840k.safetensors")))
-MODEL_REPO_ID = os.getenv("AI_RENDER_MODEL_REPO_ID", "isaiahbjork/Realistic_Vision_V6.0_B1_noVAE")
-MODEL_FILENAME = os.getenv("AI_RENDER_MODEL_FILENAME", "realisticVisionV60B1_v60B1VAE.safetensors")
-VAE_REPO_ID = os.getenv("AI_RENDER_VAE_REPO_ID", "Eata/Vae_0")
+MODEL_PATH = Path(os.getenv("AI_RENDER_MODEL_PATH", str(BASE_DIR / "Realistic_Vision_V5.1_noVAE" / "Realistic_Vision_V5.1.safetensors")))
+VAE_PATH = Path(os.getenv("AI_RENDER_VAE_PATH", str(BASE_DIR / "Realistic_Vision_V5.1_noVAE" / "vae-ft-mse-840000-ema-pruned.safetensors")))
+MODEL_REPO_ID = os.getenv("AI_RENDER_MODEL_REPO_ID", "SG161222/Realistic_Vision_V5.1_noVAE")
+MODEL_FILENAME = os.getenv("AI_RENDER_MODEL_FILENAME", "Realistic_Vision_V5.1.safetensors")
+VAE_REPO_ID = os.getenv("AI_RENDER_VAE_REPO_ID", "stabilityai/sd-vae-ft-mse-original")
 VAE_FILENAME = os.getenv("AI_RENDER_VAE_FILENAME", "vae-ft-mse-840000-ema-pruned.safetensors")
 
 def download_model():

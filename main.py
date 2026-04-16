@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List, Set, Dict, Any
 from typing_extensions import Annotated
+from pathlib import Path
 import os
 import sys
 import json
@@ -30,29 +31,8 @@ import asyncio
 import logging
 from dotenv import load_dotenv
 
-# AI Render Imports
-try:
-    import torch
-    from pathlib import Path
-    from PIL import Image, ImageOps
-    import io
-    from diffusers import (
-        AutoencoderKL,
-        ControlNetModel,
-        DPMSolverMultistepScheduler,
-        StableDiffusionControlNetImg2ImgPipeline,
-    )
-    from huggingface_hub import hf_hub_download
-    from controlnet_aux import CannyDetector
-    AI_LIBRARIES_INSTALLED = True
-    AI_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    # Set torch dtype for inference (use float16 on GPU for speed/memory, float32 on CPU)
-    AI_TORCH_DTYPE = torch.float16 if AI_DEVICE == "cuda" else torch.float32
-except ImportError:
-    AI_LIBRARIES_INSTALLED = False
-    AI_DEVICE = "cpu"
-    AI_TORCH_DTYPE = None
-    print("\033[93m⚠️  Warning: AI render libraries (diffusers, torch, Pillow, etc.) not installed. AI rendering will be disabled.\033[0m")
+# AI Render Service - Moved to app/services/ai_render_service.py
+from app.services.ai_render_service import get_ai_render_service
 
 # Load environment variables from .env file
 load_dotenv()
@@ -73,62 +53,11 @@ ASSETS_AND_TEXTURE_API_HEADER_NAME = "ZRealtyServiceApiKey"
 ASSET_ENDPOINT = "http://216.48.182.24:4050/api/v1/AssetMaster/GetAllAssets3D"
 TEXTURE_ENDPOINT = "http://216.48.182.24:4050/api/v1/TextureMaster/GetAllTextureLibraries"
 
-# --- AI RENDER CONFIGURATION ---
+# --- BASE DIRECTORY ---
 BASE_DIR = Path(__file__).resolve().parent
-AI_INPUT_DIR = BASE_DIR / "uploads" / "ai-render" / "input"
-AI_OUTPUT_DIR = BASE_DIR / "uploads" / "ai-render" / "output"
-AI_INPUT_DIR.mkdir(parents=True, exist_ok=True)
-AI_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = Path(os.getenv("AI_RENDER_MODEL_PATH", str(BASE_DIR / "Realistic_Vision_V6.0_B1_noVAE" / "realisticVisionV60B1_v60B1VAE.safetensors")))
-VAE_PATH = Path(os.getenv("AI_RENDER_VAE_PATH", str(BASE_DIR / "Realistic_Vision_V6.0_B1_noVAE" / "vaeFtMse840000EmaPruned_vaeFtMse840k.safetensors")))
-MODEL_REPO_ID = os.getenv("AI_RENDER_MODEL_REPO_ID", "isaiahbjork/Realistic_Vision_V6.0_B1_noVAE")
-MODEL_FILENAME = os.getenv("AI_RENDER_MODEL_FILENAME", "realisticVisionV60B1_v60B1VAE.safetensors")
-VAE_REPO_ID = os.getenv("AI_RENDER_VAE_REPO_ID", "Eata/Vae_0")
-VAE_FILENAME = os.getenv("AI_RENDER_VAE_FILENAME", "vae-ft-mse-840000-ema-pruned.safetensors")
-CONTROLNET_MODEL_ID = os.getenv("AI_RENDER_CONTROLNET_MODEL", "lllyasviel/sd-controlnet-canny")
-
-AI_RENDER_MAX_INPUT_SIZE = int(os.getenv("AI_RENDER_MAX_INPUT_SIZE", "1024"))
-AI_RENDER_TARGET_LONG_SIDE = int(os.getenv("AI_RENDER_TARGET_LONG_SIDE", "3840"))
-AI_RENDER_STEPS = int(os.getenv("AI_RENDER_STEPS", "46"))
-AI_RENDER_GUIDANCE_SCALE = float(os.getenv("AI_RENDER_GUIDANCE_SCALE", "8"))
-AI_RENDER_CONTROL_SCALE = float(os.getenv("AI_RENDER_CONTROL_SCALE", "1.0"))
-AI_RENDER_DENOISING_STRENGTH = float(os.getenv("AI_RENDER_DENOISING_STRENGTH", "0.5"))
-AI_RENDER_CLIP_SKIP = int(os.getenv("AI_RENDER_CLIP_SKIP", "2"))
-AI_RENDER_MAX_FILE_MB = float(os.getenv("AI_RENDER_MAX_FILE_MB", "20"))
-AI_STORAGE_CONNECTION_STRING = (
-    os.getenv("AI_AZURE_STORAGE_CONNECTION_STRING", "").strip('"')
-    or os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip('"')
-)
-AI_BLOB_CONTAINER = (
-    os.getenv("AI_AZURE_CONTAINER_NAME", "").strip()
-    or os.getenv("AI_RENDER_BLOB_CONTAINER", "").strip()
-    or "ai-images"
-)
-AI_STATUS_RENDER_TYPE = os.getenv("AI_RENDER_TYPE", "AI_RENDER")
-
-AI_DEFAULT_PROMPT = (
-    "photorealistic interior photograph of the same room, same layout, same furniture, same objects, "
-    "same camera angle, realistic global illumination, natural shadows, crisp textures, DSLR interior photography, "
-    "daylight only through the window, cloudy sky outside, tall mature trees outside the window, "
-    "sunlight filtered through tree leaves, subtle volumetric light rays, existing ceiling lamps physically lit"
-)
-AI_DEFAULT_NEGATIVE_PROMPT = (
-    "emissive walls, glowing furniture, glowing photo frame, glowing window, fake light sources, "
-    "cartoon, cgi, render, stylized, unreal engine look, distorted geometry, warped, blurry, soft focus, "
-    "changed layout, new furniture, removed objects, modified colors, flat lighting, studio lighting, overexposed"
-)
-AI_PROMPT = os.getenv("AI_RENDER_PROMPT", AI_DEFAULT_PROMPT).strip()
-AI_NEGATIVE_PROMPT = os.getenv("AI_RENDER_NEGATIVE_PROMPT", AI_DEFAULT_NEGATIVE_PROMPT).strip()
-
-
-# AI Render Globals
-AI_PIPELINE_LOCK = Lock()
-AI_MODEL_SETUP_LOCK = Lock()
-AI_PIPELINE = None
-AI_CANNY_DETECTOR = None
-ai_render_queue = queue.Queue()
-ai_worker_thread = None
+# AI Render Service Initialization
+ai_service = get_ai_render_service(BASE_DIR)
 
 # Global Cache for Master Data
 _CACHED_ASSETS_MAP = {}
@@ -641,6 +570,7 @@ def _graceful_shutdown(signum, frame):
     print(f"Stopping render worker queue...")
     try:
         render_queue.put(None)  # Poison pill
+        ai_service.shutdown()
     except:
         pass
     
@@ -914,313 +844,7 @@ queue_worker_thread.start()
 
 # --- AI RENDER UTILITY FUNCTIONS ---
 
-def _ensure_ai_model_present() -> Path:
-    if not AI_LIBRARIES_INSTALLED: return MODEL_PATH
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if MODEL_PATH.exists():
-        return MODEL_PATH
-    with AI_MODEL_SETUP_LOCK:
-        if MODEL_PATH.exists():
-            return MODEL_PATH
-        print(f"{COLOR_YELLOW}AI render model not found locally. Downloading it now...{COLOR_RESET}")
-        try:
-            downloaded_path = Path(
-                hf_hub_download(
-                    repo_id=MODEL_REPO_ID,
-                    filename=MODEL_FILENAME,
-                    local_dir=str(MODEL_PATH.parent),
-                    local_dir_use_symlinks=False,
-                )
-            )
-        except Exception as exc:
-            print(f"{COLOR_RED}Failed to download AI render model: {exc}{COLOR_RESET}")
-            return MODEL_PATH
-        if downloaded_path != MODEL_PATH:
-            if MODEL_PATH.exists():
-                MODEL_PATH.unlink()
-            downloaded_path.replace(MODEL_PATH)
-        print(f"{COLOR_GREEN}AI render model ready: {MODEL_PATH}{COLOR_RESET}")
-        return MODEL_PATH
-
-def _ensure_ai_vae_present() -> Path:
-    if not AI_LIBRARIES_INSTALLED: return VAE_PATH
-    VAE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if VAE_PATH.exists():
-        return VAE_PATH
-    with AI_MODEL_SETUP_LOCK:
-        if VAE_PATH.exists():
-            return VAE_PATH
-        print(f"{COLOR_YELLOW}AI render VAE not found locally. Downloading it now...{COLOR_RESET}")
-        try:
-            downloaded_path = Path(
-                hf_hub_download(
-                    repo_id=VAE_REPO_ID,
-                    filename=VAE_FILENAME,
-                    local_dir=str(VAE_PATH.parent),
-                    local_dir_use_symlinks=False,
-                )
-            )
-        except Exception as exc:
-            print(f"{COLOR_RED}Failed to download AI render VAE: {exc}{COLOR_RESET}")
-            return VAE_PATH
-        if downloaded_path != VAE_PATH:
-            if VAE_PATH.exists():
-                VAE_PATH.unlink()
-            downloaded_path.replace(VAE_PATH)
-        print(f"{COLOR_GREEN}AI render VAE ready: {VAE_PATH}{COLOR_RESET}")
-        return VAE_PATH
-
-def _load_ai_pipeline():
-    global AI_PIPELINE, AI_CANNY_DETECTOR, AI_DEVICE, AI_TORCH_DTYPE
-    if not AI_LIBRARIES_INSTALLED: return None
-    if AI_PIPELINE is not None and AI_CANNY_DETECTOR is not None:
-        return AI_PIPELINE
-    
-    with AI_PIPELINE_LOCK:
-        if AI_PIPELINE is not None and AI_CANNY_DETECTOR is not None:
-            return AI_PIPELINE
-        
-        # Dynamic re-check for CUDA availability (sometimes needed in multi-process/uvicorn environments)
-        if AI_DEVICE == "cpu" and torch.cuda.is_available():
-            print(f"{COLOR_YELLOW}  ↳ GPU detected during late initialization. Switching to CUDA...{COLOR_RESET}")
-            AI_DEVICE = "cuda"
-            AI_TORCH_DTYPE = torch.float16
-
-        _ensure_ai_model_present()
-        _ensure_ai_vae_present()
-        print(f"{COLOR_BLUE}--- AI Pipeline Initialization Details ---{COLOR_RESET}")
-        print(f"    PyTorch Version: {torch.__version__}")
-        print(f"    Target Device: {AI_DEVICE} / Dtype: {AI_TORCH_DTYPE}")
-        print(f"    CUDA Available (Runtime): {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            print(f"    Device Name: {torch.cuda.get_device_name(0)}")
-        print(f"{COLOR_BLUE}----------------------------------------{COLOR_RESET}")
-        
-        controlnet = ControlNetModel.from_pretrained(CONTROLNET_MODEL_ID, torch_dtype=AI_TORCH_DTYPE).to(AI_DEVICE)
-        vae = AutoencoderKL.from_single_file(str(VAE_PATH), torch_dtype=AI_TORCH_DTYPE).to(AI_DEVICE)
-        pipeline = StableDiffusionControlNetImg2ImgPipeline.from_single_file(
-            str(MODEL_PATH),
-            controlnet=controlnet,
-            vae=vae,
-            torch_dtype=AI_TORCH_DTYPE,
-            safety_checker=None,
-            local_files_only=False,
-        )
-        # Force move to device
-        pipeline = pipeline.to(AI_DEVICE)
-        pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
-            pipeline.scheduler.config,
-            algorithm_type="dpmsolver++",
-            solver_order=2,
-            use_karras_sigmas=True,
-        )
-        if AI_DEVICE == "cuda":
-            try:
-                # Optimized GPU settings
-                pipeline.enable_xformers_memory_efficient_attention()
-                # Optional: Memory efficiency mode for lower VRAM
-                # pipeline.enable_model_cpu_offload() 
-                pipeline.enable_vae_slicing()
-                pipeline.enable_vae_tiling()
-            except Exception:
-                pass
-        AI_CANNY_DETECTOR = CannyDetector()
-        AI_PIPELINE = pipeline
-        return AI_PIPELINE
-
-def _resize_ai_for_generation(image: "Image.Image", max_size: int = AI_RENDER_MAX_INPUT_SIZE) -> "Image.Image":
-    width, height = image.size
-    scale = min(max_size / max(width, height), 1.0)
-    resized_width = max(8, (int(width * scale) // 8) * 8)
-    resized_height = max(8, (int(height * scale) // 8) * 8)
-    return image.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
-
-def _prepare_ai_control_image(image: "Image.Image") -> "Image.Image":
-    control_image = AI_CANNY_DETECTOR(image)
-    if not isinstance(control_image, Image.Image):
-        control_image = Image.fromarray(control_image)
-    control_image = control_image.convert("RGB")
-    if control_image.size != image.size:
-        control_image = control_image.resize(image.size, Image.Resampling.NEAREST)
-    return control_image
-
-def _resize_ai_for_delivery(image: "Image.Image", target_long_side: int = AI_RENDER_TARGET_LONG_SIDE) -> "Image.Image":
-    width, height = image.size
-    long_side = max(width, height)
-    if long_side >= target_long_side:
-        return image
-    scale = target_long_side / long_side
-    output_width = max(8, int(width * scale))
-    output_height = max(8, int(height * scale))
-    return image.resize((output_width, output_height), Image.Resampling.LANCZOS)
-
-def _render_image_ai(source_image: "Image.Image") -> "Image.Image":
-    pipeline = _load_ai_pipeline()
-    if AI_CANNY_DETECTOR is None:
-        raise RuntimeError("AI render detector not initialized")
-    prepared_image = _resize_ai_for_generation(ImageOps.exif_transpose(source_image.convert("RGB")))
-    control_image = _prepare_ai_control_image(prepared_image)
-    with AI_PIPELINE_LOCK:
-        rendered = pipeline(
-            prompt=AI_PROMPT,
-            negative_prompt=AI_NEGATIVE_PROMPT,
-            image=prepared_image,
-            control_image=control_image,
-            height=prepared_image.height,
-            width=prepared_image.width,
-            strength=AI_RENDER_DENOISING_STRENGTH,
-            num_inference_steps=AI_RENDER_STEPS,
-            guidance_scale=AI_RENDER_GUIDANCE_SCALE,
-            controlnet_conditioning_scale=AI_RENDER_CONTROL_SCALE,
-            clip_skip=AI_RENDER_CLIP_SKIP,
-        ).images[0]
-    return _resize_ai_for_delivery(rendered)
-
-def _upload_ai_to_blob(file_path: str, blob_container: Optional[str] = None) -> Optional[str]:
-    container_name = (
-        blob_container
-        or os.getenv("AI_AZURE_CONTAINER_NAME", "").strip()
-        or os.getenv("AI_RENDER_BLOB_CONTAINER", "").strip()
-        or os.getenv("AZURE_CONTAINER_NAME", "render-images")
-    )
-    conn_str = AI_STORAGE_CONNECTION_STRING
-
-    if conn_str:
-        try:
-            from azure.storage.blob import BlobServiceClient, ContentSettings
-        except ImportError as e:
-            print(f"{COLOR_YELLOW}⚠️  Azure SDK not installed: {e}. Falling back to SAS upload.{COLOR_RESET}")
-        else:
-            try:
-                filename = os.path.basename(file_path)
-                with open(file_path, "rb") as f:
-                    data = f.read()
-                blob_service_client = BlobServiceClient.from_connection_string(conn_str)
-                blob_client = blob_service_client.get_blob_client(container=container_name, blob=filename)
-                blob_client.upload_blob(data, overwrite=True, content_settings=ContentSettings(content_type="image/png"))
-                return blob_client.url
-            except Exception as e:
-                print(f"{COLOR_YELLOW}⚠️  Azure SDK upload failed: {e}. Falling back to SAS upload.{COLOR_RESET}")
-
-    if SAS_TOKEN:
-        uploaded_url = _upload_to_blob_storage(file_path, blob_container=container_name)
-        if uploaded_url:
-            return uploaded_url
-
-    print(f"{COLOR_RED}AI Blob upload failed: no Azure upload path available. Set AI_AZURE_STORAGE_CONNECTION_STRING (or AZURE_STORAGE_CONNECTION_STRING) or AZURE_SAS_TOKEN.{COLOR_RESET}")
-    return None
-
-
-def _background_ai_render_task_main(job_data: dict):
-    job_id = job_data["job_id"]
-    try:
-        with queue_lock:
-            if job_id in active_jobs:
-                active_jobs[job_id]["status"] = "processing"
-                active_jobs[job_id]["progress"] = 20
-                active_jobs[job_id]["render_type"] = AI_STATUS_RENDER_TYPE
-                active_jobs[job_id]["type"] = "ai render"
-                active_jobs[job_id]["current_step"] = "rendering"
-                active_jobs[job_id]["started_at"] = datetime.now().isoformat()
-        _send_status_update(
-            project_id=job_data["project_id"],
-            gallery_id=job_data["gallery_id"],
-            user_id=job_data["user_id"],
-            job_id=job_id,
-            status="processing",
-            step="rendering",
-            progress=20,
-            message="AI render is processing your image.",
-            render_type=AI_STATUS_RENDER_TYPE,
-            wait_for_delivery=True
-        )
-        source_image = Image.open(job_data["input_path"]).convert("RGB")
-        rendered_image = _render_image_ai(source_image)
-        rendered_image.save(job_data["output_path"], format="PNG")
-        
-        with queue_lock:
-            if job_id in active_jobs:
-                active_jobs[job_id]["progress"] = 80
-        _send_status_update(
-            project_id=job_data["project_id"],
-            gallery_id=job_data["gallery_id"],
-            user_id=job_data["user_id"],
-            job_id=job_id,
-            status="processing",
-            step="uploading",
-            progress=80,
-            message="Uploading rendered image.",
-            render_type=AI_STATUS_RENDER_TYPE,
-            wait_for_delivery=True
-        )
-        blob_url = _upload_ai_to_blob(job_data["output_path"], blob_container=AI_BLOB_CONTAINER)
-        if not blob_url: raise RuntimeError("Blob upload failed")
-        
-        with queue_lock:
-            if job_id in active_jobs:
-                active_jobs[job_id]["status"] = "completed"
-                active_jobs[job_id]["progress"] = 100
-                active_jobs[job_id]["image_url"] = blob_url
-                active_jobs[job_id]["current_step"] = "completed"
-                active_jobs[job_id]["completed_at"] = datetime.now().isoformat()
-        _send_status_update(
-            project_id=job_data["project_id"],
-            gallery_id=job_data["gallery_id"],
-            user_id=job_data["user_id"],
-            job_id=job_id,
-            status="completed",
-            step="completed",
-            progress=100,
-            message="AI render completed successfully.",
-            blob_url=blob_url,
-            render_type=AI_STATUS_RENDER_TYPE,
-            wait_for_delivery=True,
-            details={
-                "image_url": blob_url,
-                "output_filename": os.path.basename(job_data["output_path"]),
-                "render_type": AI_STATUS_RENDER_TYPE,
-            }
-        )
-    except Exception as e:
-        error_msg = str(e)
-        with queue_lock:
-            if job_id in active_jobs:
-                active_jobs[job_id]["status"] = "failed"
-                active_jobs[job_id]["error"] = error_msg
-                active_jobs[job_id]["current_step"] = "failed"
-                active_jobs[job_id]["failed_at"] = datetime.now().isoformat()
-        _send_status_update(
-            project_id=job_data["project_id"],
-            gallery_id=job_data["gallery_id"],
-            user_id=job_data["user_id"],
-            job_id=job_id,
-            status="error",
-            step="error",
-            progress=0,
-            message=f"AI render failed: {error_msg}",
-            render_type=AI_STATUS_RENDER_TYPE,
-            wait_for_delivery=True
-        )
-
-def ai_render_worker():
-    print(f"{COLOR_GREEN}AI Render Worker Started{COLOR_RESET}")
-    while not is_shutting_down:
-        try:
-            job_data = ai_render_queue.get(timeout=1)
-            if job_data is None: break
-            _background_ai_render_task_main(job_data)
-            ai_render_queue.task_done()
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"{COLOR_RED}AI worker error: {e}{COLOR_RESET}")
-
-def _ensure_ai_worker_started():
-    global ai_worker_thread
-    if ai_worker_thread and ai_worker_thread.is_alive():
-        return
-    ai_worker_thread = Thread(target=ai_render_worker, daemon=True, name="ai-render-worker")
-    ai_worker_thread.start()
+# AI Worker logic moved to AIRenderService
 
 # --- GRACEFUL SHUTDOWN HANDLERS ---
 # We use FastAPI's shutdown event instead of manual signal handling
@@ -1261,12 +885,9 @@ async def configure_logging():
     # Filter out /queue-status endpoint logs from uvicorn access logger
     logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
     
-    # AI Render Setup
-    if AI_LIBRARIES_INSTALLED:
-        print(f"{COLOR_BLUE}--- Initializing AI Render System ---{COLOR_RESET}")
-        Thread(target=_ensure_ai_model_present, daemon=True).start()
-        Thread(target=_ensure_ai_vae_present, daemon=True).start()
-        _ensure_ai_worker_started()
+    # --- AI Render Service Setup ---
+    ai_service.setup(active_jobs, queue_lock, _send_status_update, _update_global_status)
+    ai_service.upload_to_blob_fallback = _upload_to_blob_storage
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -1368,7 +989,7 @@ from api_status import create_status_router
 from scene_optimizer import SceneOptimizer, CULLING_LOGS_DIR
 from scene_optimizer_video import VideoSceneOptimizer
 
-status_router = create_status_router(active_jobs, render_queue, queue_lock, CURRENT_STATUS, ai_render_queue=ai_render_queue)
+status_router = create_status_router(active_jobs, render_queue, queue_lock, CURRENT_STATUS, ai_render_queue=ai_service.render_queue)
 app.include_router(status_router)
 
 # --- DATA MODELS (SCHEMA) ---
@@ -3697,19 +3318,19 @@ async def sd_airender(
     job_id_param: Optional[str] = Query(None, alias="JobId", description="Optional existing Job ID"),
     image: UploadFile = File(..., description="PNG image file to convert"),
 ):
-    if not AI_LIBRARIES_INSTALLED:
+    if not ai_service.is_libraries_installed:
         raise HTTPException(status_code=503, detail="AI rendering is disabled - missing dependencies (diffusers, torch, etc.)")
     
     if image.content_type not in {"image/png", "image/x-png"}:
         raise HTTPException(status_code=400, detail="Only PNG images are supported for ai render.")
     
     file_bytes = await image.read()
-    if len(file_bytes) / (1024 * 1024) > AI_RENDER_MAX_FILE_MB:
-        raise HTTPException(status_code=400, detail=f"File exceeds {AI_RENDER_MAX_FILE_MB}MB.")
+    if len(file_bytes) / (1024 * 1024) > ai_service.max_file_mb:
+        raise HTTPException(status_code=400, detail=f"File exceeds {ai_service.max_file_mb}MB.")
     
     job_id = job_id_param if job_id_param else str(uuid.uuid4())
-    input_path = AI_INPUT_DIR / f"{job_id}_{Path(image.filename).stem}.png"
-    output_path = AI_OUTPUT_DIR / f"{job_id}_render.png"
+    input_path = ai_service.input_dir / f"{job_id}_{Path(image.filename).stem}.png"
+    output_path = ai_service.output_dir / f"{job_id}_render.png"
     
     # Save uploaded file
     try:
@@ -3722,7 +3343,7 @@ async def sd_airender(
             "status": "queued",
             "type": "ai render",
             "display_type": "ai render",
-            "render_type": "AI_RENDER",
+            "render_type": ai_service.status_render_type,
             "project_id": project_id,
             "gallery_id": id,
             "user_id": user_id,
@@ -3747,7 +3368,7 @@ async def sd_airender(
         "filename": image.filename,
     }
     
-    ai_render_queue.put(job_data)
+    ai_service.render_queue.put(job_data)
     
     print(f"{COLOR_GREEN}✅ AI Render job added to queue: {job_id}{COLOR_RESET}")
     
@@ -3759,7 +3380,7 @@ async def sd_airender(
             "ProjectId": project_id,
             "Id": id,
             "UserId": user_id,
-            "RenderType": "AI_RENDER"
+            "RenderType": ai_service.status_render_type
         }
     )
 

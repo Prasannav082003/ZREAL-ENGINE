@@ -127,6 +127,56 @@ def _min_dist_to_polygon(ix: float, iy: float, poly_verts: List[Tuple[float, flo
     return min_dist
 
 
+def _resolve_selected_layer_hint(
+    selected_layer_raw: str,
+    layers: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Resolve a selectedLayer hint to a concrete layer id.
+
+    The hint may be a layer key, the layer id field, or the layer name.
+    Returns (layer_id, match_reason) or (None, None) if no match exists.
+    """
+    hint = str(selected_layer_raw or "").strip()
+    if not hint:
+        return None, None
+
+    def _norm(value: Any) -> str:
+        return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+    hint_norm = _norm(hint)
+
+    if hint in layers:
+        return hint, "exact key"
+
+    for layer_id, layer in layers.items():
+        candidates = (layer_id, layer.get("id"), layer.get("name"))
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            candidate_text = str(candidate).strip()
+            if not candidate_text:
+                continue
+            if candidate_text == hint:
+                return layer_id, "exact id/name"
+            if _norm(candidate_text) == hint_norm:
+                return layer_id, "normalized id/name"
+
+    for layer_id, layer in layers.items():
+        candidates = (layer_id, layer.get("id"), layer.get("name"))
+        for candidate in candidates:
+            candidate_text = str(candidate or "").strip()
+            if not candidate_text:
+                continue
+            candidate_norm = _norm(candidate_text)
+            if not candidate_norm:
+                continue
+            if hint_norm.startswith(candidate_norm) or candidate_norm.startswith(hint_norm):
+                return layer_id, "prefix match"
+
+    return None, None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PORTAL VISIBILITY HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1315,39 +1365,23 @@ class SceneOptimizer:
             # the camera's physical height is near the selected layer's altitude boundary.
             _camera_layer_from_hint: bool = False
 
-            # Try selectedLayer hint first (skip only for top-view)
-            # When showAllFloors=true we rely on the spatial polygon scan below —
-            # selectedLayer alone can't tell us if the camera is interior or exterior
-            # (it just records the active UI layer).  Trusting it for showAllFloors=true
-            # would incorrectly isolate exterior cameras to one floor.
             if _selected_layer_raw and not is_top_view and not show_all_floors:
-                # Exact match first
-                if _selected_layer_raw in layers:
-                    camera_layer_id = _selected_layer_raw
+                _resolved_layer_id, _resolve_reason = _resolve_selected_layer_hint(
+                    _selected_layer_raw,
+                    layers,
+                )
+                if _resolved_layer_id:
+                    camera_layer_id = _resolved_layer_id
                     _camera_layer_from_hint = True
                     self.log(
-                        f"  ✅ selectedLayer exact match → camera_layer='{camera_layer_id}'"
+                        f"  ✅ selectedLayer='{_selected_layer_raw}' resolved via {_resolve_reason} "
+                        f"→ camera_layer='{camera_layer_id}'"
                     )
                 else:
-                    for _lid in layers:
-                        if _selected_layer_raw.startswith(str(_lid)):
-                            camera_layer_id = _lid
-                            _camera_layer_from_hint = True
-                            self.log(
-                                f"  ✅ selectedLayer prefix match: "
-                                f"'{_selected_layer_raw}' → camera_layer='{camera_layer_id}'"
-                            )
-                            break
-                    if not camera_layer_id:
-                        for _lid in layers:
-                            if str(_lid).startswith(_selected_layer_raw):
-                                camera_layer_id = _lid
-                                _camera_layer_from_hint = True
-                                self.log(
-                                    f"  ✅ selectedLayer reverse-prefix match: "
-                                    f"'{_selected_layer_raw}' → camera_layer='{camera_layer_id}'"
-                                )
-                                break
+                    self.log(
+                        f"  ⚠️ selectedLayer='{_selected_layer_raw}' did not match any layer; "
+                        "falling back to spatial pre-scan."
+                    )
 
             if camera_layer_id:
                 _hint_note = " Cross-floor detection DISABLED (selectedLayer is authoritative)." if _camera_layer_from_hint else ""
@@ -1356,10 +1390,8 @@ class SceneOptimizer:
                     f"(resolved to '{camera_layer_id}') — skipping spatial pre-scan.{_hint_note}"
                 )
 
-            # Spatial pre-scan — runs regardless of showAllFloors so that
-            # camera_layer_id is found for INTERIOR isolation and cross-floor detection.
-            # When showAllFloors=true + EXTERIOR (camera outside all rooms),
-            # camera_layer_id stays None and layer isolation is skipped automatically.
+            # Spatial pre-scan only runs when no explicit selectedLayer was resolved.
+            # This keeps camera height from overriding a user-selected floor.
             if not camera_layer_id and not is_top_view:
                 if show_all_floors:
                     self.log("  🏗️ showAllFloors=true: running spatial pre-scan — isolation applies if camera is INTERIOR, skipped if EXTERIOR.")

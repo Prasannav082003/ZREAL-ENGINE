@@ -282,13 +282,7 @@ func _apply_keyframe(frame_idx: int):
 			var blended = cur_q.slerp(next_quat.normalized(), smooth_t)
 			cam.basis = Basis(blended)
 
-	# Dynamic sunlight: update sun orientation to favor windows in this frame's view
-	if _dir_light != null:
-		var cam_pose = {
-			"position": cam.position,
-			"target": cam.position - cam.basis.z * 5.0
-		}
-		_orient_directional_light_from_windows(_dir_light, cam_pose)
+	# Fixed lights are set up once — no per-frame update needed
 
 # ─────────────────────────────────────────────────────────────────
 # Smooth Camera Helpers
@@ -464,18 +458,36 @@ func set_resolution(data):
 	if data.has("height"): h = int(data["height"])
 			
 	print("Setting Resolution to: ", w, "x", h)
+	
+	# Godot 4.6: MovieWriter reads resolution from ProjectSettings at startup.
+	# We MUST update both the ProjectSettings AND the window/viewport size so
+	# MovieWriter records at the correct resolution (not the project.godot default).
+	ProjectSettings.set_setting("display/window/size/viewport_width", w)
+	ProjectSettings.set_setting("display/window/size/viewport_height", h)
 	get_viewport().size = Vector2i(w, h)
+	DisplayServer.window_set_size(Vector2i(w, h))
 
 	# Anti-aliasing for video:
 	# TAA is intentionally DISABLED — it accumulates frames over time and causes
 	# strong ghosting/blur whenever the camera moves, making the video look smeared.
 	# MSAA_8X provides the best physically hard-edged geometry clarity.
-	# FXAA is DISABLED because it smears/softens high-frequency texture details.
+	# FXAA is enabled as a lightweight final pass to catch specular and shader
+	# aliasing that MSAA cannot resolve (texture shimmer on fabrics, wood grain).
 	get_viewport().msaa_3d = Viewport.MSAA_8X
-	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
 	get_viewport().use_taa = false          # ← must stay OFF during animated renders
 	get_viewport().use_debanding = true
 	get_viewport().mesh_lod_threshold = 0.0
+	
+	# ── Texture Quality for Video ──────────────────────────────────────────
+	# Anisotropic filtering 16× (level 4): eliminates shimmer on high-frequency
+	# textures (fabric, wood) viewed at oblique angles during camera motion.
+	# Default is 4× which is too low for 4K video with detailed materials.
+	ProjectSettings.set_setting("rendering/textures/default_filters/anisotropic_filtering_level", 4)
+	# Mipmap bias +0.1: Godot 4.6 feature — nudges mip selection toward slightly
+	# blurrier levels, eliminating temporal grain from high-frequency textures
+	# without softening the whole image like FXAA would. Range: -2.0 to +2.0.
+	ProjectSettings.set_setting("rendering/textures/default_filters/texture_mipmap_bias", 0.1)
 
 # ─────────────────────────────────────────────────────────────────
 # Camera Setup (Initial)

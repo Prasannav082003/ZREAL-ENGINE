@@ -6,9 +6,24 @@ var _tracked_assets = []
 var _window_sunlight_data = []  # Collected during hole building, used to place window sunlights
 var _exterior_assets = []       # Tracks trees/plants/etc for shadow optimization
 var _dir_light: DirectionalLight3D = null
+var _interior_shadow_clusters := {}
 var day_render = true
 var lighting_profile = "day"
 const ENABLE_PROCEDURAL_WINDOW_GRID_CASTER = false
+# Global kill-switch for room reflection probes.
+# true  -> build and use the reflection probe
+# false -> skip probe creation entirely
+const USE_REFLECTION_PROBE = true
+# When true, only create the probe if the scene contains reflective surfaces
+# such as floor tile, glass, mirror, polished stone, or metal materials.
+const USE_REFLECTION_PROBE_ONLY_FOR_REFLECTIVE_SURFACES = true
+# When true, reflective floor/metal/glass materials get a small response boost
+# so the probe is actually visible on the intended surfaces.
+const USE_REFLECTION_RESPONSE_ASSIST = true
+# Global kill-switch for the material optimizer.
+# true  -> apply optimizer presets / overrides
+# false -> keep raw material values from the JSON / asset defaults
+const USE_MATERIAL_OPTIMIZER = false
 var _camera_pose = {
 	"position": Vector3.ZERO,
 	"target": Vector3.ZERO
@@ -18,6 +33,7 @@ var _camera_height_m: float = 0.0
 func build_scene(data):
 	lighting_profile = _resolve_lighting_profile(data)
 	day_render = lighting_profile != "night"
+	_interior_shadow_clusters.clear()
 	_camera_pose = _extract_camera_pose(data)
 	_camera_height_m = float(_camera_pose["position"].y)
 	
@@ -70,19 +86,12 @@ func setup_lighting(data, geom_data = {}):
 	# ── Primary Directional Light (Sun / Moon) ─────────────────────────────
 	var dir_light = DirectionalLight3D.new()
 	dir_light.name = "Sun"
-	# Enable shadows so sunlight through windows casts realistic shadow patterns
-	dir_light.shadow_enabled = true
-	dir_light.light_specular = 1.0 # Ensure sun casts specular highlights
+	# Keep the sun as a soft ambient contributor; interior fixtures own the shadows.
+	dir_light.shadow_enabled = false
+	dir_light.light_specular = 0.3
+	dir_light.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 
 	# High-quality shadow settings for photorealistic renders
-	dir_light.light_angular_distance = 0.5
-	dir_light.shadow_bias = 0.1
-	dir_light.shadow_normal_bias = 3.0
-	dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
-	dir_light.directional_shadow_max_distance = 60.0
-	dir_light.directional_shadow_blend_splits = true
-	dir_light.shadow_transmittance_bias = 0.05
-	dir_light.shadow_blur = 1.0
 
 	# CRITICAL FIX: add_child(dir_light) BEFORE any look_at() call.
 	# look_at() requires the node to be inside the scene tree.
@@ -147,10 +156,10 @@ func setup_lighting(data, geom_data = {}):
 		print("Using fallback procedural sky")
 
 	# ── Ambient Light ──────────────────────────────────────────────────────
-	# Use sky ambient to allow environmental reflections to contribute correctly.
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	# SOURCE_COLOR prevents sky light from leaking through wall/ceiling geometry seams.
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = lighting["ambient_color"]
-	env.ambient_light_energy = 1.0 # Boost ambient energy for better probe capture
+	env.ambient_light_energy = lighting["ambient_energy"]
 
 	# ── Tone Mapping ──────────────────────────────────────────────────────
 	# CRITICAL: exposure must be set high enough that headless render is NOT black.
@@ -171,11 +180,11 @@ func setup_lighting(data, geom_data = {}):
 
 	# ── Screen-Space Ambient Occlusion ─────────────────────────────────────
 	env.ssao_enabled   = true
-	env.ssao_radius    = 1.0
-	env.ssao_intensity = 0.45
-	env.ssao_power     = 0.9
-	env.ssao_detail    = 0.25
-	env.ssao_horizon   = 0.03
+	env.ssao_radius    = 1.8
+	env.ssao_intensity = 1.6
+	env.ssao_power     = 2.0
+	env.ssao_detail    = 0.5
+	env.ssao_horizon   = 0.06
 	env.ssao_sharpness = 0.98
 
 	# ── Glow (subtle bloom for realism) ───────────────────────────────────
@@ -193,33 +202,46 @@ func setup_lighting(data, geom_data = {}):
 	env.adjustment_saturation = 1.10
 
 	var world_env = WorldEnvironment.new()
+	var reflective_surfaces_present = _scene_has_reflective_surfaces(geom_data)
 
-	# ── Reflection Probe — placed at room center for realistic interior reflections ──
-	# Interior mode + box projection give accurate parallax-corrected reflections
-	# on the floor surface. Shadows enabled so window light shadows are captured.
-	var probe = ReflectionProbe.new()
-	probe.name = "RoomReflectionProbe"
-	
-	# Match the requested settings from the manual setup image (20x20x20 box)
-	probe.size = Vector3(20.0, 20.0, 20.0) 
-	probe.update_mode = ReflectionProbe.UPDATE_ALWAYS # Corresponds to "Always (Slow)"
-	probe.intensity = 2.5 # Boosted intensity for stronger, visible reflections
-	probe.max_distance = 0.0   # Matches manual image: 0.0
-	probe.blend_distance = 1.0 # Matches manual image: 1.0
-	
-	# Place at the exact center of the room
-	probe.position = room_center
-	# Interior mode: treats the probe as an enclosed space (no sky leaking)
-	probe.interior = true
-	# Box projection: corrects parallax so reflections align with actual room geometry
-	probe.box_projection = true
-	# Enable shadows in the probe capture — window shadows appear in reflections
-	probe.enable_shadows = true
-	
-	add_child(probe)
-	print("ReflectionProbe (ALWAYS) placed at room center: ", room_center,
-		" size: (20,20,20) interior=true, box_projection=true, shadows=true")
-	print("Probe added and verified at: ", probe.get_path())
+	if USE_REFLECTION_PROBE and (
+		not USE_REFLECTION_PROBE_ONLY_FOR_REFLECTIVE_SURFACES
+		or reflective_surfaces_present
+	):
+		# ── Reflection Probe — placed at room center for realistic interior reflections ──
+		# Interior mode + box projection give accurate parallax-corrected reflections
+		# on the floor surface. Shadows enabled so window light shadows are captured.
+		var probe = ReflectionProbe.new()
+		probe.name = "RoomReflectionProbe"
+		
+		# Size the probe to the room so floor reflections are actually covered.
+		probe.size = Vector3(
+			max(20.0, room_extent.x + 2.0),
+			max(8.0, room_ceiling_y - room_center.y + 2.0),
+			max(20.0, room_extent.y + 2.0)
+		)
+		probe.update_mode = ReflectionProbe.UPDATE_ALWAYS # Corresponds to "Always (Slow)"
+		probe.intensity = 3.0 # Stronger reflections on floor/glass/metal surfaces
+		probe.max_distance = 0.0   # Matches manual image: 0.0
+		probe.blend_distance = 1.0 # Matches manual image: 1.0
+		
+		# Place at the exact center of the room
+		probe.position = room_center
+		# Interior mode: treats the probe as an enclosed space (no sky leaking)
+		probe.interior = true
+		# Box projection: corrects parallax so reflections align with actual room geometry
+		probe.box_projection = true
+		# Enable shadows in the probe capture — window shadows appear in reflections
+		probe.enable_shadows = true
+		
+		add_child(probe)
+		print("ReflectionProbe (ALWAYS) placed at room center: ", room_center,
+			" size: ", probe.size, " interior=true, box_projection=true, shadows=true")
+		print("Probe added and verified at: ", probe.get_path())
+	elif USE_REFLECTION_PROBE:
+		print("ReflectionProbe skipped: no reflective surfaces detected in scene.")
+	else:
+		print("ReflectionProbe disabled by USE_REFLECTION_PROBE=false")
 	
 	world_env.environment = env
 	add_child(world_env)
@@ -272,6 +294,40 @@ func setup_lighting(data, geom_data = {}):
 		add_child(fill)
 
 	print("Photorealistic lighting setup complete. profile=", lighting_profile)
+
+func _configure_soft_interior_shadow(light: Light3D) -> void:
+	# Keep the shadow present but gentle so it reads as one soft interior shadow.
+	light.shadow_enabled = true
+	light.light_size = 0.18
+	light.shadow_bias = 0.08
+	light.shadow_normal_bias = 1.7
+	light.shadow_blur = 1.35
+	light.shadow_opacity = 0.78
+
+func _shadow_cluster_key(world_pos: Vector3, light_range: float) -> String:
+	# Group nearby interior fixtures together so only one soft shadow source
+	# is active per local lighting cluster.
+	var bucket_size = max(220.0, light_range * 55.0)
+	var cluster_x = int(round(world_pos.x / bucket_size))
+	var cluster_z = int(round(world_pos.z / bucket_size))
+	return str(cluster_x) + ":" + str(cluster_z)
+
+func _should_use_interior_shadow_light(world_pos: Vector3, light_range: float, is_street_light: bool) -> bool:
+	if is_street_light:
+		return false
+	var key = _shadow_cluster_key(world_pos, light_range)
+	if _interior_shadow_clusters.has(key):
+		return false
+	_interior_shadow_clusters[key] = true
+	return true
+
+func _sanitize_glb_lights(node: Node) -> void:
+	# Kill shadows from GLB-embedded lights so they do not fight the scene lighting.
+	if node is Light3D:
+		node.shadow_enabled = false
+		node.light_energy = min(node.light_energy, 0.3)
+	for child in node.get_children():
+		_sanitize_glb_lights(child)
 
 func parse_vec3(d):
 	if typeof(d) == TYPE_DICTIONARY:
@@ -351,7 +407,7 @@ func _get_lighting_profile_settings() -> Dictionary:
 		_:
 			return {
 				"sky_exr": "res://day.exr",
-				"dir_energy": 1.0,
+				"dir_energy": 0.45,
 				"dir_color": Color(1.0, 0.96, 0.88),
 				"sky_top_color": Color(0.25, 0.40, 0.78),
 				"sky_horizon_color": Color(0.75, 0.80, 0.90),
@@ -402,6 +458,149 @@ func _extract_camera_pose(data: Dictionary) -> Dictionary:
 		cam_target = cam_pos + Vector3(0, 0, -1)
 
 	return {"position": cam_pos, "target": cam_target}
+
+func _has_reflective_surface_hint(value: String) -> bool:
+	var text = value.to_lower()
+	if text == "":
+		return false
+	var keywords = [
+		"glass", "mirror", "metal", "chrome", "polish", "polished",
+		"marble", "granite", "tile", "porcelain", "gloss", "reflect",
+		"shiny", "steel", "chrome", "gold"
+	]
+	for kw in keywords:
+		if kw in text:
+			return true
+	return false
+
+func _material_dict_has_reflection_hint(mat_data) -> bool:
+	if typeof(mat_data) != TYPE_DICTIONARY:
+		return false
+	if mat_data.has("mapUrl") and _has_reflective_surface_hint(str(mat_data.get("mapUrl", ""))):
+		return true
+	if mat_data.has("normalUrl") and _has_reflective_surface_hint(str(mat_data.get("normalUrl", ""))):
+		return true
+	if mat_data.has("roughnessUrl") and _has_reflective_surface_hint(str(mat_data.get("roughnessUrl", ""))):
+		return true
+	if mat_data.has("metalnessUrl") and str(mat_data.get("metalnessUrl", "")) != "":
+		return true
+	if mat_data.has("color") and _has_reflective_surface_hint(str(mat_data.get("color", ""))):
+		return true
+	return false
+
+func _scene_has_reflective_surfaces(geom_data: Dictionary) -> bool:
+	if typeof(geom_data) != TYPE_DICTIONARY:
+		return false
+
+	if geom_data.has("layers") and typeof(geom_data["layers"]) == TYPE_DICTIONARY:
+		for layer in geom_data["layers"].values():
+			if typeof(layer) != TYPE_DICTIONARY:
+				continue
+
+			for line in layer.get("lines", {}).values():
+				if typeof(line) != TYPE_DICTIONARY:
+					continue
+				if line.has("asset_urls") and typeof(line["asset_urls"]) == TYPE_DICTIONARY:
+					var au = line["asset_urls"]
+					for face in ["inner", "outer"]:
+						if au.has(face) and _material_dict_has_reflection_hint(au[face]):
+							return true
+				for prop_key in ["inner_properties", "outer_properties"]:
+					if line.has(prop_key) and typeof(line[prop_key]) == TYPE_DICTIONARY:
+						var props = line[prop_key]
+						if props.has("material") and _material_dict_has_reflection_hint(props["material"]):
+							return true
+
+			for area_key in ["areas"]:
+				if not layer.has(area_key) or typeof(layer[area_key]) != TYPE_DICTIONARY:
+					continue
+				for area in layer[area_key].values():
+					if typeof(area) != TYPE_DICTIONARY:
+						continue
+					for prop_key in ["floor_properties", "ceiling_properties"]:
+						if area.has(prop_key) and typeof(area[prop_key]) == TYPE_DICTIONARY:
+							var props = area[prop_key]
+							if props.has("material") and _material_dict_has_reflection_hint(props["material"]):
+								return true
+
+			for item in layer.get("items", {}).values():
+				if typeof(item) != TYPE_DICTIONARY:
+					continue
+				var item_desc = "%s %s" % [str(item.get("name", "")), str(item.get("type", ""))]
+				if _has_reflective_surface_hint(item_desc):
+					return true
+				if item.has("materials") and typeof(item["materials"]) == TYPE_DICTIONARY:
+					for mat in item["materials"].values():
+						if _material_dict_has_reflection_hint(mat):
+							return true
+
+	if geom_data.has("materials") and typeof(geom_data["materials"]) == TYPE_DICTIONARY:
+		for mat in geom_data["materials"].values():
+			if _material_dict_has_reflection_hint(mat):
+				return true
+
+	return false
+
+func _material_is_reflective_candidate(mat_data, surface_type: String) -> bool:
+	if typeof(mat_data) != TYPE_DICTIONARY:
+		return false
+
+	var text = ""
+	if mat_data.has("mapUrl"):
+		text += " " + str(mat_data.get("mapUrl", ""))
+	if mat_data.has("normalUrl"):
+		text += " " + str(mat_data.get("normalUrl", ""))
+	if mat_data.has("roughnessUrl"):
+		text += " " + str(mat_data.get("roughnessUrl", ""))
+	if mat_data.has("metalnessUrl"):
+		text += " " + str(mat_data.get("metalnessUrl", ""))
+	if mat_data.has("color"):
+		text += " " + str(mat_data.get("color", ""))
+	text = text.to_lower()
+
+	if surface_type == "floor":
+		var floor_keywords = ["tile", "marble", "granite", "polished", "porcelain", "gloss", "reflect", "metal", "chrome", "glass"]
+		for kw in floor_keywords:
+			if kw in text:
+				return true
+
+	if surface_type == "wall" or surface_type == "item":
+		var spec_keywords = ["glass", "mirror", "metal", "chrome", "gold"]
+		for kw in spec_keywords:
+			if kw in text:
+				return true
+
+	return false
+
+func _apply_reflection_response_assist(mat: StandardMaterial3D, mat_data: Dictionary, surface_type: String) -> StandardMaterial3D:
+	if not USE_REFLECTION_PROBE or not USE_REFLECTION_RESPONSE_ASSIST:
+		return mat
+
+	if not _material_is_reflective_candidate(mat_data, surface_type):
+		return mat
+
+	var path = str(mat_data.get("mapUrl", "")).to_lower()
+	if surface_type == "floor":
+		mat.metallic = 0.0
+		mat.roughness = min(mat.roughness, 0.25)
+		mat.metallic_specular = max(mat.metallic_specular, 0.65)
+		mat.clearcoat_enabled = true
+		mat.clearcoat = max(mat.clearcoat, 0.25)
+		mat.clearcoat_roughness = min(mat.clearcoat_roughness, 0.12)
+		print("  [ReflectionAssist] Floor candidate -> boosting probe response.")
+	elif "glass" in path or "mirror" in path:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.roughness = min(mat.roughness, 0.05)
+		mat.metallic = 0.0
+		mat.metallic_specular = 1.0
+		print("  [ReflectionAssist] Glass/mirror candidate -> enabling crisp reflections.")
+	elif "metal" in path or "steel" in path or "chrome" in path or "gold" in path:
+		mat.metallic = 1.0
+		mat.roughness = min(mat.roughness, 0.18)
+		mat.metallic_specular = 1.0
+		print("  [ReflectionAssist] Metal candidate -> boosting reflections.")
+
+	return mat
 
 func _extract_room_lighting_bounds(geom_data: Dictionary) -> Dictionary:
 	var out = {
@@ -1001,7 +1200,8 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 			outer_mat = StandardMaterial3D.new()
 			outer_mat.albedo_color = Color(0.82, 0.82, 0.82)
 			# Apply optimizer for default walls too
-			outer_mat = optimize_material(outer_mat, {}, "wall")
+			if USE_MATERIAL_OPTIMIZER:
+				outer_mat = optimize_material(outer_mat, {}, "wall")
 
 		var inner_mat_for_wall: StandardMaterial3D
 		if inner_mat_data != null:
@@ -1010,7 +1210,8 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 			inner_mat_for_wall = StandardMaterial3D.new()
 			inner_mat_for_wall.albedo_color = Color(0.82, 0.82, 0.82)
 			# Apply optimizer for default walls too
-			inner_mat_for_wall = optimize_material(inner_mat_for_wall, {}, "wall")
+			if USE_MATERIAL_OPTIMIZER:
+				inner_mat_for_wall = optimize_material(inner_mat_for_wall, {}, "wall")
 
 		if render_mode == "INTERIOR":
 			# INTERIOR: apply inner material on the structural wall.
@@ -1177,6 +1378,7 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 								var asset_node = glTF.generate_scene(glTFState)
 								if asset_node:
 									add_child(asset_node)
+									_sanitize_glb_lights(asset_node)
 									
 									var aabb = _get_hierarchy_aabb(asset_node)
 									var dims = aabb.size
@@ -1342,7 +1544,8 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 					var floor_mat = StandardMaterial3D.new()
 					floor_mat.albedo_color = Color(0.8, 0.8, 0.8)
 					# Apply default optimizer logic to fallback floor with context
-					floor_mat = optimize_material(floor_mat, {"color": "#cccccc"}, "floor")
+					if USE_MATERIAL_OPTIMIZER:
+						floor_mat = optimize_material(floor_mat, {"color": "#cccccc"}, "floor")
 					floor_poly.material    = floor_mat
 
 				_add_floor_opening_cutters(csg, structures, str(area_id), layer_altitude, floor_depth, scale_factor)
@@ -1427,7 +1630,8 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 						var ceil_mat = StandardMaterial3D.new()
 						ceil_mat.albedo_color = Color(0.82, 0.82, 0.82)
 						# Optimize fallback ceiling
-						ceil_mat = optimize_material(ceil_mat, {"color": "#d1d1d1"}, "ceiling")
+						if USE_MATERIAL_OPTIMIZER:
+							ceil_mat = optimize_material(ceil_mat, {"color": "#d1d1d1"}, "ceiling")
 						ceil_poly.material    = ceil_mat
 					
 					csg.add_child(ceil_poly)
@@ -2336,33 +2540,59 @@ func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB,
 	var emissive_surface_found = _apply_light_fixture_emission(node, light_color, emission_energy)
 
 	var world_pos = node.to_global(emitter_local)
+	var use_shadow = _should_use_interior_shadow_light(world_pos, light_range, is_street_light)
 	if mounting_type == "ceiling_mount" or "wall" in full_desc or is_street_light:
 		var spot = SpotLight3D.new()
-		spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Visible"
 		spot.global_position = world_pos
 		spot.light_color = light_color
 		spot.light_energy = light_energy
-		spot.light_specular = 0.25
+		spot.light_specular = 0.18
 		spot.shadow_enabled = false
 		spot.spot_range = light_range
-		spot.spot_angle = 62.0 if mounting_type == "ceiling_mount" else 48.0
-		spot.spot_attenuation = 0.75
+		spot.spot_angle = 68.0 if mounting_type == "ceiling_mount" else 52.0
+		spot.spot_attenuation = 0.68
 		add_child(spot)
 
 		var target_local = emitter_local + Vector3(0, -max(1.0, light_range * 0.45), 0)
 		if "wall" in full_desc and not is_street_light:
 			target_local = emitter_local + Vector3(0, -0.15, -max(0.8, light_range * 0.25))
 		spot.look_at(node.to_global(target_local), Vector3.UP)
+
+		if use_shadow:
+			var shadow_spot = SpotLight3D.new()
+			shadow_spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Shadow"
+			shadow_spot.global_position = world_pos
+			shadow_spot.light_color = light_color
+			shadow_spot.light_energy = light_energy * 0.35
+			shadow_spot.light_specular = 0.0
+			_configure_soft_interior_shadow(shadow_spot)
+			shadow_spot.spot_range = light_range
+			shadow_spot.spot_angle = spot.spot_angle
+			shadow_spot.spot_attenuation = 0.82
+			add_child(shadow_spot)
+			shadow_spot.look_at(node.to_global(target_local), Vector3.UP)
 	else:
 		var omni = OmniLight3D.new()
-		omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Visible"
 		omni.global_position = world_pos
 		omni.light_color = light_color
 		omni.light_energy = light_energy
-		omni.light_specular = 0.25
+		omni.light_specular = 0.12
 		omni.shadow_enabled = false
 		omni.omni_range = light_range
 		add_child(omni)
+
+		if use_shadow:
+			var shadow_omni = OmniLight3D.new()
+			shadow_omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Shadow"
+			shadow_omni.global_position = world_pos
+			shadow_omni.light_color = light_color
+			shadow_omni.light_energy = light_energy * 0.35
+			shadow_omni.light_specular = 0.0
+			_configure_soft_interior_shadow(shadow_omni)
+			shadow_omni.omni_range = light_range
+			add_child(shadow_omni)
 
 	if not emissive_surface_found:
 		print("Light fixture added without material override for asset: ", item.get("name", "Light"))
@@ -2424,6 +2654,7 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 				var node = glTF.generate_scene(glTFState)
 				if node:
 					add_child(node)
+					_sanitize_glb_lights(node)
 					
 					var px = float(item.get("x", 0)) * 0.01
 					var py = float(item.get("y", 0)) * 0.01
@@ -2653,7 +2884,8 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 
 											if modified:
 												# Apply Optimizer with context (item)
-												new_mat = optimize_material(new_mat, mat_opt, "item")
+												if USE_MATERIAL_OPTIMIZER:
+													new_mat = optimize_material(new_mat, mat_opt, "item")
 												m.set_surface_override_material(i, new_mat)
 												# Force material override to ensure it takes precedence over asset defaults
 												m.material_override = new_mat
@@ -2983,9 +3215,14 @@ func create_material(mat_data, surface_type: String = "item"):
 				scale_u = sf; scale_v = sf
 
 	mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+
+	# Reflection assist is separate from the main optimizer:
+	# it only boosts the surfaces that should visibly pick up the probe.
+	mat = _apply_reflection_response_assist(mat, mat_data, surface_type)
 	
-	# Apply late-stage material optimization based on texture type AND surface category
-	mat = optimize_material(mat, mat_data, surface_type)
+	# Apply late-stage material optimization only when enabled.
+	if USE_MATERIAL_OPTIMIZER:
+		mat = optimize_material(mat, mat_data, surface_type)
 	
 	return mat
 
@@ -2997,6 +3234,16 @@ func create_material(mat_data, surface_type: String = "item"):
 func optimize_material(mat: StandardMaterial3D, mat_data: Dictionary, surface_type: String = "item") -> StandardMaterial3D:
 	var path          = str(mat_data.get("mapUrl", "")).to_lower()
 	var has_metalness = mat_data.has("metalnessUrl") and str(mat_data["metalnessUrl"]) != ""
+	var has_normal    = mat_data.has("normalUrl") and str(mat_data["normalUrl"]) != ""
+	var has_roughness = mat_data.has("roughnessUrl") and str(mat_data["roughnessUrl"]) != ""
+	var has_any_map   = path != "" or has_normal or has_roughness or has_metalness
+	var has_explicit_color = false
+	if mat_data.has("color"):
+		var c_str = str(mat_data["color"]).strip_edges()
+		if c_str.length() >= 3 and not c_str.begins_with("#"):
+			c_str = "#" + c_str
+		has_explicit_color = c_str.is_valid_html_color()
+	var is_color_only_wall = surface_type == "wall" and has_explicit_color and not has_any_map
 	
 	# --- BASE ARCHITECTURAL DEFAULTS BY SURFACE TYPE ---
 	match surface_type:
@@ -3010,8 +3257,14 @@ func optimize_material(mat: StandardMaterial3D, mat_data: Dictionary, surface_ty
 			
 		"wall":
 			mat.metallic = 0.0
-			mat.metallic_specular = 0.3
-			mat.roughness = 0.75 # Flat matte walls
+			if is_color_only_wall:
+				# Flat painted walls should stay matte and should not pick up probe shine.
+				mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+				mat.metallic_specular = 0.0
+				mat.roughness = 1.0
+			else:
+				mat.metallic_specular = 0.12
+				mat.roughness = 0.88 # Matte walls with a tiny amount of light response
 			
 		"floor":
 			mat.metallic = 0.0
@@ -3022,6 +3275,16 @@ func optimize_material(mat: StandardMaterial3D, mat_data: Dictionary, surface_ty
 			mat.metallic = 0.0
 			mat.metallic_specular = 0.5
 			mat.roughness = 0.6
+
+	if is_color_only_wall:
+		# Keep colored walls visually neutral. Avoid later glossy overrides.
+		mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+		mat.clearcoat_enabled = false
+		mat.metallic = 0.0
+		mat.metallic_specular = 0.0
+		mat.roughness = 1.0
+		print("  [Optimizer] Color-only wall detected -> forcing matte, no probe shine.")
+		return mat
 	
 	# --- SMART DETECTION OVERRIDES (Based on texture path keywords) ---
 	if "marble" in path or "tile" in path or "granite" in path or "polished" in path or "porcelain" in path:

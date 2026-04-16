@@ -6,6 +6,12 @@ config/name="4k_Unreal_Engine_v1 - godot"
 config/features=PackedStringArray("4.3", "Forward Plus")
 config/icon="res://icon.svg"
 
+[display]
+
+window/size/viewport_width=3840
+window/size/viewport_height=2160
+window/stretch/mode="viewport"
+
 [rendering]
 
 renderer/rendering_method="forward_plus"
