@@ -74,6 +74,8 @@ ffmpeg/
 
 # Scene optimizer logs
 culling_logs/
+uploads/
+failed_inputs/
 
 # Generated JSON inputs
 godot_project/input_json/
@@ -94,11 +96,21 @@ temp/
 *.tar
 *.gz
 *.rar
+*.7z
+
+# JSON files
+*.json
+!requirements.txt
+!pyproject.toml
 
 # -------------------------
 # Models (VERY IMPORTANT for YOU)
 # -------------------------
 Realistic_Vision_V6.0_B1_noVAE/
+Realistic_Vision_V5.1_noVAE/
+*.safetensors
+*.ckpt
+*.bin
 
 # -------------------------
 # Batch & runtime logs
