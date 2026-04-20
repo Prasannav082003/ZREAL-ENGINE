@@ -48,10 +48,10 @@ COLOR_BLUE = "\033[94m"
 COLOR_RESET = "\033[0m"
 
 # --- ASSET & TEXTURE MASTERY API CONFIGURATION ---
-ASSETS_AND_TEXTURE_API_KEY = "zrsk_dev_41fbb72c9a0e5f1c8d2a9b6d4e8f3c2"
+ASSETS_AND_TEXTURE_API_KEY = "zrsk_beta_8a1d4c7e6f2b9a5d3c1e0f8b6a4d"
 ASSETS_AND_TEXTURE_API_HEADER_NAME = "ZRealtyServiceApiKey"
-ASSET_ENDPOINT = "http://216.48.182.24:4050/api/v1/AssetMaster/GetAllAssets3D"
-TEXTURE_ENDPOINT = "http://216.48.182.24:4050/api/v1/TextureMaster/GetAllTextureLibraries"
+ASSET_ENDPOINT = "http://216.48.178.133:4050/api/v1/AssetMaster/GetAllAssets3D"
+TEXTURE_ENDPOINT = "http://216.48.178.133:4050/api/v1/TextureMaster/GetAllTextureLibraries"
 
 # --- BASE DIRECTORY ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -911,6 +911,7 @@ GLB_OUTPUT_DIR = os.getenv("GLB_OUTPUT_DIR", "output_glb")
 RENDER_OUTPUT_DIR = os.getenv("RENDER_OUTPUT_DIR", "output_renders")
 RUNTIME_DIR = os.path.join(tempfile.gettempdir(), "zrealty_backend_runtime")
 ASSET_URL_MAP_FILE = os.path.join(ASSET_DOWNLOAD_DIR, "asset_url_map.json")
+ENABLE_VIDEO_CULLING = True  # Set to False to skip VideoSceneOptimizer for video renders
 
 # --- GODOT CONFIGURATION ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -2803,12 +2804,15 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
     # 2.5 Video Scene Culling — remove rooms/items not visible along camera path
     output_basename = f"{job_id}_render"
     culling_log_path = os.path.join(CULLING_LOGS_DIR, f"{output_basename}_culling.txt")
-    try:
-        video_optimizer = VideoSceneOptimizer(log_path=culling_log_path)
-        godot_input = video_optimizer.cull_scene(godot_input)
-        print(f"✅ Video scene culling complete. Log: {culling_log_path}")
-    except Exception as e:
-        print(f"⚠️ Video scene culling failed (continuing without culling): {e}")
+    if ENABLE_VIDEO_CULLING:
+        try:
+            video_optimizer = VideoSceneOptimizer(log_path=culling_log_path)
+            godot_input = video_optimizer.cull_scene(godot_input)
+            print(f"✅ Video scene culling complete. Log: {culling_log_path}")
+        except Exception as e:
+            print(f"⚠️ Video scene culling failed (continuing without culling): {e}")
+    else:
+        print("ℹ️  Video scene culling disabled by main.py flag; rendering full scene.")
 
     # Save the properly assembled input JSON
     input_json_path = os.path.join(RUNTIME_DIR, f"{job_id}_video_input.json")

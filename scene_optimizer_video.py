@@ -1,16 +1,22 @@
 import json
 import math
 import os
+import sys
 import time
 from typing import Dict, List, Any, Set, Tuple, Optional
 
 # Configuration
-# Plan coordinates are in CM. Camera coordinates are in Meters.
+# Legacy payloads use metre-based camera data; 2.0.0 video paths use cm.
 SCALE_METERS_TO_CM = 100.0
 
 # Culling logs folder
 CULLING_LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "culling_logs")
 os.makedirs(CULLING_LOGS_DIR, exist_ok=True)
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # Floor-related items always kept
 FLOOR_ITEM_KEYWORDS = ["floor", "slab", "ground", "terrain", "level"]
@@ -64,6 +70,29 @@ def _point_in_any_area(x: float, y: float, areas: dict, vertices: dict) -> bool:
         if poly_verts and _point_in_polygon(x, y, poly_verts):
             return True
     return False
+
+
+def _layer_has_geometry(layer: dict) -> bool:
+    """True when a layer contains any meaningful scene content."""
+    if not isinstance(layer, dict):
+        return False
+    for key in ("lines", "vertices", "areas", "items", "holes", "structures"):
+        value = layer.get(key)
+        if isinstance(value, dict) and value:
+            return True
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _pick_primary_layer_id(layers: dict, preferred_id: Optional[str] = None) -> Optional[str]:
+    """Choose the best layer to optimize when a layered export is provided."""
+    if preferred_id and preferred_id in layers and _layer_has_geometry(layers[preferred_id]):
+        return preferred_id
+    for layer_id, layer in layers.items():
+        if _layer_has_geometry(layer):
+            return layer_id
+    return next(iter(layers), None)
 
 
 def _min_dist_to_polygon(ix: float, iy: float, poly_verts: List[Tuple[float, float]]) -> float:
@@ -485,10 +514,34 @@ def _cull_interior_video(
 
     new_vertices = {vid: vertices[vid] for vid in kept_vertex_ids if vid in vertices}
 
+    # Keep active room shell walls even if vertex matching is imperfect.
+    active_room_vertex_ids: Set[str] = set()
+    active_room_positions: Set[Tuple] = set()
+    for aid in active_area_ids:
+        area = areas.get(aid)
+        if not area:
+            continue
+        for vid in area.get("vertices", []):
+            vid = str(vid)
+            active_room_vertex_ids.add(vid)
+            v = vertices.get(vid)
+            if v:
+                active_room_positions.add((round(v.get("x", 0), 0), round(v.get("y", 0), 0)))
+
+    def wall_belongs_to_active_room(v1_id: str, v2_id: str) -> bool:
+        if v1_id in active_room_vertex_ids or v2_id in active_room_vertex_ids:
+            return True
+        for vid in (v1_id, v2_id):
+            v = vertices.get(vid)
+            if not v:
+                continue
+            if (round(v.get("x", 0), 0), round(v.get("y", 0), 0)) in active_room_positions:
+                return True
+        return False
+
     # ── Lines ─────────────────────────────────────────────────────────────────
     new_lines: Dict[str, Any] = {}
     culled_walls: List[str] = []
-    wall_margin_deg = 20.0
     for lid, line in lines.items():
         v_ids = line.get("vertices", [])
         if len(v_ids) < 2:
@@ -504,41 +557,23 @@ def _cull_interior_video(
         if not vd1 or not vd2:
             continue
 
-        p1x, p1y = float(vd1.get("x", 0)), float(vd1.get("y", 0))
-        p2x, p2y = float(vd2.get("x", 0)), float(vd2.get("y", 0))
-        mid_x, mid_y = (p1x + p2x) / 2.0, (p1y + p2y) / 2.0
-
-        wall_visible = False
-        for sample in active_samples:
-            cam_x = float(sample["cam_x"])
-            cam_y = float(sample["cam_y"])
-            dist = math.hypot(mid_x - cam_x, mid_y - cam_y)
-            if dist > max_view_dist_cm:
-                continue
-
-            fov_rad = math.radians(float(sample["fov_half_deg"]) + wall_margin_deg)
-            if _portal_visible_in_fov(
-                cam_x,
-                cam_y,
-                float(sample["cam_dir_x"]),
-                float(sample["cam_dir_y"]),
-                fov_rad,
-                p1x,
-                p1y,
-                p2x,
-                p2y,
-            ):
-                wall_visible = True
-                break
-
-        if wall_visible:
+        if wall_belongs_to_active_room(v1, v2):
+            # The active room shell should remain intact in interior video
+            # renders even when there are no portals to reveal neighbors.
             new_lines[lid] = line
             for vid in (v1, v2):
                 if vid not in new_vertices and vid in vertices:
                     new_vertices[vid] = vertices[vid]
                     kept_vertex_ids.add(vid)
-        else:
-            culled_walls.append(f"Wall {lid} [outside all interior sample FOV/range]")
+            continue
+
+        # Keep the room shell intact. Interior FOV pruning is for items and
+        # adjacent rooms, not for walls that bound the active room.
+        new_lines[lid] = line
+        for vid in (v1, v2):
+            if vid not in new_vertices and vid in vertices:
+                new_vertices[vid] = vertices[vid]
+                kept_vertex_ids.add(vid)
 
     if culled_walls:
         log_fn(f"\n  Culled {len(culled_walls)} walls:")
@@ -840,6 +875,9 @@ class VideoSceneOptimizer:
                     self.log(f"⚠️ Failed to parse floor_plan_data: {e}")
                     return payload
 
+            fp_version = str(fp_data.get("version", "")).strip() if isinstance(fp_data, dict) else ""
+            camera_scale = 10.0 if fp_version == "2.0.0" else SCALE_METERS_TO_CM
+
             # ── 2. Collect camera visibility samples from the animation path ──
             camera_samples: List[Dict[str, Any]] = []
             payload_fov_half_deg: Optional[float] = None
@@ -859,13 +897,13 @@ class VideoSceneOptimizer:
                         tjs = kf.get("threejs_camera_data")
                         if tjs and isinstance(tjs, dict) and "position" in tjs:
                             pos = tjs["position"]
-                            cam_x = float(pos.get("x", 0.0))
-                            cam_y = float(pos.get("z", 0.0))
+                            cam_x = float(pos.get("x", 0.0)) * camera_scale
+                            cam_y = float(pos.get("z", 0.0)) * camera_scale
                             dir_x, dir_y = 1.0, 0.0
                             look_at = tjs.get("lookAt")
                             if isinstance(look_at, dict):
-                                dx = float(look_at.get("x", cam_x)) - cam_x
-                                dy = float(look_at.get("z", cam_y)) - cam_y
+                                dx = float(look_at.get("x", cam_x / camera_scale)) * camera_scale - cam_x
+                                dy = float(look_at.get("z", cam_y / camera_scale)) * camera_scale - cam_y
                                 mag = math.hypot(dx, dy)
                                 if mag > 1e-6:
                                     dir_x, dir_y = dx / mag, dy / mag
@@ -883,13 +921,13 @@ class VideoSceneOptimizer:
                             })
                         elif "position" in kf:
                             pos = kf["position"]
-                            cam_x = float(pos.get("x", 0.0))
-                            cam_y = float(pos.get("z", 0.0))
+                            cam_x = float(pos.get("x", 0.0)) * camera_scale
+                            cam_y = float(pos.get("z", 0.0)) * camera_scale
                             dir_x, dir_y = 1.0, 0.0
                             target = kf.get("target")
                             if isinstance(target, dict):
-                                dx = float(target.get("x", cam_x)) - cam_x
-                                dy = float(target.get("z", cam_y)) - cam_y
+                                dx = float(target.get("x", cam_x / camera_scale)) * camera_scale - cam_x
+                                dy = float(target.get("z", cam_y / camera_scale)) * camera_scale - cam_y
                                 mag = math.hypot(dx, dy)
                                 if mag > 1e-6:
                                     dir_x, dir_y = dx / mag, dy / mag
@@ -914,13 +952,13 @@ class VideoSceneOptimizer:
                 if "threejs_camera" in payload and payload["threejs_camera"] is not None:
                     camera = payload["threejs_camera"]
                     pos = camera.get("position", {})
-                    cam_x = float(pos.get("x", 0)) * SCALE_METERS_TO_CM
-                    cam_y = float(pos.get("z", 0)) * SCALE_METERS_TO_CM
+                    cam_x = float(pos.get("x", 0)) * camera_scale
+                    cam_y = float(pos.get("z", 0)) * camera_scale
                     dir_x, dir_y = 1.0, 0.0
                     target = camera.get("target")
                     if isinstance(target, dict):
-                        dx = float(target.get("x", 0)) * SCALE_METERS_TO_CM - cam_x
-                        dy = float(target.get("z", 0)) * SCALE_METERS_TO_CM - cam_y
+                        dx = float(target.get("x", 0)) * camera_scale - cam_x
+                        dy = float(target.get("z", 0)) * camera_scale - cam_y
                         mag = math.hypot(dx, dy)
                         if mag > 1e-6:
                             dir_x, dir_y = dx / mag, dy / mag
@@ -948,11 +986,12 @@ class VideoSceneOptimizer:
             layer            = None
 
             if layers:
-                target_layer_id = fp_data.get("selectedLayer", "layer-1")
-                layer = layers.get(target_layer_id)
+                selected_layer_id = fp_data.get("selectedLayer", "layer-1")
+                target_layer_id = _pick_primary_layer_id(layers, selected_layer_id)
+                layer = layers.get(target_layer_id) if target_layer_id else None
                 if not layer:
-                    target_layer_id = list(layers.keys())[0]
-                    layer = layers[target_layer_id]
+                    self.log("⚠️ Layered floor_plan_data found, but no usable layer could be selected.")
+                    return payload
 
                 vertices = layer.get("vertices", {})
                 lines    = layer.get("lines",    {})
