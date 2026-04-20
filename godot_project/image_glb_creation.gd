@@ -29,6 +29,146 @@ var _camera_pose = {
 	"target": Vector3.ZERO
 }
 var _camera_height_m: float = 0.0
+var _scene_unit_scale: float = 0.01
+var _scene_rotation_is_radians: bool = false
+var _scene_plan_rotation_radians: float = 0.0
+var _scene_plan_pivot: Vector2 = Vector2.ZERO
+var _floor_plan_root_data: Dictionary = {}
+
+func _accumulate_plan_bounds(raw_vertex, bounds: Array) -> bool:
+	if typeof(raw_vertex) != TYPE_DICTIONARY:
+		return false
+	if not raw_vertex.has("x") or not raw_vertex.has("y"):
+		return false
+	var vx = float(raw_vertex.get("x", 0.0))
+	var vy = float(raw_vertex.get("y", 0.0))
+	bounds[0] = min(bounds[0], vx)
+	bounds[1] = min(bounds[1], vy)
+	bounds[2] = max(bounds[2], vx)
+	bounds[3] = max(bounds[3], vy)
+	return true
+
+func _resolve_scene_unit_scale(data: Dictionary, geom_data = {}) -> float:
+	var version := ""
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("version"):
+		version = str(geom_data.get("version", "")).strip_edges()
+	elif typeof(data) == TYPE_DICTIONARY and data.has("version"):
+		version = str(data.get("version", "")).strip_edges()
+
+	# Version 2.0.0 stores floor-plan measurements in millimetres.
+	# Older inputs keep the legacy centimetre-based plan coordinates.
+	if version == "2.0.0":
+		return 0.001
+	return 0.01
+
+func _resolve_scene_rotation_is_radians(data: Dictionary, geom_data = {}) -> bool:
+	var version := ""
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("version"):
+		version = str(geom_data.get("version", "")).strip_edges()
+	elif typeof(data) == TYPE_DICTIONARY and data.has("version"):
+		version = str(data.get("version", "")).strip_edges()
+	return version == "2.0.0"
+
+func _resolve_scene_plan_rotation_radians(data: Dictionary, geom_data = {}) -> float:
+	var version := ""
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("version"):
+		version = str(geom_data.get("version", "")).strip_edges()
+	elif typeof(data) == TYPE_DICTIONARY and data.has("version"):
+		version = str(data.get("version", "")).strip_edges()
+	if version == "2.0.0":
+		return 0.0
+	var angle_deg := 0.0
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("directionangle"):
+		angle_deg = float(geom_data.get("directionangle", 0.0))
+	elif typeof(data) == TYPE_DICTIONARY and data.has("directionangle"):
+		angle_deg = float(data.get("directionangle", 0.0))
+	# The editor stores the room orientation as the forward-facing angle of the
+	# plan, so world placement needs the inverse rotation.
+	return -deg_to_rad(angle_deg)
+
+func _resolve_scene_plan_pivot(data: Dictionary, geom_data = {}) -> Vector2:
+	var source = geom_data if typeof(geom_data) == TYPE_DICTIONARY and not geom_data.is_empty() else data
+	if typeof(source) != TYPE_DICTIONARY or source.is_empty():
+		return Vector2.ZERO
+
+	var bounds = [INF, INF, -INF, -INF]
+	var found := false
+
+	if source.has("layers") and typeof(source["layers"]) == TYPE_DICTIONARY:
+		var layers_dict = source["layers"]
+		var selected_layer = str(source.get("selectedLayer", "")).strip_edges()
+		var layer_ids: Array = []
+		if selected_layer != "" and layers_dict.has(selected_layer):
+			layer_ids.append(selected_layer)
+		else:
+			for layer_id in layers_dict:
+				layer_ids.append(layer_id)
+
+		for layer_id in layer_ids:
+			var layer = layers_dict.get(layer_id, {})
+			if typeof(layer) != TYPE_DICTIONARY:
+				continue
+			var vertices = {}
+			if layer.has("vertices") and typeof(layer["vertices"]) == TYPE_DICTIONARY:
+				vertices = layer["vertices"]
+			elif source.has("vertices") and typeof(source["vertices"]) == TYPE_DICTIONARY:
+				vertices = source["vertices"]
+			if vertices.is_empty() or not layer.has("areas") or typeof(layer["areas"]) != TYPE_DICTIONARY:
+				continue
+			for area_id in layer["areas"]:
+				var area = layer["areas"][area_id]
+				if typeof(area) != TYPE_DICTIONARY or not area.has("vertices"):
+					continue
+				for vid in area["vertices"]:
+					var vs = str(vid)
+					if vertices.has(vs):
+						found = _accumulate_plan_bounds(vertices[vs], bounds) or found
+			if found:
+				break
+
+	if not found and source.has("vertices") and typeof(source["vertices"]) == TYPE_DICTIONARY:
+		for vertex_id in source["vertices"]:
+			found = _accumulate_plan_bounds(source["vertices"][vertex_id], bounds) or found
+
+	if not found:
+		return Vector2.ZERO
+
+	return Vector2((bounds[0] + bounds[2]) * 0.5, (bounds[1] + bounds[3]) * 0.5)
+
+func _rotation_to_radians(raw_rotation: float) -> float:
+	if _scene_rotation_is_radians:
+		return raw_rotation
+	return deg_to_rad(raw_rotation)
+
+func _world_yaw_from_source_rotation(raw_rotation: float) -> float:
+	# Use the same yaw conversion for both legacy and 2.0.0 JSON.
+	# Legacy inputs are degrees, new inputs are radians.
+	return -_rotation_to_radians(raw_rotation)
+
+func _item_front_axis_correction() -> float:
+	# New editor exports should respect the authored item rotation directly.
+	return 0.0
+
+func _plan_point_2d(x: float, y: float) -> Vector2:
+	var point = Vector2(x, y) - _scene_plan_pivot
+	if abs(_scene_plan_rotation_radians) > 0.000001:
+		point = point.rotated(_scene_plan_rotation_radians)
+	point += _scene_plan_pivot
+	return point
+
+func _plan_point_3d(x: float, y: float, world_y: float = 0.0) -> Vector3:
+	var point = _plan_point_2d(x, y)
+	return Vector3(point.x * _scene_unit_scale, world_y, point.y * _scene_unit_scale)
+
+func _plan_value_to_meters(value) -> float:
+	return get_dimension_value(value) * _scene_unit_scale
+
+func _transform_plan_point_meters(point: Vector3) -> Vector3:
+	if abs(_scene_plan_rotation_radians) < 0.000001:
+		return point
+	var scale = max(_scene_unit_scale, 0.000001)
+	var transformed = _plan_point_2d(point.x / scale, point.z / scale)
+	return Vector3(transformed.x * scale, point.y, transformed.y * scale)
 
 func build_scene(data):
 	lighting_profile = _resolve_lighting_profile(data)
@@ -50,6 +190,16 @@ func build_scene(data):
 				print("Error parsing floor_plan_data string: ", json.get_error_message())
 		else:
 			geom_data = fp
+
+	_scene_unit_scale = _resolve_scene_unit_scale(data, geom_data)
+	_scene_rotation_is_radians = _resolve_scene_rotation_is_radians(data, geom_data)
+	_scene_plan_rotation_radians = _resolve_scene_plan_rotation_radians(data, geom_data)
+	_scene_plan_pivot = _resolve_scene_plan_pivot(data, geom_data)
+	_floor_plan_root_data = geom_data if typeof(geom_data) == TYPE_DICTIONARY else {}
+	print("Using scene unit scale: ", _scene_unit_scale, " meters per source unit")
+	print("Using radians for plan rotations: ", _scene_rotation_is_radians)
+	print("Using plan rotation (radians): ", _scene_plan_rotation_radians)
+	print("Using plan pivot (source units): ", _scene_plan_pivot)
 	
 	setup_lighting(data, geom_data)
 		
@@ -433,6 +583,7 @@ func _extract_camera_pose(data: Dictionary) -> Dictionary:
 	var cam_pos = Vector3(0, 1.6, 6)
 	var cam_target = Vector3.ZERO
 	var found = false
+	var found_target = false
 
 	if data.has("threejs_camera") and typeof(data["threejs_camera"]) == TYPE_DICTIONARY:
 		var tc = data["threejs_camera"]
@@ -441,6 +592,7 @@ func _extract_camera_pose(data: Dictionary) -> Dictionary:
 			found = true
 		if tc.has("target") and typeof(tc["target"]) == TYPE_DICTIONARY:
 			cam_target = parse_vec3(tc["target"])
+			found_target = true
 	elif data.has("blender_camera") and typeof(data["blender_camera"]) == TYPE_DICTIONARY:
 		var bc = data["blender_camera"]
 		if bc.has("location") and typeof(bc["location"]) == TYPE_ARRAY and bc["location"].size() >= 3:
@@ -451,6 +603,12 @@ func _extract_camera_pose(data: Dictionary) -> Dictionary:
 			var bt = data["blender_target"]
 			if bt.has("location") and typeof(bt["location"]) == TYPE_ARRAY and bt["location"].size() >= 3:
 				cam_target = Vector3(float(bt["location"][0]), float(bt["location"][2]), -float(bt["location"][1]))
+				found_target = true
+
+	if found:
+		cam_pos = _transform_plan_point_meters(cam_pos)
+	if found_target:
+		cam_target = _transform_plan_point_meters(cam_target)
 
 	if not found:
 		cam_pos = Vector3(0, 1.6, 6)
@@ -645,8 +803,9 @@ func _extract_room_lighting_bounds(geom_data: Dictionary) -> Dictionary:
 			if not vertices.has(key):
 				continue
 			var v = vertices[key]
-			var x = float(v.get("x", 0.0)) * 0.01
-			var z = float(v.get("y", 0.0)) * 0.01
+			var p = _plan_point_2d(float(v.get("x", 0.0)), float(v.get("y", 0.0)))
+			var x = p.x * _scene_unit_scale
+			var z = p.y * _scene_unit_scale
 			min_x = min(min_x, x)
 			max_x = max(max_x, x)
 			min_z = min(min_z, z)
@@ -660,9 +819,9 @@ func _extract_room_lighting_bounds(geom_data: Dictionary) -> Dictionary:
 	if work.has("altitude"):
 		var alt = work["altitude"]
 		if typeof(alt) == TYPE_DICTIONARY and alt.has("length"):
-			layer_alt = float(alt["length"]) * 0.01
+			layer_alt = float(alt["length"]) * _scene_unit_scale
 		else:
-			layer_alt = float(alt) * 0.01
+			layer_alt = float(alt) * _scene_unit_scale
 
 	var ceil_h = 2.8
 	for aid in areas:
@@ -672,7 +831,7 @@ func _extract_room_lighting_bounds(geom_data: Dictionary) -> Dictionary:
 		if area.has("ceiling_properties"):
 			var cp = area["ceiling_properties"]
 			if typeof(cp) == TYPE_DICTIONARY and cp.has("height"):
-				var h = float(cp["height"]) * 0.01
+				var h = float(cp["height"]) * _scene_unit_scale
 				if h > 0.1:
 					ceil_h = h
 				break
@@ -841,9 +1000,9 @@ func build_architecture(data):
 				if layer.has("altitude"):
 					var alt_val = layer["altitude"]
 					if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
-						layer_alt = float(alt_val["length"]) * 0.01
+						layer_alt = float(alt_val["length"]) * _scene_unit_scale
 					else:
-						layer_alt = float(alt_val) * 0.01
+						layer_alt = float(alt_val) * _scene_unit_scale
 			else:
 				print("Single-layer mode: placing layer '", layer_id, "' at ground level (altitude 0)")
 
@@ -875,9 +1034,9 @@ func _resolve_camera_layer_id(data: Dictionary) -> String:
 			if selected_layer.has("altitude"):
 				var selected_alt = selected_layer["altitude"]
 				if typeof(selected_alt) == TYPE_DICTIONARY and selected_alt.has("length"):
-					selected_alt_m = float(selected_alt["length"]) * 0.01
+					selected_alt_m = float(selected_alt["length"]) * _scene_unit_scale
 				else:
-					selected_alt_m = float(selected_alt) * 0.01
+					selected_alt_m = float(selected_alt) * _scene_unit_scale
 
 			var selected_height_m = 3.0
 			if selected_layer.has("lines") and typeof(selected_layer["lines"]) == TYPE_DICTIONARY:
@@ -888,9 +1047,9 @@ func _resolve_camera_layer_id(data: Dictionary) -> String:
 						var h_prop = line["properties"]["height"]
 						var wall_h_m = 0.0
 						if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
-							wall_h_m = float(h_prop["length"]) * 0.01
+							wall_h_m = float(h_prop["length"]) * _scene_unit_scale
 						else:
-							wall_h_m = float(h_prop) * 0.01
+							wall_h_m = float(h_prop) * _scene_unit_scale
 						if wall_h_m > selected_height_m:
 							selected_height_m = wall_h_m
 
@@ -907,9 +1066,9 @@ func _resolve_camera_layer_id(data: Dictionary) -> String:
 		if layer.has("altitude"):
 			var alt_val = layer["altitude"]
 			if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
-				layer_alt_m = float(alt_val["length"]) * 0.01
+				layer_alt_m = float(alt_val["length"]) * _scene_unit_scale
 			else:
-				layer_alt_m = float(alt_val) * 0.01
+				layer_alt_m = float(alt_val) * _scene_unit_scale
 
 		var wall_heights: Array = []
 		if layer.has("lines") and typeof(layer["lines"]) == TYPE_DICTIONARY:
@@ -920,9 +1079,9 @@ func _resolve_camera_layer_id(data: Dictionary) -> String:
 					var h_prop = line["properties"]["height"]
 					var wall_h_m = 0.0
 					if typeof(h_prop) == TYPE_DICTIONARY and h_prop.has("length"):
-						wall_h_m = float(h_prop["length"]) * 0.01
+						wall_h_m = float(h_prop["length"]) * _scene_unit_scale
 					else:
-						wall_h_m = float(h_prop) * 0.01
+						wall_h_m = float(h_prop) * _scene_unit_scale
 					if wall_h_m > 0.1:
 						wall_heights.append(wall_h_m)
 
@@ -950,7 +1109,7 @@ func _resolve_camera_layer_id(data: Dictionary) -> String:
 #      Return "inner-right" if the right sample is inside the polygon.
 #
 # In Godot we work in the 2D plan space (x,y = frontend x,y before converting
-# to metres), so all coordinates stay in centimetres to match the frontend.
+# to metres), so source coordinates stay in the input's original plan units.
 #
 # Returns: "inner-left", "inner-right", or "" (unknown / no area found).
 func _get_wall_facing_direction(line: Dictionary, vertices: Dictionary, areas: Dictionary) -> String:
@@ -963,6 +1122,12 @@ func _get_wall_facing_direction(line: Dictionary, vertices: Dictionary, areas: D
 	var vB = vertices[v2_id]
 	var ax = float(vA["x"]); var ay = float(vA["y"])
 	var bx = float(vB["x"]); var by = float(vB["y"])
+	var a = _plan_point_2d(ax, ay)
+	var b = _plan_point_2d(bx, by)
+	ax = a.x
+	ay = a.y
+	bx = b.x
+	by = b.y
 
 	# Wall direction vector (2D)
 	var dir = Vector2(bx - ax, by - ay).normalized()
@@ -974,9 +1139,12 @@ func _get_wall_facing_direction(line: Dictionary, vertices: Dictionary, areas: D
 	# Wall midpoint
 	var mid = Vector2((ax + bx) * 0.5, (ay + by) * 0.5)
 
-	# Sample 5 cm to each side (matches frontend's addScaledVector(normal, 5))
-	var left_sample  = mid + left_normal  * 5.0
-	var right_sample = mid + right_normal * 5.0
+	# Sample 5 cm to each side.
+	# Convert that physical distance back into source units so it stays correct
+	# for both cm-based legacy files and mm-based 2.0.0 files.
+	var sample_offset = 0.05 / max(_scene_unit_scale, 0.000001)
+	var left_sample  = mid + left_normal  * sample_offset
+	var right_sample = mid + right_normal * sample_offset
 
 	# ── Check ALL areas containing both wall vertices ─────────────────
 	# For shared walls (between two rooms), different areas yield opposite
@@ -1006,7 +1174,7 @@ func _get_wall_facing_direction(line: Dictionary, vertices: Dictionary, areas: D
 			var vs = str(vid)
 			if vertices.has(vs):
 				var v = vertices[vs]
-				area_polygon.append(Vector2(float(v["x"]), float(v["y"])))
+				area_polygon.append(_plan_point_2d(float(v["x"]), float(v["y"])))
 		if area_polygon.size() < 3:
 			continue
 
@@ -1057,12 +1225,16 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 	
 	var lines    = layer_data["lines"]
 	var vertices = layer_data["vertices"]
-	var scale_factor = 0.01  # Convert cm → metres
+	var scale_factor = _scene_unit_scale  # Convert source units → metres
 	
 	# Helper map for hole definitions
 	var all_holes = {}
 	if layer_data.has("holes"):
 		all_holes = layer_data["holes"]
+	if _floor_plan_root_data.has("holes") and typeof(_floor_plan_root_data["holes"]) == TYPE_DICTIONARY:
+		for hole_id in _floor_plan_root_data["holes"]:
+			if not all_holes.has(hole_id):
+				all_holes[hole_id] = _floor_plan_root_data["holes"][hole_id]
 
 	# Areas dictionary — required by the facing-direction helper
 	var areas = {}
@@ -1087,7 +1259,7 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 			var vs = str(v_id)
 			if vertices.has(vs):
 				var v = vertices[vs]
-				room_centroid += Vector3(float(v["x"]), 0.0, float(v["y"])) * scale_factor
+				room_centroid += _plan_point_3d(float(v["x"]), float(v["y"]))
 				centroid_count += 1
 	if centroid_count > 0:
 		room_centroid /= centroid_count
@@ -1108,8 +1280,8 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 		var v1_data = vertices[v1_id]
 		var v2_data = vertices[v2_id]
 		
-		var p1 = Vector3(float(v1_data["x"]), 0.0, float(v1_data["y"])) * scale_factor
-		var p2 = Vector3(float(v2_data["x"]), 0.0, float(v2_data["y"])) * scale_factor
+		var p1 = _plan_point_3d(float(v1_data["x"]), float(v1_data["y"]))
+		var p2 = _plan_point_3d(float(v2_data["x"]), float(v2_data["y"]))
 		
 		var diff   = p2 - p1
 		var length = diff.length()
@@ -1218,10 +1390,20 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 			# The camera is inside and mainly sees the inner face. This
 			# prevents outer textures (brick/stone) from bleeding through.
 			inner_mat_for_wall.cull_mode = BaseMaterial3D.CULL_DISABLED
+			inner_mat_for_wall = _apply_architecture_texture_scale(
+				inner_mat_for_wall,
+				inner_mat_data,
+				Vector2(corner_length, height)
+			)
 			wall.material = inner_mat_for_wall
 		else:
 			# Exterior: show outer material from both sides
 			outer_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			outer_mat = _apply_architecture_texture_scale(
+				outer_mat,
+				outer_mat_data,
+				Vector2(corner_length, height)
+			)
 			wall.material = outer_mat
 
 		csg.add_child(wall)
@@ -1260,6 +1442,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 				var inner_box = CSGBox3D.new()
 				inner_box.size = Vector3(corner_length, height, face_t)
 				var inner_mat  = create_material(inner_mat_data, "wall")
+				inner_mat = _apply_architecture_texture_scale(
+					inner_mat,
+					inner_mat_data,
+					Vector2(corner_length, height)
+				)
 				inner_mat.cull_mode = BaseMaterial3D.CULL_BACK
 				inner_box.material  = inner_mat
 				inner_csg.add_child(inner_box)
@@ -1282,6 +1469,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 				var outer_box = CSGBox3D.new()
 				outer_box.size = Vector3(corner_length, height, face_t)
 				var outer_panel_mat = create_material(outer_mat_data, "wall")
+				outer_panel_mat = _apply_architecture_texture_scale(
+					outer_panel_mat,
+					outer_mat_data,
+					Vector2(corner_length, height)
+				)
 				outer_panel_mat.cull_mode = BaseMaterial3D.CULL_BACK
 				outer_box.material  = outer_panel_mat
 				outer_csg.add_child(outer_box)
@@ -1304,10 +1496,23 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 					if props.has("altitude"): h_alt    = get_dimension_value(props["altitude"]) * scale_factor
 
 				var offset_ratio = 0.5
+				var raw_offset = 0.0
 				if hole.has("offset"):
-					offset_ratio = float(hole["offset"])
+					raw_offset = float(hole["offset"])
 				elif hole.has("properties") and hole["properties"].has("offset"):
-					offset_ratio = float(hole["properties"]["offset"])
+					raw_offset = float(hole["properties"]["offset"])
+				if raw_offset > 1.0:
+					var wall_len = 0.0
+					if hole.has("wallLen"):
+						wall_len = float(hole["wallLen"])
+					elif hole.has("properties") and hole["properties"].has("wallLen"):
+						wall_len = float(hole["properties"]["wallLen"])
+					if wall_len > 0.0001:
+						offset_ratio = clamp(raw_offset / wall_len, 0.0, 1.0)
+					else:
+						offset_ratio = raw_offset
+				else:
+					offset_ratio = raw_offset
 					
 				var hole_pos_xz = p1.lerp(p2, offset_ratio)
 				var h_center_pos = hole_pos_xz
@@ -1485,7 +1690,8 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 				var vs = str(v_id)
 				if vertices.has(vs):
 					var v = vertices[vs]
-					polygon.append(Vector2(float(v["x"]) * scale_factor, float(v["y"]) * scale_factor))
+					var p = _plan_point_2d(float(v["x"]), float(v["y"]))
+					polygon.append(p * scale_factor)
 			
 			if polygon.size() < 3: continue
 			
@@ -1530,14 +1736,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 				
 				if floor_props.has("material"):
 					var f_mat = create_material(floor_props["material"], "floor")
-					
-					# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
-					# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
-					# produce physically correct tile sizes.
-					f_mat.uv1_scale = Vector3(
-						f_mat.uv1_scale.x * floor_span.x / 2.4,
-						f_mat.uv1_scale.y * floor_span.y / 2.4,
-						1.0)
+					f_mat = _apply_architecture_texture_scale(
+						f_mat,
+						floor_props["material"],
+						floor_span
+					)
 					floor_poly.material = f_mat
 					print("Floor Material Optimized: ", floor_props["material"].get("mapUrl", "default"))
 				else:
@@ -1617,14 +1820,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, r
 					
 					if ceiling_props.has("material"):
 						var c_mat = create_material(ceiling_props["material"], "ceiling")
-						# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
-						# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
-						# produce physically correct tile sizes:
-						#   tile_size = 2.4 / repeat  →  repeat=2 → 1.2 m tiles
-						c_mat.uv1_scale = Vector3(
-							c_mat.uv1_scale.x * ceil_span.x / 2.4,
-							c_mat.uv1_scale.y * ceil_span.y / 2.4,
-							1.0)
+						c_mat = _apply_architecture_texture_scale(
+							c_mat,
+							ceiling_props["material"],
+							ceil_span
+						)
 						ceil_poly.material = c_mat
 					else:
 						var ceil_mat = StandardMaterial3D.new()
@@ -1691,11 +1891,18 @@ func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
 
 			# Texture scale (maps to UV repeat in create_material)
 			if block.has("texture_scale_x") or block.has("texture_scale_y"):
-				var sx = float(block.get("texture_scale_x", 1.0))
-				var sy = float(block.get("texture_scale_y", 1.0))
-				mat_data["scale"] = [sx if sx > 0 else 1.0, sy if sy > 0 else 1.0]
-			elif block.has("repeat") and typeof(block["repeat"]) == TYPE_ARRAY:
-				mat_data["repeat"] = block["repeat"]
+				var sx = float(block.get("texture_scale_x", 0.0))
+				var sy = float(block.get("texture_scale_y", 0.0))
+				if sx > 0.0 and sy > 0.0:
+					mat_data["scale"] = [sx, sy]
+			var repeat_x = float(block.get("repeatX", 0.0))
+			var repeat_y = float(block.get("repeatY", 0.0))
+			if repeat_x > 0.0 or repeat_y > 0.0:
+				mat_data["repeatX"] = repeat_x
+				mat_data["repeatY"] = repeat_y
+			else:
+				if block.has("repeat") and typeof(block["repeat"]) == TYPE_ARRAY:
+					mat_data["repeat"] = block["repeat"]
 
 			if mat_data.size() > 0:
 				var has_texture = mat_data.has("mapUrl") or mat_data.has("normalUrl") or mat_data.has("roughnessUrl")
@@ -1733,13 +1940,13 @@ func build_structures(data):
 				if layer.has("altitude"):
 					var alt_val = layer["altitude"]
 					if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
-						layer_alt = float(alt_val["length"]) * 0.01
+						layer_alt = float(alt_val["length"]) * _scene_unit_scale
 					else:
-						layer_alt = float(alt_val) * 0.01
+						layer_alt = float(alt_val) * _scene_unit_scale
 
 			if layer.has("structures"):
 				_load_layer_structures(layer["structures"], layer_alt, str(layer_id))
-	elif data.has("structures"):
+	if data.has("structures"):
 		_load_layer_structures(data["structures"], 0.0, "root")
 
 func _load_layer_structures(structures, layer_altitude, layer_id := ""):
@@ -1764,7 +1971,7 @@ func _build_structure_mesh(structure: Dictionary, layer_altitude: float, layer_i
 	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
 		props = structure["properties"]
 
-	var scale_factor = 0.01
+	var scale_factor = _scene_unit_scale
 	var width  = get_dimension_value(props.get("width",  structure.get("width",  100))) * scale_factor
 	var depth  = get_dimension_value(props.get("depth",  structure.get("depth",  100))) * scale_factor
 	var height = get_dimension_value(props.get("height", structure.get("height", 100))) * scale_factor
@@ -1772,10 +1979,11 @@ func _build_structure_mesh(structure: Dictionary, layer_altitude: float, layer_i
 
 	var root = Node3D.new()
 	root.name = "Structure_%s_%s" % [structure_type, str(structure.get("id", "unknown"))]
+	var root_xy = _plan_point_2d(float(structure.get("x", 0)), float(structure.get("y", 0)))
 	root.position = Vector3(
-		float(structure.get("x", 0)) * scale_factor,
+		root_xy.x * scale_factor,
 		layer_altitude + altitude,
-		float(structure.get("y", 0)) * scale_factor
+		root_xy.y * scale_factor
 	)
 
 	var rot = 0.0
@@ -1783,7 +1991,7 @@ func _build_structure_mesh(structure: Dictionary, layer_altitude: float, layer_i
 		rot = float(structure["rotation"])
 	elif props.has("rotation"):
 		rot = float(props["rotation"])
-	root.rotation.y = -deg_to_rad(rot)
+	root.rotation.y = _world_yaw_from_source_rotation(rot)
 	root.scale = Vector3(
 		-1.0 if bool(structure.get("flipX", false)) else 1.0,
 		1.0,
@@ -1944,11 +2152,11 @@ func _add_step_structure(parent: Node3D, structure: Dictionary, width: float, de
 		var flight = flights[0]
 		step_count = max(int(flight.get("step_count", 1)), 1)
 		if float(flight.get("riser_height", 0.0)) > 0:
-			riser = float(flight.get("riser_height", 0.0)) * 0.01
+			riser = float(flight.get("riser_height", 0.0)) * _scene_unit_scale
 		else:
 			riser = max(height / float(step_count), 0.05)
 		if float(flight.get("tread_depth", 0.0)) > 0:
-			tread = float(flight.get("tread_depth", 0.0)) * 0.01
+			tread = float(flight.get("tread_depth", 0.0)) * _scene_unit_scale
 		else:
 			tread = max(depth / float(step_count), 0.05)
 		direction = str(flight.get("direction", "forward")).to_lower()
@@ -2061,7 +2269,7 @@ func _add_false_ceiling_structure(parent: Node3D, structure: Dictionary, width: 
 	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
 		props = structure["properties"]
 
-	var drop_height = get_dimension_value(props.get("drop_height", 0)) * 0.01
+	var drop_height = get_dimension_value(props.get("drop_height", 0)) * _scene_unit_scale
 	var pattern_type = str(props.get("pattern_type", "")).to_lower()
 	var slab_h = max(height, 0.03)
 	var root_color = mat_data
@@ -2127,12 +2335,12 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 
 	var first_flight = flights[0]
 	var first_steps = max(int(first_flight.get("step_count", 12)), 1)
-	var first_riser = float(first_flight.get("riser_height", 15.24)) * 0.01
+	var first_riser = float(first_flight.get("riser_height", 15.24)) * _scene_unit_scale
 	if first_riser <= 0.0:
 		first_riser = total_height / float(max(first_steps, 1))
 	var first_tread = depth / max(first_steps, 1)
 	if float(first_flight.get("tread_depth", 0.0)) > 0:
-		first_tread = float(first_flight.get("tread_depth", 0.0)) * 0.01
+		first_tread = float(first_flight.get("tread_depth", 0.0)) * _scene_unit_scale
 	var stair_width = width
 	var first_direction = str(first_flight.get("direction", "forward")).to_lower()
 	var first_travel_dir = _resolve_stair_travel_direction(first_direction)
@@ -2171,10 +2379,10 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_steps = int(second_flight.get("step_count", first_steps))
 			var second_riser = first_riser
 			if float(second_flight.get("riser_height", 0.0)) > 0:
-				second_riser = float(second_flight.get("riser_height", 0.0)) * 0.01
+				second_riser = float(second_flight.get("riser_height", 0.0)) * _scene_unit_scale
 			var second_tread = first_tread
 			if float(second_flight.get("tread_depth", 0.0)) > 0:
-				second_tread = float(second_flight.get("tread_depth", 0.0)) * 0.01
+				second_tread = float(second_flight.get("tread_depth", 0.0)) * _scene_unit_scale
 			_add_stair_flight(parent, second_steps, second_riser, second_tread, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(0, 0, -1), 0.0, step_material)
 	elif stair_type == "winder":
 		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(-stair_width * 0.25, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
@@ -2183,10 +2391,10 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_steps_w = int(second_flight_w.get("step_count", first_steps))
 			var second_riser_w = first_riser
 			if float(second_flight_w.get("riser_height", 0.0)) > 0:
-				second_riser_w = float(second_flight_w.get("riser_height", 0.0)) * 0.01
+				second_riser_w = float(second_flight_w.get("riser_height", 0.0)) * _scene_unit_scale
 			var second_tread_w = first_tread
 			if float(second_flight_w.get("tread_depth", 0.0)) > 0:
-				second_tread_w = float(second_flight_w.get("tread_depth", 0.0)) * 0.01
+				second_tread_w = float(second_flight_w.get("tread_depth", 0.0)) * _scene_unit_scale
 			_add_stair_flight(parent, second_steps_w, second_riser_w, second_tread_w, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), PI / 2.0, step_material)
 	else:
 		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(0, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
@@ -2195,10 +2403,10 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_steps_l = int(second_flight_l.get("step_count", first_steps))
 			var second_riser_l = first_riser
 			if float(second_flight_l.get("riser_height", 0.0)) > 0:
-				second_riser_l = float(second_flight_l.get("riser_height", 0.0)) * 0.01
+				second_riser_l = float(second_flight_l.get("riser_height", 0.0)) * _scene_unit_scale
 			var second_tread_l = first_tread
 			if float(second_flight_l.get("tread_depth", 0.0)) > 0:
-				second_tread_l = float(second_flight_l.get("tread_depth", 0.0)) * 0.01
+				second_tread_l = float(second_flight_l.get("tread_depth", 0.0)) * _scene_unit_scale
 			_add_stair_flight(parent, second_steps_l, second_riser_l, second_tread_l, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), PI / 2.0, step_material)
 
 func _add_stair_flight(parent: Node3D, step_count: int, riser: float, tread: float, stair_width: float, start_pos: Vector3, travel_dir: Vector3, step_rot_y: float, mat_data: Dictionary) -> void:
@@ -2267,13 +2475,14 @@ func _add_floor_opening_cutters(csg: CSGCombiner3D, structures, area_id: String,
 		var width = get_dimension_value(props.get("width", structure.get("width", 100))) * scale_factor
 		var depth = get_dimension_value(props.get("depth", structure.get("depth", 100))) * scale_factor
 		var altitude = get_dimension_value(props.get("altitude", structure.get("altitude", 0))) * scale_factor
+		var opening_xy = _plan_point_2d(float(structure.get("x", 0)), float(structure.get("y", 0)))
 		var opening = CSGBox3D.new()
 		opening.operation = CSGBox3D.OPERATION_SUBTRACTION
 		opening.size = Vector3(max(width, 0.05), max(cut_height, 0.2), max(depth, 0.05))
 		opening.position = Vector3(
-			float(structure.get("x", 0)) * scale_factor,
+			opening_xy.x * scale_factor,
 			layer_altitude + altitude - max(cut_height, 0.2) * 0.5,
-			float(structure.get("y", 0)) * scale_factor
+			opening_xy.y * scale_factor
 		)
 		csg.add_child(opening)
 
@@ -2300,9 +2509,9 @@ func load_assets(data):
 				if layer.has("altitude"):
 					var alt_val = layer["altitude"]
 					if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
-						layer_alt = float(alt_val["length"]) * 0.01
+						layer_alt = float(alt_val["length"]) * _scene_unit_scale
 					else:
-						layer_alt = float(alt_val) * 0.01
+						layer_alt = float(alt_val) * _scene_unit_scale
 			else:
 				print("load_assets: Single-layer mode — placing assets at ground level")
 
@@ -2310,9 +2519,9 @@ func load_assets(data):
 				_load_layer_items(layer["items"], layer_alt, str(layer_id))
 			if layer.has("assets"):
 				_load_layer_items(layer["assets"], layer_alt, str(layer_id))
-	elif data.has("assets"):
+	if data.has("assets"):
 		_load_layer_items(data["assets"], 0.0, "root")
-	elif data.has("items"):
+	if data.has("items"):
 		_load_layer_items(data["items"], 0.0, "root")
 
 func _resolve_local_model_path(path: String) -> String:
@@ -2655,23 +2864,23 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 				if node:
 					add_child(node)
 					_sanitize_glb_lights(node)
-					
-					var px = float(item.get("x", 0)) * 0.01
-					var py = float(item.get("y", 0)) * 0.01
+					var item_xy = _plan_point_2d(float(item.get("x", 0)), float(item.get("y", 0)))
+					var px = item_xy.x * _scene_unit_scale
+					var py = item_xy.y * _scene_unit_scale
 					var pz = 0.0
 					
 					if item.has("altitude"):
 						var alt = item["altitude"]
 						if typeof(alt) == TYPE_DICTIONARY and alt.has("length"):
-							pz = float(alt["length"]) * 0.01
+							pz = float(alt["length"]) * _scene_unit_scale
 						else:
-							pz = float(alt) * 0.01
+							pz = float(alt) * _scene_unit_scale
 					elif item.has("properties") and item["properties"].has("altitude"):
 						var alt = item["properties"]["altitude"]
 						if typeof(alt) == TYPE_DICTIONARY and alt.has("length"):
-							pz = float(alt["length"]) * 0.01
+							pz = float(alt["length"]) * _scene_unit_scale
 						else:
-							pz = float(alt) * 0.01
+							pz = float(alt) * _scene_unit_scale
 						
 					pz += layer_altitude
 					node.position = Vector3(px, pz, py)
@@ -2682,7 +2891,7 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 					elif item.has("properties") and item["properties"].has("rotation"):
 						rot = float(item["properties"]["rotation"])
 						
-					node.rotation.y = -deg_to_rad(rot)
+					node.rotation.y = _world_yaw_from_source_rotation(rot) + _item_front_axis_correction()
 					
 					var props = {}
 					if item.has("properties") and typeof(item["properties"]) == TYPE_DICTIONARY:
@@ -2692,13 +2901,13 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 					var raw_depth  = props.get("depth",  100)
 					var raw_height = props.get("height", 100)
 					
-					var target_w = get_dimension_value(raw_width)  * 0.01
-					var target_d = get_dimension_value(raw_depth)  * 0.01
-					var target_h = get_dimension_value(raw_height) * 0.01
+					var target_w = get_dimension_value(raw_width)  * _scene_unit_scale
+					var target_d = get_dimension_value(raw_depth)  * _scene_unit_scale
+					var target_h = get_dimension_value(raw_height) * _scene_unit_scale
 					
-					var default_w = get_dimension_value(100) * 0.01
-					var default_h = get_dimension_value(100) * 0.01
-					var default_d = get_dimension_value(100) * 0.01
+					var default_w = get_dimension_value(100) * _scene_unit_scale
+					var default_h = get_dimension_value(100) * _scene_unit_scale
+					var default_d = get_dimension_value(100) * _scene_unit_scale
 					
 					var is_user_resized = (abs(target_w - default_w) > 0.001 or abs(target_h - default_h) > 0.001 or abs(target_d - default_d) > 0.001)
 					
@@ -2793,7 +3002,7 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 											matched_key = key
 											break
 
-									if matched_key == "" and item_mats.size() == 1:
+									if matched_key == "" and item_mats.size() == 1 and m.mesh.get_surface_count() == 1:
 										matched_key = item_mats.keys()[0]
 
 									if matched_key != "":
@@ -2857,8 +3066,12 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 											if mat_opt.has("repeat"):
 												var r = mat_opt["repeat"]
 												if typeof(r) == TYPE_ARRAY and r.size() >= 2:
-													scale_u = float(r[0]) if float(r[0]) > 0 else 1.0
-													scale_v = float(r[1]) if float(r[1]) > 0 else 1.0
+													var repeat_u = float(r[0])
+													var repeat_v = float(r[1])
+													if repeat_u > 0.0:
+														scale_u = repeat_u
+													if repeat_v > 0.0:
+														scale_v = repeat_v
 													changed_scale = true
 
 											if mat_opt.has("scale"):
@@ -2887,8 +3100,6 @@ func _load_layer_items(items, layer_altitude, layer_id := ""):
 												if USE_MATERIAL_OPTIMIZER:
 													new_mat = optimize_material(new_mat, mat_opt, "item")
 												m.set_surface_override_material(i, new_mat)
-												# Force material override to ensure it takes precedence over asset defaults
-												m.material_override = new_mat
 
 					_add_light_fixture_effect(node, item, aabb, final_scale)
 					
@@ -2958,6 +3169,53 @@ func _get_polygon_world_span(polygon: PackedVector2Array) -> Vector2:
 		min_y = min(min_y, p.y); max_y = max(max_y, p.y)
 
 	return Vector2(max(0.001, max_x - min_x), max(0.001, max_y - min_y))
+
+func _apply_architecture_texture_scale(mat: StandardMaterial3D, mat_data: Dictionary, surface_size: Vector2) -> StandardMaterial3D:
+	if mat == null or typeof(mat_data) != TYPE_DICTIONARY:
+		return mat
+
+	var width = max(surface_size.x, 0.001)
+	var height = max(surface_size.y, 0.001)
+	var scale_u = 1.0
+	var scale_v = 1.0
+
+	# repeatX/repeatY are stored as physical tile sizes in source units.
+	# Convert them to UV repeats using the actual surface size.
+	var tile_u = 0.0
+	var tile_v = 0.0
+	if mat_data.has("repeatX"):
+		tile_u = float(mat_data.get("repeatX", 0.0))
+	elif mat_data.has("texture_scale_x"):
+		tile_u = float(mat_data.get("texture_scale_x", 0.0))
+	if mat_data.has("repeatY"):
+		tile_v = float(mat_data.get("repeatY", 0.0))
+	elif mat_data.has("texture_scale_y"):
+		tile_v = float(mat_data.get("texture_scale_y", 0.0))
+
+	var has_physical_repeat = false
+	if tile_u > 0.0 and tile_v > 0.0:
+		scale_u = width / max(tile_u * _scene_unit_scale, 0.000001)
+		scale_v = height / max(tile_v * _scene_unit_scale, 0.000001)
+		has_physical_repeat = true
+	if has_physical_repeat:
+		mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+		return mat
+
+	# Legacy repeat arrays keep the existing 2.4 m density rule.
+	if mat_data.has("repeat"):
+		var r = mat_data["repeat"]
+		if typeof(r) == TYPE_ARRAY and r.size() >= 2:
+			var repeat_u = float(r[0])
+			var repeat_v = float(r[1])
+			if repeat_u > 0.0:
+				scale_u = repeat_u * width / 2.4
+			if repeat_v > 0.0:
+				scale_v = repeat_v * height / 2.4
+			if repeat_u > 0.0 or repeat_v > 0.0:
+				mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+				return mat
+
+	return mat
 
 func get_dimension_value(prop_value, default_val = 100.0) -> float:
 	if typeof(prop_value) == TYPE_ARRAY and prop_value.size() > 0:
@@ -3197,8 +3455,12 @@ func create_material(mat_data, surface_type: String = "item"):
 	if mat_data.has("repeat"):
 		var r = mat_data["repeat"]
 		if typeof(r) == TYPE_ARRAY and r.size() >= 2:
-			scale_u = float(r[0]) if float(r[0]) > 0 else 1.0
-			scale_v = float(r[1]) if float(r[1]) > 0 else 1.0
+			var repeat_u = float(r[0])
+			var repeat_v = float(r[1])
+			if repeat_u > 0.0:
+				scale_u = repeat_u
+			if repeat_v > 0.0:
+				scale_v = repeat_v
 			
 	if mat_data.has("scale"):
 		var s = mat_data["scale"]

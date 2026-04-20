@@ -3,12 +3,14 @@ extends Node3D
 # video_glb_creation.gd
 # Scene builder for VIDEO rendering.
 # Mirrors image_glb_creation.gd logic but handles the VIDEO JSON format:
-#   - floor_plan_data has lines/vertices/holes/areas/items as ARRAYS (each with an "id" field)
+#   - floor_plan_data may be flat or layered (new 2.0.0 export)
+#   - lines/vertices/holes/areas/items can arrive as ARRAYS or DICTIONARIES
 #   - Camera is driven per-frame by video_render.gd via threejs_camera_data
-#   - All floor-plan coordinates are in centimetres (multiply by 0.01 for Godot metres)
+#   - All floor-plan coordinates use the resolved scene unit scale (legacy cm, 2.0.0 mm)
 
 var _tracked_assets = []
 var _window_sunlight_data = []  # Collected during hole building, used to place window sunlights
+var _exterior_assets = []       # Tracks trees/plants/etc for shadow optimization
 var day_render = true
 var lighting_profile = "day"
 const ENABLE_PROCEDURAL_WINDOW_GRID_CASTER = false
@@ -18,22 +20,124 @@ var _frozen_lighting_profile = "day"
 var _frozen_camera_pose = null
 var _scene_built = false  # TRUE after first full build — prevents light/asset accumulation
 var _dir_light = null
-var _interior_shadow_clusters := {}
+var _scene_unit_scale: float = 0.01
+var _scene_rotation_is_radians: bool = false
+var _scene_plan_rotation_radians: float = 0.0
+var _scene_plan_pivot: Vector2 = Vector2.ZERO
+var _floor_plan_root_data: Dictionary = {}
 
-# Global kill-switch for room reflection probes.
-# true  -> build and use the reflection probe
-# false -> skip probe creation entirely
-const USE_REFLECTION_PROBE = true
-# When true, only create the probe if the scene contains reflective surfaces
-# such as floor tile, glass, mirror, polished stone, or metal materials.
-const USE_REFLECTION_PROBE_ONLY_FOR_REFLECTIVE_SURFACES = true
-# When true, reflective floor/metal/glass materials get a small response boost
-# so the probe is actually visible on the intended surfaces.
-const USE_REFLECTION_RESPONSE_ASSIST = true
-# Global kill-switch for the material optimizer.
-# true  -> apply optimizer presets / overrides
-# false -> keep raw material values from the JSON / asset defaults
-const USE_MATERIAL_OPTIMIZER = false
+func _accumulate_plan_bounds(raw_vertex, bounds: Array) -> bool:
+	if typeof(raw_vertex) != TYPE_DICTIONARY:
+		return false
+	if not raw_vertex.has("x") or not raw_vertex.has("y"):
+		return false
+	var vx = float(raw_vertex.get("x", 0.0))
+	var vy = float(raw_vertex.get("y", 0.0))
+	bounds[0] = min(bounds[0], vx)
+	bounds[1] = min(bounds[1], vy)
+	bounds[2] = max(bounds[2], vx)
+	bounds[3] = max(bounds[3], vy)
+	return true
+
+func _resolve_scene_unit_scale(data: Dictionary, geom_data = {}) -> float:
+	var version := ""
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("version"):
+		version = str(geom_data.get("version", "")).strip_edges()
+	elif typeof(data) == TYPE_DICTIONARY and data.has("version"):
+		version = str(data.get("version", "")).strip_edges()
+	if version == "2.0.0":
+		return 0.001
+	return 0.01
+
+func _resolve_scene_rotation_is_radians(data: Dictionary, geom_data = {}) -> bool:
+	var version := ""
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("version"):
+		version = str(geom_data.get("version", "")).strip_edges()
+	elif typeof(data) == TYPE_DICTIONARY and data.has("version"):
+		version = str(data.get("version", "")).strip_edges()
+	return version == "2.0.0"
+
+func _resolve_scene_plan_rotation_radians(data: Dictionary, geom_data = {}) -> float:
+	var version := ""
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("version"):
+		version = str(geom_data.get("version", "")).strip_edges()
+	elif typeof(data) == TYPE_DICTIONARY and data.has("version"):
+		version = str(data.get("version", "")).strip_edges()
+	if version == "2.0.0":
+		return 0.0
+	var angle_deg := 0.0
+	if typeof(geom_data) == TYPE_DICTIONARY and geom_data.has("directionangle"):
+		angle_deg = float(geom_data.get("directionangle", 0.0))
+	elif typeof(data) == TYPE_DICTIONARY and data.has("directionangle"):
+		angle_deg = float(data.get("directionangle", 0.0))
+	return -deg_to_rad(angle_deg)
+
+func _resolve_scene_plan_pivot(data: Dictionary, geom_data = {}) -> Vector2:
+	var source = geom_data if typeof(geom_data) == TYPE_DICTIONARY and not geom_data.is_empty() else data
+	if typeof(source) != TYPE_DICTIONARY or source.is_empty():
+		return Vector2.ZERO
+
+	var bounds = [INF, INF, -INF, -INF]
+	var found := false
+
+	if source.has("layers") and typeof(source["layers"]) == TYPE_DICTIONARY:
+		var layers_dict = source["layers"]
+		var selected_layer = str(source.get("selectedLayer", "")).strip_edges()
+		var layer_ids: Array = []
+		if selected_layer != "" and layers_dict.has(selected_layer):
+			layer_ids.append(selected_layer)
+		else:
+			for layer_id in layers_dict:
+				layer_ids.append(layer_id)
+
+		for layer_id in layer_ids:
+			var layer = layers_dict.get(layer_id, {})
+			if typeof(layer) != TYPE_DICTIONARY:
+				continue
+			var vertices = {}
+			if layer.has("vertices") and typeof(layer["vertices"]) == TYPE_DICTIONARY:
+				vertices = layer["vertices"]
+			elif source.has("vertices") and typeof(source["vertices"]) == TYPE_DICTIONARY:
+				vertices = source["vertices"]
+			if vertices.is_empty() or not layer.has("areas") or typeof(layer["areas"]) != TYPE_DICTIONARY:
+				continue
+			for area_id in layer["areas"]:
+				var area = layer["areas"][area_id]
+				if typeof(area) != TYPE_DICTIONARY or not area.has("vertices"):
+					continue
+				for vid in area["vertices"]:
+					var vs = str(vid)
+					if vertices.has(vs):
+						found = _accumulate_plan_bounds(vertices[vs], bounds) or found
+			if found:
+				break
+
+	if not found and source.has("vertices") and typeof(source["vertices"]) == TYPE_DICTIONARY:
+		for vertex_id in source["vertices"]:
+			found = _accumulate_plan_bounds(source["vertices"][vertex_id], bounds) or found
+
+	if not found:
+		return Vector2.ZERO
+
+	return Vector2((bounds[0] + bounds[2]) * 0.5, (bounds[1] + bounds[3]) * 0.5)
+
+func _plan_point_2d(x: float, y: float) -> Vector2:
+	var point = Vector2(x, y) - _scene_plan_pivot
+	if abs(_scene_plan_rotation_radians) > 0.000001:
+		point = point.rotated(_scene_plan_rotation_radians)
+	point += _scene_plan_pivot
+	return point
+
+func _transform_camera_plan_point(point: Vector3) -> Vector3:
+	var transformed = _plan_point_2d(point.x, point.z)
+	return Vector3(
+		transformed.x * _scene_unit_scale,
+		point.y * _scene_unit_scale,
+		transformed.y * _scene_unit_scale
+	)
+
+func _camera_cm_to_m(point: Vector3) -> Vector3:
+	return Vector3(point.x * 0.01, point.y * 0.01, point.z * 0.01)
 
 # ─────────────────────────────────────────────────────────────────
 # Entry-point (called by video_render.gd)
@@ -43,7 +147,6 @@ func build_scene(data):
 	if not _lighting_locked:
 		lighting_profile = _resolve_lighting_profile(data)
 		day_render = lighting_profile != "night"
-		_interior_shadow_clusters.clear()
 		_frozen_lighting_profile = lighting_profile
 		_frozen_camera_pose = _extract_camera_pose(data)
 		_lighting_locked = true
@@ -74,12 +177,20 @@ func build_scene(data):
 		else:
 			geom_data = fp
 
+	_floor_plan_root_data = geom_data if typeof(geom_data) == TYPE_DICTIONARY else {}
+	_scene_unit_scale = _resolve_scene_unit_scale(data, geom_data)
+	_scene_rotation_is_radians = _resolve_scene_rotation_is_radians(data, geom_data)
+	_scene_plan_rotation_radians = _resolve_scene_plan_rotation_radians(data, geom_data)
+	_scene_plan_pivot = _resolve_scene_plan_pivot(data, geom_data)
+	print("[VideoGLB] Using scene unit scale: ", _scene_unit_scale, " m/source-unit")
+	print("[VideoGLB] Using plan rotation: ", rad_to_deg(_scene_plan_rotation_radians), " deg | pivot=", _scene_plan_pivot)
+
 	# ── Unwrap layers structure ───────────────────────────────────────────────
 	# scene_optimizer_video.py writes geometry inside geom_data["layers"][layer_id].
 	# Flatten the selected (or first) layer up to the top level so all downstream
 	# functions (build_architecture, load_assets, lighting bounds) can find
 	# lines / vertices / holes / areas / items without knowing about layers.
-	if geom_data.has("layers") and typeof(geom_data["layers"]) == TYPE_DICTIONARY:
+	if false and geom_data.has("layers") and typeof(geom_data["layers"]) == TYPE_DICTIONARY:
 		var layers = geom_data["layers"]
 		var layer_id = geom_data.get("selectedLayer", "")
 		var layer = null
@@ -112,11 +223,11 @@ func build_scene(data):
 
 	_window_sunlight_data.clear()
 	build_architecture(geom_data, cam_pose.get("position", Vector3.ZERO), show_all_floors)
-	if _dir_light != null:
-		_orient_directional_light_from_windows(_dir_light)
-	# _create_window_sunlights()  # Removed in favor of DirectionalLight orientation
 	build_structures(geom_data)
 	load_assets(geom_data)
+	
+	if _dir_light != null:
+		_orient_directional_light_from_windows(_dir_light, cam_pose)
 	
 	_apply_anisotropic_filtering_to_all(self)
 
@@ -159,23 +270,20 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	var room_extent: Vector2  = room_info.get("extent",     Vector2(6.0, 6.0))
 	var room_ceiling_y: float = room_info.get("ceiling_y",  room_center.y + 2.8)
 
-	# ── Window / ambient OmniLight ─────────────────────────────────────────────
-	var window_light = OmniLight3D.new()
-	window_light.position     = Vector3(room_center.x, room_ceiling_y - 1.25, room_center.z)
-	window_light.light_energy = lighting["window_energy"]
-	window_light.omni_range   = max(room_extent.x, room_extent.y) * 2.1 + 6.0
-	window_light.light_color  = lighting["window_color"]
-	window_light.light_specular = 0.0
-	window_light.shadow_enabled = false
-	add_child(window_light)
-
 	# ── Primary Directional Light (Sun / Moon) ─────────────────────────────────
 	var dir_light = DirectionalLight3D.new()
 	dir_light.name = "Sun"
-	# Keep the sun as a soft ambient contributor; interior fixtures own the shadows.
-	dir_light.shadow_enabled = false
-	dir_light.light_specular = 0.3
-	dir_light.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
+	# Enable shadows so sunlight through windows casts realistic shadow patterns
+	dir_light.shadow_enabled = true
+	dir_light.light_angular_distance  = 0.5
+	dir_light.shadow_bias             = 0.1
+	dir_light.shadow_normal_bias      = 3.0
+	dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
+	dir_light.directional_shadow_max_distance    = 120.0
+	dir_light.directional_shadow_blend_splits    = true
+	dir_light.shadow_transmittance_bias          = 0.05
+	dir_light.shadow_blur                        = 1.5
+	dir_light.light_angular_distance             = 0.5
 
 	if data.has("directional_light"):
 		var l = data["directional_light"]
@@ -237,29 +345,26 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	# ── Ambient Light ──────────────────────────────────────────────────────────
 	# Use COLOR ambient for enclosed rooms — avoids sky-light bleeding at corners.
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = lighting["ambient_color"]
+	env.ambient_light_color  = lighting["ambient_color"]
 	env.ambient_light_energy = lighting["ambient_energy"]
 
-	# ── Tone Mapping (AGX) ────────────────────────────────────────────────────────
-	# AGX tonemapper (Godot 4.6): preserves hue in bright highlights, prevents
-	# white washout, and provides more natural contrast than Filmic.
-	# Uses dedicated agx_white (stable white point) and agx_contrast parameters.
+	# ── Tone Mapping ───────────────────────────────────────────────────────────
 	env.tonemap_mode     = Environment.TONE_MAPPER_FILMIC
-	env.tonemap_exposure     = lighting["tonemap_exposure"]
+	env.tonemap_exposure = lighting["tonemap_exposure"]
 	env.tonemap_white    = lighting["tonemap_white"]
 
 	# ── Disabled effects (crash / black in headless export) ────────────────────
 	env.sdfgi_enabled = false
-	env.ssil_enabled   = true
-	env.ssr_enabled = false
+	env.ssil_enabled  = false
+	env.ssr_enabled   = false
 
 	# ── SSAO ───────────────────────────────────────────────────────────────────
 	env.ssao_enabled   = true
-	env.ssao_radius    = 1.8
-	env.ssao_intensity = 1.6
-	env.ssao_power     = 2.0
-	env.ssao_detail    = 0.5
-	env.ssao_horizon   = 0.06
+	env.ssao_radius    = 1.0
+	env.ssao_intensity = 0.45
+	env.ssao_power     = 0.9
+	env.ssao_detail    = 0.25
+	env.ssao_horizon   = 0.03
 	env.ssao_sharpness = 0.98
 
 	# ── Glow ───────────────────────────────────────────────────────────────────
@@ -276,35 +381,12 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	env.adjustment_contrast   = 1.06
 	env.adjustment_saturation = 1.10
 
-	# ── ReflectionProbe — placed at room center for realistic interior reflections ──
-	# Interior mode + box projection give accurate parallax-corrected reflections
-	# on reflective materials (polished floors, glass tables, metallic surfaces).
-	# UPDATE_ONCE takes ~6 frames to bake its cubemap, but the video_render.gd
-	# warmup phase (10 frames) runs BEFORE MovieWriter starts recording, so the
-	# probe is fully baked before the first captured frame — no dark-frame "pop".
-	var room_height = max(2.8, (room_ceiling_y - room_center.y) * 2.0)
-	var probe = ReflectionProbe.new()
-	probe.name = "RoomReflectionProbe"
-	probe.size = Vector3(
-		max(room_extent.x + 4.0, 8.0),
-		room_height + 2.0,
-		max(room_extent.y + 4.0, 8.0)
-	)
-	probe.update_mode = ReflectionProbe.UPDATE_ALWAYS
-	probe.intensity = 3.0
-	probe.max_distance = 0.0
-	# Place at the exact center of the room
-	probe.position = room_center
-	# Interior mode: treats the probe as an enclosed space (no sky leaking)
-	probe.interior = true
-	# Box projection: corrects parallax so reflections align with actual room geometry
-	probe.box_projection = true
-	# Enable shadows in the probe capture — window shadows appear in reflections
-	probe.enable_shadows = true
-	add_child(probe)
-	print("ReflectionProbe (ALWAYS) placed at room center: ", room_center,
-		" size: ", probe.size, " interior=true, box_projection=true, shadows=true")
-	print("Probe added and verified at: ", probe.get_path())
+# ── ReflectionProbe ────────────────────────────────────────────────────────
+	# Removed entirely for video renders.
+	# Godot's ReflectionProbe UPDATE_ONCE takes exactly 6 frames to bake its cubemap.
+	# During frames 0-4, the ambient lighting falls back to a dark unbaked state,
+	# causing a visually jarring "pop" on frame 5 when the probe completes.
+	# For continuous video rendering, we rely exclusively on the WorldEnvironment.
 
 	var world_env = WorldEnvironment.new()
 	world_env.environment = env
@@ -358,48 +440,104 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	print("[VideoGLB] Photorealistic lighting setup complete. profile=", lighting_profile)
 
 # ─────────────────────────────────────────────────────────────────
-func _orient_directional_light_from_windows(dir_light: DirectionalLight3D):
+func _orient_directional_light_from_windows(dir_light: DirectionalLight3D, cam_pose_override = null):
 	if _window_sunlight_data.size() == 0:
 		return
 
-	# ── Step 1: Average outer_dir across ALL windows ──────────────────────
-	var avg_outer_dir := Vector3.ZERO
+	# ── Step 0: Camera Orientation ────────────────────────────────────────
+	# We want sunlight to favor windows the camera is looking at.
+	var cam_pose = cam_pose_override
+	if cam_pose == null:
+		cam_pose = _frozen_camera_pose
+	if cam_pose == null:
+		cam_pose = {"position": Vector3.ZERO, "target": Vector3(0, 0, -1)}
+	
+	var cam_pos: Vector3 = cam_pose["position"]
+	var cam_target: Vector3 = cam_pose["target"]
+	var cam_forward = (cam_target - cam_pos).normalized()
+	cam_forward.y = 0.0 # horizontal view direction
+	if cam_forward.length() < 0.001:
+		cam_forward = Vector3(0, 0, -1)
+	cam_forward = cam_forward.normalized()
+
+	# ── Step 1: Weighted outer_dir ────────────────────────────────────────
+	# Instead of a simple average, we weight windows based on their visibility 
+	# and alignment with the camera to create a "backlit/side-lit" cinematic look.
+	var weighted_outer_dir := Vector3.ZERO
+	var total_weight := 0.0
+	
 	for win in _window_sunlight_data:
-		avg_outer_dir += (win["outer_dir"] as Vector3)
-	avg_outer_dir = avg_outer_dir / float(_window_sunlight_data.size())
-	avg_outer_dir.y = 0.0
+		var win_center = win["center"] as Vector3
+		var win_inner  = win["inner_dir"] as Vector3
+		win_inner.y = 0.0
+		win_inner = win_inner.normalized()
+		
+		# Score 1: Is the window actually in front of the camera's lens?
+		var to_win = (win_center - cam_pos).normalized()
+		to_win.y = 0.0
+		var fov_score = max(0.0, cam_forward.dot(to_win)) # 1.0 = directly in center of view
+		
+		# Score 2: Is the window on a wall the camera is facing?
+		# (If looking at a window, its inner_dir points back at the camera)
+		var visibility_score = max(0.0, win_inner.dot(-cam_forward))
+		
+		# Score 3: Are there exterior assets (trees/plants) outside this window?
+		# We want to favor windows that will cast interesting shadows.
+		var asset_bonus = 0.0
+		for ext in _exterior_assets:
+			var asset_pos = ext["position"] as Vector3
+			var dist_to_win = win_center.distance_to(asset_pos)
+			if dist_to_win < 6.0: # within 6 meters of window
+				# Check if asset is actually "outside" the window (in the direction of outer_dir)
+				var to_asset = (asset_pos - win_center).normalized()
+				var alignment = (win["outer_dir"] as Vector3).dot(to_asset)
+				if alignment > 0.0: # asset is outside
+					asset_bonus += 2.5 * (1.0 - dist_to_win / 6.0) * alignment
+
+		# Weight calculation: prioritize windows in FOV and on facing walls.
+		# This ensures light "shines back" towards the camera through windows.
+		var weight = (fov_score * 2.0) + (visibility_score * 3.5) + asset_bonus + 0.1 # 0.1 baseline fallback
+		
+		weighted_outer_dir += (win["outer_dir"] as Vector3) * weight
+		total_weight += weight
+
+	var avg_outer_dir = weighted_outer_dir / total_weight
+	avg_outer_dir.y = 0.0  # flatten — elevation handled separately below
 	if avg_outer_dir.length() < 0.001:
-		avg_outer_dir = Vector3(1, 0, 0)
+		avg_outer_dir = Vector3(1, 0, 0)  # safe fallback
 	avg_outer_dir = avg_outer_dir.normalized()
 
 	# ── Step 2: Sun elevation per lighting profile ────────────────────────
+	# This is the downward angle of sunlight.
 	var elevation_deg: float
 	match lighting_profile:
-		"day":    elevation_deg = 35.0
-		"sunset": elevation_deg = 8.0
-		"night":  elevation_deg = 55.0
-		_:        elevation_deg = 35.0
+		"day":    elevation_deg = 28.0   # slightly lower for longer, more dramatic shadows
+		"sunset": elevation_deg = 8.0    # high grazing golden hour light
+		"night":  elevation_deg = 55.0   # moon, steep and cool
+		_:        elevation_deg = 28.0
 
 	# ── Step 3: Build a direction vector from outer_dir + elevation ───────
+	# Sun ray direction: horizontal component = -avg_outer_dir (sun comes from outside)
 	var elevation_rad := deg_to_rad(elevation_deg)
 	var sun_dir := Vector3(
 		-avg_outer_dir.x,
-		-sin(elevation_rad),
+		-sin(elevation_rad),      # negative = pointing downward
 		-avg_outer_dir.z
 	).normalized()
 
 	# ── Step 4: Orient the directional light ─────────────────────────────
-	var room_center := Vector3.ZERO
+	# Place the virtual sun far away and look_at the weighted center of openings.
+	var weighted_center := Vector3.ZERO
 	for win in _window_sunlight_data:
-		room_center += (win["center"] as Vector3)
-	room_center /= float(_window_sunlight_data.size())
+		weighted_center += (win["center"] as Vector3)
+	weighted_center /= float(_window_sunlight_data.size())
 
-	dir_light.position = room_center - sun_dir * 50.0
-	if dir_light.position.distance_to(room_center) > 0.001:
-		dir_light.look_at(room_center, Vector3.UP)
+	dir_light.position = weighted_center - sun_dir * 50.0
+	if dir_light.position.distance_to(weighted_center) > 0.001:
+		dir_light.look_at(weighted_center, Vector3.UP)
 
-	print("[VideoGLB] DirectionalLight oriented from windows: outer_dir=", avg_outer_dir,
-		  " elevation=", elevation_deg, "deg  sun_dir=", sun_dir)
+	print("[VideoGLB] Dynamic Sunlight oriented: cam_forward=", cam_forward, 
+		  " weighted_outer=", avg_outer_dir, " elevation=", elevation_deg)
 
 # Removed _create_window_sunlights (legacy SpotLight method) in favor of DirectionalLight.
 
@@ -410,6 +548,63 @@ func parse_vec3(d):
 	if typeof(d) == TYPE_DICTIONARY:
 		return Vector3(d.get("x", 0), d.get("y", 0), d.get("z", 0))
 	return Vector3.ZERO
+
+func _get_floor_plan_layer_map(data) -> Dictionary:
+	if typeof(data) != TYPE_DICTIONARY:
+		return {}
+	if data.has("layers") and typeof(data["layers"]) == TYPE_DICTIONARY:
+		return data["layers"]
+	return {}
+
+func _layer_has_geometry(layer) -> bool:
+	if typeof(layer) != TYPE_DICTIONARY:
+		return false
+	for key in ["lines", "vertices", "areas", "items", "holes", "structures"]:
+		if not layer.has(key):
+			continue
+		var value = layer[key]
+		if typeof(value) == TYPE_DICTIONARY and value.size() > 0:
+			return true
+		if typeof(value) == TYPE_ARRAY and value.size() > 0:
+			return true
+	return false
+
+func _get_layer_altitude(layer) -> float:
+	if typeof(layer) != TYPE_DICTIONARY:
+		return 0.0
+	if not layer.has("altitude"):
+		return 0.0
+	var alt = layer["altitude"]
+	if typeof(alt) == TYPE_DICTIONARY and alt.has("length"):
+		return float(alt["length"]) * _scene_unit_scale
+	elif typeof(alt) == TYPE_INT or typeof(alt) == TYPE_FLOAT:
+		return float(alt) * _scene_unit_scale
+	elif typeof(alt) == TYPE_STRING and alt.is_valid_float():
+		return float(alt) * _scene_unit_scale
+	return 0.0
+
+func _get_primary_layer_id(data, layer_map: Dictionary = {}) -> String:
+	var layers = layer_map
+	if layers.size() == 0:
+		layers = _get_floor_plan_layer_map(data)
+	if layers.size() == 0:
+		return ""
+
+	var selected_layer = str(data.get("selectedLayer", ""))
+	if selected_layer != "" and layers.has(selected_layer):
+		var selected = layers[selected_layer]
+		if typeof(selected) == TYPE_DICTIONARY and _layer_has_geometry(selected):
+			return selected_layer
+
+	for layer_id in layers.keys():
+		var layer = layers[layer_id]
+		if typeof(layer) != TYPE_DICTIONARY:
+			continue
+		if _layer_has_geometry(layer):
+			return str(layer_id)
+
+	var first_key = layers.keys()[0] if layers.size() > 0 else ""
+	return str(first_key)
 
 func _resolve_lighting_profile(data: Dictionary) -> String:
 	var string_keys = ["lighting_profile", "time_of_day", "render_time", "environment_preset"]
@@ -436,8 +631,6 @@ func _get_lighting_profile_settings() -> Dictionary:
 		"night":
 			return {
 				"sky_exr": "res://night.exr",
-				"window_energy": 0.03,
-				"window_color": Color(0.72, 0.80, 1.0),
 				"dir_energy": 0.06,
 				"dir_color": Color(0.55, 0.62, 0.90),
 				"sky_top_color": Color(0.01, 0.02, 0.05),
@@ -462,8 +655,6 @@ func _get_lighting_profile_settings() -> Dictionary:
 		"sunset":
 			return {
 				"sky_exr": "res://day.exr",
-				"window_energy": 0.18,
-				"window_color": Color(1.0, 0.76, 0.56),
 				"dir_energy": 1.65,
 				"dir_color": Color(1.0, 0.63, 0.38),
 				"sky_top_color": Color(0.20, 0.24, 0.42),
@@ -488,8 +679,6 @@ func _get_lighting_profile_settings() -> Dictionary:
 		_:
 			return {
 				"sky_exr": "res://day.exr",
-				"window_energy": 0.06,
-				"window_color": Color(1.0, 0.95, 0.85),
 				"dir_energy": 1.0,
 				"dir_color": Color(1.0, 0.96, 0.88),
 				"sky_top_color": Color(0.25, 0.40, 0.78),
@@ -520,7 +709,7 @@ func _extract_camera_pose(data: Dictionary) -> Dictionary:
 	var cam_target = Vector3.ZERO
 	var found      = false
 
-	# Try video_animation first keyframe (threejs_camera_data coords are in cm)
+	# Try video_animation first keyframe (camera coords are in cm)
 	if data.has("video_animation") and data["video_animation"] != null:
 		var anim      = data["video_animation"]
 		var keyframes = anim.get("keyframes", [])
@@ -530,19 +719,35 @@ func _extract_camera_pose(data: Dictionary) -> Dictionary:
 			if tjs != null and typeof(tjs) == TYPE_DICTIONARY:
 				if tjs.has("position") and typeof(tjs["position"]) == TYPE_DICTIONARY:
 					var p = tjs["position"]
-					cam_pos = Vector3(float(p.get("x", 0)) * 0.01, float(p.get("y", 0)) * 0.01, float(p.get("z", 0)) * 0.01)
+					cam_pos = _camera_cm_to_m(Vector3(
+						float(p.get("x", 0)),
+						float(p.get("y", 0)),
+						float(p.get("z", 0))
+					))
 					found = true
 				if tjs.has("lookAt") and typeof(tjs["lookAt"]) == TYPE_DICTIONARY:
 					var la = tjs["lookAt"]
-					cam_target = Vector3(float(la.get("x", 0)) * 0.01, float(la.get("y", 0)) * 0.01, float(la.get("z", 0)) * 0.01)
+					cam_target = _camera_cm_to_m(Vector3(
+						float(la.get("x", 0)),
+						float(la.get("y", 0)),
+						float(la.get("z", 0))
+					))
 
 	if not found and data.has("threejs_camera") and typeof(data["threejs_camera"]) == TYPE_DICTIONARY:
 		var tc = data["threejs_camera"]
 		if tc.has("position") and typeof(tc["position"]) == TYPE_DICTIONARY:
-			cam_pos = parse_vec3(tc["position"])
+			cam_pos = _camera_cm_to_m(Vector3(
+				float(tc["position"].get("x", 0)),
+				float(tc["position"].get("y", 0)),
+				float(tc["position"].get("z", 0))
+			))
 			found   = true
 		if tc.has("target") and typeof(tc["target"]) == TYPE_DICTIONARY:
-			cam_target = parse_vec3(tc["target"])
+			cam_target = _camera_cm_to_m(Vector3(
+				float(tc["target"].get("x", 0)),
+				float(tc["target"].get("y", 0)),
+				float(tc["target"].get("z", 0))
+			))
 
 	if not found:
 		cam_pos = Vector3(0, 1.6, 6)
@@ -564,7 +769,13 @@ func _extract_room_lighting_bounds(geom_data) -> Dictionary:
 		return out
 
 	# Normalise array-format data to dict format for bounds extraction
-	var layer_data = _arrays_to_dicts(geom_data)
+	var layer_data = geom_data
+	var layer_map = _get_floor_plan_layer_map(geom_data)
+	if layer_map.size() > 0:
+		var primary_layer_id = _get_primary_layer_id(geom_data, layer_map)
+		if primary_layer_id != "" and layer_map.has(primary_layer_id):
+			layer_data = layer_map[primary_layer_id]
+	layer_data = _arrays_to_dicts(layer_data)
 
 	if not layer_data.has("areas") or not layer_data.has("vertices"):
 		return out
@@ -587,8 +798,8 @@ func _extract_room_lighting_bounds(geom_data) -> Dictionary:
 			if not vertices.has(key):
 				continue
 			var v   = vertices[key]
-			var x   = float(v.get("x", 0.0)) * 0.01
-			var z   = float(v.get("y", 0.0)) * 0.01
+			var x   = float(v.get("x", 0.0)) * _scene_unit_scale
+			var z   = float(v.get("y", 0.0)) * _scene_unit_scale
 			min_x = min(min_x, x); max_x = max(max_x, x)
 			min_z = min(min_z, z); max_z = max(max_z, z)
 			got_any = true
@@ -604,7 +815,7 @@ func _extract_room_lighting_bounds(geom_data) -> Dictionary:
 		if area.has("ceiling_properties"):
 			var cp = area["ceiling_properties"]
 			if typeof(cp) == TYPE_DICTIONARY and cp.has("height"):
-				var h = float(cp["height"]) * 0.01
+				var h = float(cp["height"]) * _scene_unit_scale
 				if h > 0.1:
 					ceil_h = h
 				break
@@ -617,143 +828,6 @@ func _extract_room_lighting_bounds(geom_data) -> Dictionary:
 # ─────────────────────────────────────────────────────────────────
 # Ceiling visibility helpers
 # ─────────────────────────────────────────────────────────────────
-func _has_reflective_surface_hint(text: String) -> bool:
-	var lower = text.to_lower()
-	var hints = ["tile", "marble", "granite", "polished", "porcelain", "gloss", "reflect", "mirror", "glass", "metal", "chrome", "gold"]
-	for hint in hints:
-		if hint in lower:
-			return true
-	return false
-
-func _material_dict_has_reflection_hint(mat_data) -> bool:
-	if typeof(mat_data) != TYPE_DICTIONARY:
-		return false
-	if mat_data.has("mapUrl") and _has_reflective_surface_hint(str(mat_data.get("mapUrl", ""))):
-		return true
-	if mat_data.has("normalUrl") and _has_reflective_surface_hint(str(mat_data.get("normalUrl", ""))):
-		return true
-	if mat_data.has("roughnessUrl") and _has_reflective_surface_hint(str(mat_data.get("roughnessUrl", ""))):
-		return true
-	if mat_data.has("metalnessUrl") and str(mat_data.get("metalnessUrl", "")) != "":
-		return true
-	if mat_data.has("color") and _has_reflective_surface_hint(str(mat_data.get("color", ""))):
-		return true
-	return false
-
-func _scene_has_reflective_surfaces(geom_data: Dictionary) -> bool:
-	if typeof(geom_data) != TYPE_DICTIONARY:
-		return false
-
-	if geom_data.has("layers") and typeof(geom_data["layers"]) == TYPE_DICTIONARY:
-		for layer in geom_data["layers"].values():
-			if typeof(layer) != TYPE_DICTIONARY:
-				continue
-
-			for line in layer.get("lines", {}).values():
-				if typeof(line) != TYPE_DICTIONARY:
-					continue
-				if line.has("asset_urls") and typeof(line["asset_urls"]) == TYPE_DICTIONARY:
-					var au = line["asset_urls"]
-					for face in ["inner", "outer"]:
-						if au.has(face) and _material_dict_has_reflection_hint(au[face]):
-							return true
-				for prop_key in ["inner_properties", "outer_properties"]:
-					if line.has(prop_key) and typeof(line[prop_key]) == TYPE_DICTIONARY:
-						var props = line[prop_key]
-						if props.has("material") and _material_dict_has_reflection_hint(props["material"]):
-							return true
-
-			for area_key in ["areas"]:
-				if not layer.has(area_key) or typeof(layer[area_key]) != TYPE_DICTIONARY:
-					continue
-				for area in layer[area_key].values():
-					if typeof(area) != TYPE_DICTIONARY:
-						continue
-					for prop_key in ["floor_properties", "ceiling_properties"]:
-						if area.has(prop_key) and typeof(area[prop_key]) == TYPE_DICTIONARY:
-							var props = area[prop_key]
-							if props.has("material") and _material_dict_has_reflection_hint(props["material"]):
-								return true
-
-			for item in layer.get("items", {}).values():
-				if typeof(item) != TYPE_DICTIONARY:
-					continue
-				var item_desc = "%s %s" % [str(item.get("name", "")), str(item.get("type", ""))]
-				if _has_reflective_surface_hint(item_desc):
-					return true
-				if item.has("materials") and typeof(item["materials"]) == TYPE_DICTIONARY:
-					for mat in item["materials"].values():
-						if _material_dict_has_reflection_hint(mat):
-							return true
-
-	if geom_data.has("materials") and typeof(geom_data["materials"]) == TYPE_DICTIONARY:
-		for mat in geom_data["materials"].values():
-			if _material_dict_has_reflection_hint(mat):
-				return true
-
-	return false
-
-func _material_is_reflective_candidate(mat_data, surface_type: String) -> bool:
-	if typeof(mat_data) != TYPE_DICTIONARY:
-		return false
-
-	var text = ""
-	if mat_data.has("mapUrl"):
-		text += " " + str(mat_data.get("mapUrl", ""))
-	if mat_data.has("normalUrl"):
-		text += " " + str(mat_data.get("normalUrl", ""))
-	if mat_data.has("roughnessUrl"):
-		text += " " + str(mat_data.get("roughnessUrl", ""))
-	if mat_data.has("metalnessUrl"):
-		text += " " + str(mat_data.get("metalnessUrl", ""))
-	if mat_data.has("color"):
-		text += " " + str(mat_data.get("color", ""))
-	text = text.to_lower()
-
-	if surface_type == "floor":
-		var floor_keywords = ["tile", "marble", "granite", "polished", "porcelain", "gloss", "reflect", "metal", "chrome", "glass"]
-		for kw in floor_keywords:
-			if kw in text:
-				return true
-
-	if surface_type == "wall" or surface_type == "item":
-		var spec_keywords = ["glass", "mirror", "metal", "chrome", "gold"]
-		for kw in spec_keywords:
-			if kw in text:
-				return true
-
-	return false
-
-func _apply_reflection_response_assist(mat: StandardMaterial3D, mat_data: Dictionary, surface_type: String) -> StandardMaterial3D:
-	if not USE_REFLECTION_PROBE or not USE_REFLECTION_RESPONSE_ASSIST:
-		return mat
-
-	if not _material_is_reflective_candidate(mat_data, surface_type):
-		return mat
-
-	var path = str(mat_data.get("mapUrl", "")).to_lower()
-	if surface_type == "floor":
-		mat.metallic = 0.0
-		mat.roughness = min(mat.roughness, 0.25)
-		mat.metallic_specular = max(mat.metallic_specular, 0.65)
-		mat.clearcoat_enabled = true
-		mat.clearcoat = max(mat.clearcoat, 0.25)
-		mat.clearcoat_roughness = min(mat.clearcoat_roughness, 0.12)
-		print("  [ReflectionAssist] Floor candidate -> boosting probe response.")
-	elif "glass" in path or "mirror" in path:
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.roughness = min(mat.roughness, 0.05)
-		mat.metallic = 0.0
-		mat.metallic_specular = 1.0
-		print("  [ReflectionAssist] Glass/mirror candidate -> enabling crisp reflections.")
-	elif "metal" in path or "steel" in path or "chrome" in path or "gold" in path:
-		mat.metallic = 1.0
-		mat.roughness = min(mat.roughness, 0.18)
-		mat.metallic_specular = 1.0
-		print("  [ReflectionAssist] Metal candidate -> boosting reflections.")
-
-	return mat
-
 func _camera_requires_ceiling(cam_pos: Vector3, layer_altitude: float, ceil_height: float, polygon: PackedVector2Array) -> bool:
 	if polygon.size() < 3:
 		return false
@@ -787,6 +861,44 @@ func build_architecture(data, cam_pos = null, show_all_floors_override = null):
 	print("[VideoGLB] Building Architecture...")
 
 	var layer_data = _arrays_to_dicts(data)
+	var layer_map = _get_floor_plan_layer_map(data)
+
+	if layer_map.size() > 0:
+		var show_all_floors = data.get("showAllFloors", true)
+		if show_all_floors_override != null:
+			show_all_floors = bool(show_all_floors_override)
+
+		# Determine render_mode (video is almost always INTERIOR but respect override)
+		var render_mode = data.get("render_mode", "INTERIOR")
+
+		if show_all_floors:
+			print("[VideoGLB] showAllFloors=true â€” building ceilings.")
+		else:
+			print("[VideoGLB] showAllFloors=false â€” ceilings hidden unless camera is inside.")
+
+		var layer_ids = layer_map.keys()
+		if not show_all_floors:
+			var primary_layer_id = _get_primary_layer_id(data, layer_map)
+			layer_ids = []
+			if primary_layer_id != "":
+				layer_ids.append(primary_layer_id)
+
+		for layer_id in layer_ids:
+			if not layer_map.has(layer_id):
+				continue
+			var layer = layer_map[layer_id]
+			if typeof(layer) != TYPE_DICTIONARY:
+				continue
+			var layer_flat = _arrays_to_dicts(layer)
+			if not layer_flat.has("lines") or not layer_flat.has("vertices"):
+				continue
+			print("[VideoGLB] Layer ", layer_id,
+				"  Lines: ", layer_flat["lines"].size(),
+				"  Vertices: ", layer_flat["vertices"].size(),
+				"  Holes: ", layer_flat.get("holes", {}).size(),
+				"  Areas: ", layer_flat.get("areas", {}).size())
+			_build_layer_geometry(layer_flat, _get_layer_altitude(layer), show_all_floors, cam_pos, render_mode)
+		return
 
 	if not layer_data.has("lines") or not layer_data.has("vertices"):
 		print("[VideoGLB] WARNING: No lines/vertices found in floor_plan_data.")
@@ -1046,13 +1158,7 @@ func build_structures(data):
 				continue
 
 			var layer_flat = _arrays_to_dicts(layer)
-			var layer_alt = 0.0
-			if show_all_floors and layer_flat.has("altitude"):
-				var alt_val = layer_flat["altitude"]
-				if typeof(alt_val) == TYPE_DICTIONARY and alt_val.has("length"):
-					layer_alt = float(alt_val["length"]) * 0.01
-				else:
-					layer_alt = float(alt_val) * 0.01
+			var layer_alt = _get_layer_altitude(layer)
 
 			if layer_flat.has("structures"):
 				_load_layer_structures(layer_flat["structures"], layer_alt, str(layer_id))
@@ -1081,7 +1187,7 @@ func _build_structure_mesh(structure: Dictionary, layer_altitude: float, layer_i
 	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
 		props = structure["properties"]
 
-	var scale_factor = 0.01
+	var scale_factor = _scene_unit_scale
 	var width = get_dimension_value(props.get("width", structure.get("width", 100))) * scale_factor
 	var depth = get_dimension_value(props.get("depth", structure.get("depth", 100))) * scale_factor
 	var height = get_dimension_value(props.get("height", structure.get("height", 100))) * scale_factor
@@ -1255,11 +1361,11 @@ func _add_step_structure(parent: Node3D, structure: Dictionary, width: float, de
 		var flight = flights[0]
 		step_count = max(int(flight.get("step_count", 1)), 1)
 		if float(flight.get("riser_height", 0.0)) > 0:
-			riser = float(flight.get("riser_height", 0.0)) * 0.01
+			riser = float(flight.get("riser_height", 0.0)) * _scene_unit_scale
 		else:
 			riser = max(height / float(step_count), 0.05)
 		if float(flight.get("tread_depth", 0.0)) > 0:
-			tread = float(flight.get("tread_depth", 0.0)) * 0.01
+			tread = float(flight.get("tread_depth", 0.0)) * _scene_unit_scale
 		else:
 			tread = max(depth / float(step_count), 0.05)
 		direction = str(flight.get("direction", "forward")).to_lower()
@@ -1367,7 +1473,7 @@ func _add_false_ceiling_structure(parent: Node3D, structure: Dictionary, width: 
 	if structure.has("properties") and typeof(structure["properties"]) == TYPE_DICTIONARY:
 		props = structure["properties"]
 
-	var drop_height = get_dimension_value(props.get("drop_height", 0)) * 0.01
+	var drop_height = get_dimension_value(props.get("drop_height", 0)) * _scene_unit_scale
 	var pattern_type = str(props.get("pattern_type", "")).to_lower()
 	var slab_h = max(height, 0.03)
 	var root_color = mat_data
@@ -1425,11 +1531,11 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 	var first_steps = int(first_flight.get("step_count", 12))
 	var first_riser = height / max(first_steps, 1)
 	if float(first_flight.get("riser_height", 0.0)) > 0:
-		first_riser = float(first_flight.get("riser_height", 0.0)) * 0.01
+		first_riser = float(first_flight.get("riser_height", 0.0)) * _scene_unit_scale
 	var first_tread = depth / max(first_steps, 1)
 	if float(first_flight.get("tread_depth", 0.0)) > 0:
-		first_tread = float(first_flight.get("tread_depth", 0.0)) * 0.01
-	var stair_width = float(first_flight.get("width", get_dimension_value(props.get("width", 100)))) * 0.01
+		first_tread = float(first_flight.get("tread_depth", 0.0)) * _scene_unit_scale
+	var stair_width = float(first_flight.get("width", get_dimension_value(props.get("width", 100)))) * _scene_unit_scale
 
 	_add_stair_flight(parent, first_steps, first_riser, first_tread, stair_width, Vector3.ZERO, Vector3(0, 0, 1), step_material)
 
@@ -1448,10 +1554,10 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_steps = int(second_flight.get("step_count", first_steps))
 			var second_riser = first_riser
 			if float(second_flight.get("riser_height", 0.0)) > 0:
-				second_riser = float(second_flight.get("riser_height", 0.0)) * 0.01
+				second_riser = float(second_flight.get("riser_height", 0.0)) * _scene_unit_scale
 			var second_tread = first_tread
 			if float(second_flight.get("tread_depth", 0.0)) > 0:
-				second_tread = float(second_flight.get("tread_depth", 0.0)) * 0.01
+				second_tread = float(second_flight.get("tread_depth", 0.0)) * _scene_unit_scale
 			_add_stair_flight(parent, second_steps, second_riser, second_tread, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(0, 0, -1), step_material)
 	elif stair_type == "winder":
 		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(-stair_width * 0.25, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
@@ -1460,10 +1566,10 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_steps_w = int(second_flight_w.get("step_count", first_steps))
 			var second_riser_w = first_riser
 			if float(second_flight_w.get("riser_height", 0.0)) > 0:
-				second_riser_w = float(second_flight_w.get("riser_height", 0.0)) * 0.01
+				second_riser_w = float(second_flight_w.get("riser_height", 0.0)) * _scene_unit_scale
 			var second_tread_w = first_tread
 			if float(second_flight_w.get("tread_depth", 0.0)) > 0:
-				second_tread_w = float(second_flight_w.get("tread_depth", 0.0)) * 0.01
+				second_tread_w = float(second_flight_w.get("tread_depth", 0.0)) * _scene_unit_scale
 			_add_stair_flight(parent, second_steps_w, second_riser_w, second_tread_w, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
 	else:
 		_add_box_part(parent, Vector3(stair_width, landing_h, landing_depth), step_material, Vector3(0, current_height - landing_h * 0.5, first_run + landing_depth * 0.5))
@@ -1472,10 +1578,10 @@ func _add_staircase_structure(parent: Node3D, structure: Dictionary, width: floa
 			var second_steps_l = int(second_flight_l.get("step_count", first_steps))
 			var second_riser_l = first_riser
 			if float(second_flight_l.get("riser_height", 0.0)) > 0:
-				second_riser_l = float(second_flight_l.get("riser_height", 0.0)) * 0.01
+				second_riser_l = float(second_flight_l.get("riser_height", 0.0)) * _scene_unit_scale
 			var second_tread_l = first_tread
 			if float(second_flight_l.get("tread_depth", 0.0)) > 0:
-				second_tread_l = float(second_flight_l.get("tread_depth", 0.0)) * 0.01
+				second_tread_l = float(second_flight_l.get("tread_depth", 0.0)) * _scene_unit_scale
 			_add_stair_flight(parent, second_steps_l, second_riser_l, second_tread_l, stair_width, Vector3(-stair_width, current_height, first_run + landing_depth), Vector3(-1, 0, 0), step_material)
 
 func _add_stair_flight(parent: Node3D, step_count: int, riser: float, tread: float, stair_width: float, start_pos: Vector3, travel_dir: Vector3, mat_data: Dictionary) -> void:
@@ -1540,7 +1646,7 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 
 	var lines        = layer_data["lines"]
 	var vertices     = layer_data["vertices"]
-	var scale_factor = 0.01  # cm → metres
+	var scale_factor = _scene_unit_scale  # source units → metres
 
 	var all_holes = {}
 	if layer_data.has("holes"):
@@ -1645,6 +1751,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 		var outer_mat: StandardMaterial3D
 		if outer_mat_data != null:
 			outer_mat = create_material(outer_mat_data)
+			outer_mat = _apply_architecture_texture_scale(
+				outer_mat,
+				outer_mat_data,
+				Vector2(corner_length, height)
+			)
 		else:
 			outer_mat = StandardMaterial3D.new()
 			outer_mat.albedo_color = Color(0.82, 0.82, 0.82)
@@ -1652,6 +1763,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 		var inner_mat_for_wall: StandardMaterial3D
 		if inner_mat_data != null:
 			inner_mat_for_wall = create_material(inner_mat_data)
+			inner_mat_for_wall = _apply_architecture_texture_scale(
+				inner_mat_for_wall,
+				inner_mat_data,
+				Vector2(corner_length, height)
+			)
 		else:
 			inner_mat_for_wall = StandardMaterial3D.new()
 			inner_mat_for_wall.albedo_color = Color(0.82, 0.82, 0.82)
@@ -1691,6 +1807,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 				var inner_box = CSGBox3D.new()
 				inner_box.size = Vector3(corner_length, height, face_t)
 				var inner_mat  = create_material(inner_mat_data)
+				inner_mat = _apply_architecture_texture_scale(
+					inner_mat,
+					inner_mat_data,
+					Vector2(corner_length, height)
+				)
 				inner_mat.cull_mode = BaseMaterial3D.CULL_BACK
 				inner_box.material  = inner_mat
 				inner_csg.add_child(inner_box)
@@ -1708,6 +1829,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 				var outer_box = CSGBox3D.new()
 				outer_box.size = Vector3(corner_length, height, face_t)
 				var outer_panel_mat = create_material(outer_mat_data)
+				outer_panel_mat = _apply_architecture_texture_scale(
+					outer_panel_mat,
+					outer_mat_data,
+					Vector2(corner_length, height)
+				)
 				outer_panel_mat.cull_mode = BaseMaterial3D.CULL_BACK
 				outer_box.material  = outer_panel_mat
 				outer_csg.add_child(outer_box)
@@ -1942,14 +2068,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 
 			if area.has("floor_properties") and typeof(area["floor_properties"]) == TYPE_DICTIONARY and area["floor_properties"].has("material"):
 				var f_mat = create_material(area["floor_properties"]["material"])
-				# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
-				# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
-				# produce physically correct tile sizes:
-				#   tile_size = 2.4 / repeat  →  repeat=2 → 1.2 m tiles
-				f_mat.uv1_scale = Vector3(
-					f_mat.uv1_scale.x * floor_span.x / 2.4,
-					f_mat.uv1_scale.y * floor_span.y / 2.4,
-					1.0)
+				f_mat = _apply_architecture_texture_scale(
+					f_mat,
+					area["floor_properties"]["material"],
+					floor_span
+				)
 				floor_poly.material = f_mat
 			else:
 				var floor_mat = StandardMaterial3D.new()
@@ -2008,14 +2131,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 
 			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY and area["ceiling_properties"].has("material"):
 				var c_mat = create_material(area["ceiling_properties"]["material"])
-				# CSGPolygon3D normalizes UVs to [0,1] across the polygon.
-				# Multiply uv1_scale by (span / 2.4) so the JSON repeat values
-				# produce physically correct tile sizes:
-				#   tile_size = 2.4 / repeat  →  repeat=2 → 1.2 m tiles
-				c_mat.uv1_scale = Vector3(
-					c_mat.uv1_scale.x * ceil_span.x / 2.4,
-					c_mat.uv1_scale.y * ceil_span.y / 2.4,
-					1.0)
+				c_mat = _apply_architecture_texture_scale(
+					c_mat,
+					area["ceiling_properties"]["material"],
+					ceil_span
+				)
 				ceil_poly.material = c_mat
 			else:
 				var ceil_mat = StandardMaterial3D.new()
@@ -2101,11 +2221,76 @@ func _get_polygon_world_span(polygon: PackedVector2Array) -> Vector2:
 
 	return Vector2(max(0.001, max_x - min_x), max(0.001, max_y - min_y))
 
+func _apply_architecture_texture_scale(mat: StandardMaterial3D, mat_data: Dictionary, surface_size: Vector2) -> StandardMaterial3D:
+	if mat == null or typeof(mat_data) != TYPE_DICTIONARY:
+		return mat
+
+	var width = max(surface_size.x, 0.001)
+	var height = max(surface_size.y, 0.001)
+	var scale_u = 1.0
+	var scale_v = 1.0
+
+	var tile_u = 0.0
+	var tile_v = 0.0
+	if mat_data.has("repeatX"):
+		tile_u = float(mat_data.get("repeatX", 0.0))
+	elif mat_data.has("texture_scale_x"):
+		tile_u = float(mat_data.get("texture_scale_x", 0.0))
+	if mat_data.has("repeatY"):
+		tile_v = float(mat_data.get("repeatY", 0.0))
+	elif mat_data.has("texture_scale_y"):
+		tile_v = float(mat_data.get("texture_scale_y", 0.0))
+
+	var has_physical_repeat = false
+	if tile_u > 0.0 and tile_v > 0.0:
+		scale_u = width / max(tile_u * _scene_unit_scale, 0.000001)
+		scale_v = height / max(tile_v * _scene_unit_scale, 0.000001)
+		has_physical_repeat = true
+	if has_physical_repeat:
+		mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+		return mat
+
+	if mat_data.has("repeat"):
+		var r = mat_data["repeat"]
+		if typeof(r) == TYPE_ARRAY and r.size() >= 2:
+			var repeat_u = float(r[0])
+			var repeat_v = float(r[1])
+			if repeat_u > 0.0:
+				scale_u = repeat_u * width / 2.4
+			if repeat_v > 0.0:
+				scale_v = repeat_v * height / 2.4
+			if repeat_u > 0.0 or repeat_v > 0.0:
+				mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+				return mat
+
+	return mat
 
 # ─────────────────────────────────────────────────────────────────
 # Asset loading — mirrors image_glb_creation.gd load_assets / _load_layer_items
 # ─────────────────────────────────────────────────────────────────
 func load_assets(data):
+	var layer_map = _get_floor_plan_layer_map(data)
+	if layer_map.size() > 0:
+		var show_all_floors = data.get("showAllFloors", true)
+		var layer_ids = layer_map.keys()
+		if not show_all_floors:
+			var primary_layer_id = _get_primary_layer_id(data, layer_map)
+			layer_ids = []
+			if primary_layer_id != "":
+				layer_ids.append(primary_layer_id)
+
+		for layer_id in layer_ids:
+			if not layer_map.has(layer_id):
+				continue
+			var layer = layer_map[layer_id]
+			if typeof(layer) != TYPE_DICTIONARY:
+				continue
+			var layer_flat = _arrays_to_dicts(layer)
+			if not layer_flat.has("items"):
+				continue
+			_load_layer_items(layer_flat["items"], _get_layer_altitude(layer), str(layer_id))
+		return
+
 	if data.has("items"):
 		_load_layer_items(data["items"], 0.0)
 	elif data.has("assets"):
@@ -2230,29 +2415,6 @@ func _apply_light_fixture_emission(node: Node3D, light_color: Color, emission_en
 				applied = true
 	return applied
 
-func _configure_soft_interior_shadow(light: Light3D) -> void:
-	light.shadow_enabled = true
-	light.light_size = 0.18
-	light.shadow_bias = 0.08
-	light.shadow_normal_bias = 1.7
-	light.shadow_blur = 1.35
-	light.shadow_opacity = 0.78
-
-func _shadow_cluster_key(world_pos: Vector3, light_range: float) -> String:
-	var bucket_size = max(220.0, light_range * 55.0)
-	var cluster_x = int(round(world_pos.x / bucket_size))
-	var cluster_z = int(round(world_pos.z / bucket_size))
-	return str(cluster_x) + ":" + str(cluster_z)
-
-func _should_use_interior_shadow_light(world_pos: Vector3, light_range: float, is_street_light: bool) -> bool:
-	if is_street_light:
-		return false
-	var key = _shadow_cluster_key(world_pos, light_range)
-	if _interior_shadow_clusters.has(key):
-		return false
-	_interior_shadow_clusters[key] = true
-	return true
-
 func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB, final_scale: Vector3) -> void:
 	if item.get("is_exterior_black", false):
 		return
@@ -2354,59 +2516,33 @@ func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB,
 	var emissive_surface_found = _apply_light_fixture_emission(node, light_color, emission_energy)
 
 	var world_pos = node.to_global(emitter_local)
-	var use_shadow = _should_use_interior_shadow_light(world_pos, light_range, is_street_light)
 	if mounting_type == "ceiling_mount" or "wall" in full_desc or is_street_light:
 		var spot = SpotLight3D.new()
-		spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Visible"
+		spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
 		spot.global_position = world_pos
 		spot.light_color = light_color
 		spot.light_energy = light_energy
-		spot.light_specular = 0.18
+		spot.light_specular = 0.25
 		spot.shadow_enabled = false
 		spot.spot_range = light_range
-		spot.spot_angle = 68.0 if mounting_type == "ceiling_mount" else 52.0
-		spot.spot_attenuation = 0.68
+		spot.spot_angle = 62.0 if mounting_type == "ceiling_mount" else 48.0
+		spot.spot_attenuation = 0.75
 		add_child(spot)
 
 		var target_local = emitter_local + Vector3(0, -max(1.0, light_range * 0.45), 0)
 		if "wall" in full_desc and not is_street_light:
 			target_local = emitter_local + Vector3(0, -0.15, -max(0.8, light_range * 0.25))
 		spot.look_at(node.to_global(target_local), Vector3.UP)
-
-		if use_shadow:
-			var shadow_spot = SpotLight3D.new()
-			shadow_spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Shadow"
-			shadow_spot.global_position = world_pos
-			shadow_spot.light_color = light_color
-			shadow_spot.light_energy = light_energy * 0.35
-			shadow_spot.light_specular = 0.0
-			_configure_soft_interior_shadow(shadow_spot)
-			shadow_spot.spot_range = light_range
-			shadow_spot.spot_angle = spot.spot_angle
-			shadow_spot.spot_attenuation = 0.82
-			add_child(shadow_spot)
-			shadow_spot.look_at(node.to_global(target_local), Vector3.UP)
 	else:
 		var omni = OmniLight3D.new()
-		omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Visible"
+		omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
 		omni.global_position = world_pos
 		omni.light_color = light_color
 		omni.light_energy = light_energy
-		omni.light_specular = 0.12
+		omni.light_specular = 0.25
 		omni.shadow_enabled = false
 		omni.omni_range = light_range
 		add_child(omni)
-
-		if use_shadow:
-			var shadow_omni = OmniLight3D.new()
-			shadow_omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light"))) + "_Shadow"
-			shadow_omni.global_position = world_pos
-			shadow_omni.light_color = light_color
-			shadow_omni.light_energy = light_energy * 0.35
-			shadow_omni.light_specular = 0.0
-			_configure_soft_interior_shadow(shadow_omni)
-			shadow_omni.omni_range = light_range
-			add_child(shadow_omni)
 
 	if not emissive_surface_found:
 		print("[VideoGLB] Light fixture added without material override for asset: ", item.get("name", "Light"))
@@ -2456,22 +2592,22 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 						load_status = "loaded"
 
 						# Position
-						var px = float(item.get("x", 0)) * 0.01
-						var py = float(item.get("y", 0)) * 0.01
+						var px = float(item.get("x", 0)) * _scene_unit_scale
+						var py = float(item.get("y", 0)) * _scene_unit_scale
 						var pz = 0.0
 
 						if item.has("altitude"):
 							var alt = item["altitude"]
 							if typeof(alt) == TYPE_DICTIONARY and alt.has("length"):
-								pz = float(alt["length"]) * 0.01
+								pz = float(alt["length"]) * _scene_unit_scale
 							else:
-								pz = float(alt) * 0.01
+								pz = float(alt) * _scene_unit_scale
 						elif item.has("properties") and item["properties"].has("altitude"):
 							var alt = item["properties"]["altitude"]
 							if typeof(alt) == TYPE_DICTIONARY and alt.has("length"):
-								pz = float(alt["length"]) * 0.01
+								pz = float(alt["length"]) * _scene_unit_scale
 							else:
-								pz = float(alt) * 0.01
+								pz = float(alt) * _scene_unit_scale
 
 						pz += layer_altitude
 						node.position = Vector3(px, pz, py)
@@ -2493,13 +2629,13 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 						var raw_depth   = props.get("depth",  100)
 						var raw_height_p = props.get("height", 100)
 
-						var target_w = get_dimension_value(raw_width)    * 0.01
-						var target_d = get_dimension_value(raw_depth)    * 0.01
-						var target_h = get_dimension_value(raw_height_p) * 0.01
+						var target_w = get_dimension_value(raw_width)    * _scene_unit_scale
+						var target_d = get_dimension_value(raw_depth)    * _scene_unit_scale
+						var target_h = get_dimension_value(raw_height_p) * _scene_unit_scale
 
-						var default_w = get_dimension_value(100) * 0.01
-						var default_h = get_dimension_value(100) * 0.01
-						var default_d = get_dimension_value(100) * 0.01
+						var default_w = get_dimension_value(100) * _scene_unit_scale
+						var default_h = get_dimension_value(100) * _scene_unit_scale
+						var default_d = get_dimension_value(100) * _scene_unit_scale
 						var is_user_resized = (abs(target_w - default_w) > 0.001 or abs(target_h - default_h) > 0.001 or abs(target_d - default_d) > 0.001)
 
 						var aabb = _get_hierarchy_aabb(node)
@@ -2543,6 +2679,22 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 						node.scale = final_scale
 						var bounds_y_min = aabb.position.y * final_scale.y
 						node.position.y  = pz - bounds_y_min
+						
+						# Track exterior assets for sunlight optimization
+						var item_name_l = str(item.get("name", "")).to_lower()
+						var item_type_l = str(item.get("type", "")).to_lower()
+						var ext_keywords = ["tree", "plant", "garden", "outdoor", "landscape", "bush", "shrub", "vegetat", "flower"]
+						var is_ext = false
+						for kw in ext_keywords:
+							if kw in item_type_l or kw in item_name_l:
+								is_ext = true
+								break
+						if is_ext:
+							_exterior_assets.append({
+								"node": node,
+								"position": node.global_position,
+								"name": item.get("name", "unknown")
+							})
 
 						# Force-black for exterior items
 						if item.get("is_exterior_black", false):
@@ -2849,9 +3001,6 @@ func create_material(mat_data):
 	mat.metallic_specular = 0.5
 	mat.shading_mode     = BaseMaterial3D.SHADING_MODE_PER_PIXEL
 	mat.specular_mode    = BaseMaterial3D.SPECULAR_SCHLICK_GGX
-	# Anisotropic filtering: eliminates grain/shimmer on high-frequency textures
-	# (fabric weave, wood grain) at oblique angles during camera motion.
-	mat.texture_filter   = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 
 	var base_color        = Color(0.82, 0.82, 0.82)
 	var has_explicit_color = false
@@ -2915,53 +3064,6 @@ func create_material(mat_data):
 				scale_u = sf; scale_v = sf
 
 	mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
-
-	# ── Smart Glossy Detection ─────────────────────────────────────────────
-	# Detect tile/marble/granite/polished/porcelain textures by filename and
-	# optimize the material for high-gloss reflections (SSR + ReflectionProbe).
-	if map_url != "":
-		var path_lower = map_url.to_lower()
-		if "marble" in path_lower or "tile" in path_lower or "granite" in path_lower \
-			or "polished" in path_lower or "porcelain" in path_lower:
-			mat.roughness = 0.02
-			mat.metallic_specular = 1.0
-			mat.clearcoat_enabled = true
-			mat.clearcoat = 1.0
-			mat.clearcoat_roughness = 0.04
-			print("  [Optimizer] Marble/Tile detected -> enabling glossy clearcoat. Texture: ", map_url.get_file())
-
-		elif "wood" in path_lower or "parquet" in path_lower or "plank" in path_lower \
-				or ("floor" in path_lower and ("wood" in path_lower or "parquet" in path_lower or "plank" in path_lower or "oak" in path_lower or "pine" in path_lower or "walnut" in path_lower)):
-			# ── Realistic Finished Wood (furniture, cabinets, wardrobes) ──────────
-			mat.roughness          = 0.32
-			mat.metallic_specular  = 0.5
-			mat.clearcoat_enabled  = false
-
-			# ── Wood Floor sub-case: polished lacquered hardwood ─────────────────
-			if "floor" in path_lower or "parquet" in path_lower:
-				mat.roughness              = 0.20
-				mat.clearcoat_enabled      = true
-				mat.clearcoat              = 0.5
-				mat.clearcoat_roughness    = 0.15
-			print("  [Optimizer] Wood detected -> applying PBR wood preset. roughness=", mat.roughness)
-
-		elif "fabric" in path_lower or "textile" in path_lower or "upholster" in path_lower or "cloth" in path_lower or "rug" in path_lower:
-			# Soft Fabric (Matte)
-			mat.roughness = 0.85
-			mat.metallic_specular = 0.0
-			mat.clearcoat_enabled = false
-			print("  [Optimizer] Fabric detected -> applying matte preset.")
-
-		elif "glass" in path_lower or "glaz" in path_lower or "window" in path_lower:
-			# High-Gloss Glass
-			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-			mat.roughness = 0.01
-			mat.metallic_specular = 1.0
-			# If no explicit transparency in JSON, give it a subtle glass alpha
-			if mat.albedo_color.a > 0.95:
-				mat.albedo_color.a = 0.4
-			print("  [Optimizer] Glass detected -> enabling alpha-transparency.")
-
 	return mat
 
 # ─────────────────────────────────────────────────────────────────

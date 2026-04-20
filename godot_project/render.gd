@@ -109,6 +109,7 @@ func setup_camera(data):
 	var target = Vector3(0, 1.0, 0)
 	var need_look_at = false
 	var need_look_at_blender = false
+	var use_plan_transform = abs(_scene_plan_rotation_radians) > 0.000001
 
 	var prefer_threejs = data.get("use_threejs", use_threejs)
 
@@ -118,10 +119,17 @@ func setup_camera(data):
 		if cam_data.has("position"):
 			var p = cam_data["position"]
 			pos = Vector3(float(p["x"]), float(p["y"]), float(p["z"]))
+			if use_plan_transform:
+				pos = _transform_plan_point_meters(pos)
 
 		cam.position = pos
 
-		if cam_data.has("rotation"):
+		if use_plan_transform and cam_data.has("target"):
+			var t = cam_data["target"]
+			target = Vector3(float(t["x"]), float(t["y"]), float(t["z"]))
+			target = _transform_plan_point_meters(target)
+			need_look_at = true   # defer until after add_child
+		elif cam_data.has("rotation"):
 			var r = cam_data["rotation"]
 			var rot_v = Vector3(float(r["x"]), float(r["y"]), float(r["z"]))
 			cam.basis = Basis.from_euler(rot_v, EULER_ORDER_XYZ)
@@ -129,6 +137,8 @@ func setup_camera(data):
 		elif cam_data.has("target"):
 			var t = cam_data["target"]
 			target = Vector3(float(t["x"]), float(t["y"]), float(t["z"]))
+			if use_plan_transform:
+				target = _transform_plan_point_meters(target)
 			need_look_at = true   # defer until after add_child
 
 	elif data.has("blender_camera"):
@@ -141,6 +151,8 @@ func setup_camera(data):
 				pos = Vector3(loc[0], loc[2], -loc[1])
 			else:
 				pos = Vector3(loc[0], loc[1], loc[2])
+			if use_plan_transform:
+				pos = _transform_plan_point_meters(pos)
 
 		cam.position = pos
 
@@ -150,6 +162,8 @@ func setup_camera(data):
 				target = Vector3(t_loc[0], t_loc[2], -t_loc[1])
 			else:
 				target = Vector3(t_loc[0], t_loc[1], t_loc[2])
+			if use_plan_transform:
+				target = _transform_plan_point_meters(target)
 			need_look_at = true   # defer until after add_child
 			print("Camera Setup (Blender): Pos=", pos, " Target=", target)
 		elif cam_data.has("rotation_euler"):

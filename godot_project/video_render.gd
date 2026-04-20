@@ -193,8 +193,6 @@ func _apply_keyframe(frame_idx: int):
 	var kf = _keyframes[frame_idx]
 	
 	# Coordinate scale: JSON positions are in centimetres; Godot uses metres
-	var CM = 0.01
-
 	# Check if this keyframe has threejs_camera_data (preferred format)
 	if kf.has("threejs_camera_data") and kf["threejs_camera_data"] != null:
 		var tjs = kf["threejs_camera_data"]
@@ -202,14 +200,14 @@ func _apply_keyframe(frame_idx: int):
 		# Position (cm → metres)
 		if tjs.has("position") and tjs["position"] != null:
 			var p = tjs["position"]
-			cam.position = Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
+			cam.position = _camera_cm_to_m(Vector3(float(p["x"]), float(p["y"]), float(p["z"])))
 
 		var orientation_set = false
 
 		# lookAt (cm → metres) — guard against straight-down look
 		if tjs.has("lookAt") and tjs["lookAt"] != null:
 			var la = tjs["lookAt"]
-			var look_target = Vector3(float(la["x"]) * CM, float(la["y"]) * CM, float(la["z"]) * CM)
+			var look_target = _camera_cm_to_m(Vector3(float(la["x"]), float(la["y"]), float(la["z"])))
 			if cam.position.distance_to(look_target) > 0.001:
 				var diff_v = (look_target - cam.position).normalized()
 				var up_vec = Vector3.UP
@@ -243,14 +241,14 @@ func _apply_keyframe(frame_idx: int):
 		if tjs.has("fov") and tjs["fov"] != null:
 			cam.fov = float(tjs["fov"])
 	else:
-		# Legacy format (positions already expected in Godot units)
+		# Legacy format (positions are in centimetres)
 		if kf.has("position") and kf["position"] != null:
 			var p = kf["position"]
-			cam.position = Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
+			cam.position = _camera_cm_to_m(Vector3(float(p["x"]), float(p["y"]), float(p["z"])))
 
 		if kf.has("target") and kf["target"] != null:
 			var t = kf["target"]
-			var tgt = Vector3(float(t["x"]) * CM, float(t["y"]) * CM, float(t["z"]) * CM)
+			var tgt = _camera_cm_to_m(Vector3(float(t["x"]), float(t["y"]), float(t["z"])))
 			if cam.position.distance_to(tgt) > 0.001:
 				var diff_v = (tgt - cam.position).normalized()
 				var up_vec = Vector3.UP
@@ -282,7 +280,13 @@ func _apply_keyframe(frame_idx: int):
 			var blended = cur_q.slerp(next_quat.normalized(), smooth_t)
 			cam.basis = Basis(blended)
 
-	# Fixed lights are set up once — no per-frame update needed
+	# Dynamic sunlight: update sun orientation to favor windows in this frame's view
+	if _dir_light != null:
+		var cam_pose = {
+			"position": cam.position,
+			"target": cam.position - cam.basis.z * 5.0
+		}
+		_orient_directional_light_from_windows(_dir_light, cam_pose)
 
 # ─────────────────────────────────────────────────────────────────
 # Smooth Camera Helpers
@@ -294,21 +298,19 @@ func _smooth_step(t: float) -> float:
 
 # Extract world position (metres) from any keyframe format, or return null
 func _extract_kf_position(kf: Dictionary):
-	var CM = 0.01
 	if kf.has("threejs_camera_data") and kf["threejs_camera_data"] != null:
 		var tjs = kf["threejs_camera_data"]
 		if tjs.has("position") and tjs["position"] != null:
 			var p = tjs["position"]
-			return Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
+			return _camera_cm_to_m(Vector3(float(p["x"]), float(p["y"]), float(p["z"])))
 	elif kf.has("position") and kf["position"] != null:
 		var p = kf["position"]
-		return Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
+		return _camera_cm_to_m(Vector3(float(p["x"]), float(p["y"]), float(p["z"])))
 	return null
 
 # Extract rotation as Quaternion from any keyframe format.
 # If only a lookAt / target is provided, compute it from cam's current position.
 func _extract_kf_quaternion(kf: Dictionary, cam: Camera3D):
-	var CM = 0.01
 	if kf.has("threejs_camera_data") and kf["threejs_camera_data"] != null:
 		var tjs = kf["threejs_camera_data"]
 		# Quaternion field
@@ -318,7 +320,7 @@ func _extract_kf_quaternion(kf: Dictionary, cam: Camera3D):
 		# lookAt → derive quaternion from direction
 		if tjs.has("lookAt") and tjs["lookAt"] != null:
 			var la = tjs["lookAt"]
-			var look_target = Vector3(float(la["x"]) * CM, float(la["y"]) * CM, float(la["z"]) * CM)
+			var look_target = _camera_cm_to_m(Vector3(float(la["x"]), float(la["y"]), float(la["z"])))
 			var next_pos = _extract_kf_position(kf)
 			var origin = next_pos if next_pos != null else cam.global_position
 			if origin.distance_to(look_target) > 0.001:
@@ -337,7 +339,7 @@ func _extract_kf_quaternion(kf: Dictionary, cam: Camera3D):
 			return Basis.from_euler(Vector3(float(e["x"]), float(e["y"]), float(e["z"])), EULER_ORDER_XYZ).get_rotation_quaternion()
 	elif kf.has("target") and kf["target"] != null:
 		var t = kf["target"]
-		var tgt = Vector3(float(t["x"]) * CM, float(t["y"]) * CM, float(t["z"]) * CM)
+		var tgt = _camera_cm_to_m(Vector3(float(t["x"]), float(t["y"]), float(t["z"])))
 		var next_pos = _extract_kf_position(kf)
 		var origin = next_pos if next_pos != null else cam.global_position
 		if origin.distance_to(tgt) > 0.001:
@@ -359,18 +361,18 @@ func _generate_lerp_keyframes(anim_data, total_frames: int):
 	
 	var start_pos = cam.position
 	var end_pos = start_pos
-	
+
 	if anim_data.has("camera_position_start") and anim_data["camera_position_start"] != null:
-		start_pos = parse_vec3(anim_data["camera_position_start"])
+		start_pos = _camera_cm_to_m(parse_vec3(anim_data["camera_position_start"]))
 	if anim_data.has("camera_position_end") and anim_data["camera_position_end"] != null:
-		end_pos = parse_vec3(anim_data["camera_position_end"])
+		end_pos = _camera_cm_to_m(parse_vec3(anim_data["camera_position_end"]))
 	
 	var start_target = null
 	var end_target = null
 	if anim_data.has("camera_target_start") and anim_data["camera_target_start"] != null:
-		start_target = parse_vec3(anim_data["camera_target_start"])
+		start_target = _camera_cm_to_m(parse_vec3(anim_data["camera_target_start"]))
 	if anim_data.has("camera_target_end") and anim_data["camera_target_end"] != null:
-		end_target = parse_vec3(anim_data["camera_target_end"])
+		end_target = _camera_cm_to_m(parse_vec3(anim_data["camera_target_end"]))
 	
 	_keyframes = []
 	for frame in range(total_frames):
@@ -458,36 +460,18 @@ func set_resolution(data):
 	if data.has("height"): h = int(data["height"])
 			
 	print("Setting Resolution to: ", w, "x", h)
-	
-	# Godot 4.6: MovieWriter reads resolution from ProjectSettings at startup.
-	# We MUST update both the ProjectSettings AND the window/viewport size so
-	# MovieWriter records at the correct resolution (not the project.godot default).
-	ProjectSettings.set_setting("display/window/size/viewport_width", w)
-	ProjectSettings.set_setting("display/window/size/viewport_height", h)
 	get_viewport().size = Vector2i(w, h)
-	DisplayServer.window_set_size(Vector2i(w, h))
 
 	# Anti-aliasing for video:
 	# TAA is intentionally DISABLED — it accumulates frames over time and causes
 	# strong ghosting/blur whenever the camera moves, making the video look smeared.
 	# MSAA_8X provides the best physically hard-edged geometry clarity.
-	# FXAA is enabled as a lightweight final pass to catch specular and shader
-	# aliasing that MSAA cannot resolve (texture shimmer on fabrics, wood grain).
+	# FXAA is DISABLED because it smears/softens high-frequency texture details.
 	get_viewport().msaa_3d = Viewport.MSAA_8X
-	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
 	get_viewport().use_taa = false          # ← must stay OFF during animated renders
 	get_viewport().use_debanding = true
 	get_viewport().mesh_lod_threshold = 0.0
-	
-	# ── Texture Quality for Video ──────────────────────────────────────────
-	# Anisotropic filtering 16× (level 4): eliminates shimmer on high-frequency
-	# textures (fabric, wood) viewed at oblique angles during camera motion.
-	# Default is 4× which is too low for 4K video with detailed materials.
-	ProjectSettings.set_setting("rendering/textures/default_filters/anisotropic_filtering_level", 4)
-	# Mipmap bias +0.1: Godot 4.6 feature — nudges mip selection toward slightly
-	# blurrier levels, eliminating temporal grain from high-frequency textures
-	# without softening the whole image like FXAA would. Range: -2.0 to +2.0.
-	ProjectSettings.set_setting("rendering/textures/default_filters/texture_mipmap_bias", 0.1)
 
 # ─────────────────────────────────────────────────────────────────
 # Camera Setup (Initial)
@@ -496,9 +480,6 @@ func setup_camera(data):
 	var cam = Camera3D.new()
 	cam.name = "MainCamera"
 	cam.far = 1000.0   # Far enough to render the procedural sky without clipping
-
-	# Coordinate scale: JSON positions are in centimetres; Godot uses metres
-	var CM = 0.01
 
 	var pos    = Vector3(0, 1.5, 5)
 	var target = Vector3(0, 1.0, 0)
@@ -515,11 +496,11 @@ func setup_camera(data):
 			if tjs != null and typeof(tjs) == TYPE_DICTIONARY:
 				if tjs.has("position"):
 					var p = tjs["position"]
-					pos = Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
+					pos = _camera_cm_to_m(Vector3(float(p["x"]), float(p["y"]), float(p["z"])))
 					cam.position = pos
 				if tjs.has("lookAt"):
 					var la = tjs["lookAt"]
-					target = Vector3(float(la["x"]) * CM, float(la["y"]) * CM, float(la["z"]) * CM)
+					target = _camera_cm_to_m(Vector3(float(la["x"]), float(la["y"]), float(la["z"])))
 					if cam.position.distance_to(target) > 0.001:
 						var diff_v = (target - cam.position).normalized()
 						var up_vec = Vector3.UP
@@ -538,7 +519,7 @@ func setup_camera(data):
 		cam_data = data["threejs_camera"]
 		if cam_data.has("position"):
 			var p = cam_data["position"]
-			pos = Vector3(float(p["x"]) * CM, float(p["y"]) * CM, float(p["z"]) * CM)
+			pos = _camera_cm_to_m(Vector3(float(p["x"]), float(p["y"]), float(p["z"])))
 		cam.position = pos
 		if cam_data.has("rotation"):
 			var r = cam_data["rotation"]
@@ -546,7 +527,7 @@ func setup_camera(data):
 			print("Camera Setup (ThreeJS): Pos=", pos, " Rotation=", cam.rotation)
 		elif cam_data.has("target"):
 			var t = cam_data["target"]
-			target = Vector3(float(t["x"]) * CM, float(t["y"]) * CM, float(t["z"]) * CM)
+			target = _camera_cm_to_m(Vector3(float(t["x"]), float(t["y"]), float(t["z"])))
 			cam.look_at(target)
 			print("Camera Setup (ThreeJS): Pos=", pos, " Target=", target)
 
@@ -618,8 +599,8 @@ func setup_fixed_fill_lights():
 				if not verts.has(vs):
 					continue
 				var v = verts[vs]
-				sum_x += float(v.get("x", 0)) * 0.01
-				sum_z += float(v.get("y", 0)) * 0.01  # floor-plan Y → Godot Z
+				sum_x += float(v.get("x", 0)) * _scene_unit_scale
+				sum_z += float(v.get("y", 0)) * _scene_unit_scale  # floor-plan Y → Godot Z
 				count += 1
 			if count == 0:
 				continue
@@ -635,17 +616,17 @@ func setup_fixed_fill_lights():
 					var ch = cp["height"]
 					var hf = 0.0
 					if typeof(ch) == TYPE_DICTIONARY and ch.has("length"):
-						hf = float(ch["length"]) * 0.01
+						hf = float(ch["length"]) * _scene_unit_scale
 					elif typeof(ch) == TYPE_INT or typeof(ch) == TYPE_FLOAT:
-						hf = float(ch) * 0.01
+						hf = float(ch) * _scene_unit_scale
 					elif typeof(ch) == TYPE_STRING and ch.is_valid_float():
-						hf = float(ch) * 0.01
+						hf = float(ch) * _scene_unit_scale
 					if hf > 0.5:
 						ceil_h = hf
 			elif area.has("properties") and typeof(area["properties"]) == TYPE_DICTIONARY:
 				var h_prop = area["properties"].get("height", null)
 				if h_prop != null:
-					var hf = get_dimension_value(h_prop) * 0.01
+					var hf = get_dimension_value(h_prop) * _scene_unit_scale
 					if hf > 0.5: ceil_h = hf
 
 			# Light hangs 30 cm below the ceiling — well inside the room
@@ -660,8 +641,8 @@ func setup_fixed_fill_lights():
 				var vs = str(v_id)
 				if not verts.has(vs): continue
 				var v = verts[vs]
-				var vx = float(v.get("x", 0)) * 0.01
-				var vz = float(v.get("y", 0)) * 0.01
+				var vx = float(v.get("x", 0)) * _scene_unit_scale
+				var vz = float(v.get("y", 0)) * _scene_unit_scale
 				min_x = min(min_x, vx); max_x = max(max_x, vx)
 				min_z = min(min_z, vz); max_z = max(max_z, vz)
 			var room_w = max(max_x - min_x, 0.5)
@@ -726,17 +707,28 @@ func _get_floor_plan_areas() -> Dictionary:
 		elif typeof(fp) == TYPE_DICTIONARY:
 			src = fp
 
-	# Unwrap layers if present
-	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
-		var layers = src["layers"]
-		var layer_id = src.get("selectedLayer", "")
-		var layer = null
-		if layer_id != "" and layers.has(layer_id):
-			layer = layers[layer_id]
-		elif layers.size() > 0:
-			layer = layers[layers.keys()[0]]
-		if layer != null and typeof(layer) == TYPE_DICTIONARY:
-			src = layer
+	var layer_map = _get_floor_plan_layer_map(src)
+	if layer_map.size() > 0:
+		if bool(src.get("showAllFloors", true)):
+			var merged = {}
+			for layer_id in layer_map:
+				var layer = layer_map[layer_id]
+				if typeof(layer) != TYPE_DICTIONARY:
+					continue
+				var raw_layer = layer.get("areas", null)
+				if raw_layer == null:
+					continue
+				if typeof(raw_layer) == TYPE_DICTIONARY:
+					for area_id in raw_layer:
+						merged[str(area_id)] = raw_layer[area_id]
+				elif typeof(raw_layer) == TYPE_ARRAY:
+					for a in raw_layer:
+						if typeof(a) == TYPE_DICTIONARY and a.has("id"):
+							merged[str(a["id"])] = a
+			return merged
+		var primary_id = _get_primary_layer_id(src, layer_map)
+		if primary_id != "" and layer_map.has(primary_id):
+			src = layer_map[primary_id]
 
 	var raw = src.get("areas", null)
 	if raw == null: return {}
@@ -758,17 +750,28 @@ func _get_floor_plan_vertices() -> Dictionary:
 		elif typeof(fp) == TYPE_DICTIONARY:
 			src = fp
 
-	# Unwrap layers if present
-	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
-		var layers = src["layers"]
-		var layer_id = src.get("selectedLayer", "")
-		var layer = null
-		if layer_id != "" and layers.has(layer_id):
-			layer = layers[layer_id]
-		elif layers.size() > 0:
-			layer = layers[layers.keys()[0]]
-		if layer != null and typeof(layer) == TYPE_DICTIONARY:
-			src = layer
+	var layer_map = _get_floor_plan_layer_map(src)
+	if layer_map.size() > 0:
+		if bool(src.get("showAllFloors", true)):
+			var merged = {}
+			for layer_id in layer_map:
+				var layer = layer_map[layer_id]
+				if typeof(layer) != TYPE_DICTIONARY:
+					continue
+				var raw_layer = layer.get("vertices", null)
+				if raw_layer == null:
+					continue
+				if typeof(raw_layer) == TYPE_DICTIONARY:
+					for vertex_id in raw_layer:
+						merged[str(vertex_id)] = raw_layer[vertex_id]
+				elif typeof(raw_layer) == TYPE_ARRAY:
+					for v in raw_layer:
+						if typeof(v) == TYPE_DICTIONARY and v.has("id"):
+							merged[str(v["id"])] = v
+			return merged
+		var primary_id = _get_primary_layer_id(src, layer_map)
+		if primary_id != "" and layer_map.has(primary_id):
+			src = layer_map[primary_id]
 
 	var raw = src.get("vertices", null)
 	if raw == null: return {}
