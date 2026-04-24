@@ -14,6 +14,10 @@ var _exterior_assets = []       # Tracks trees/plants/etc for shadow optimizatio
 var day_render = true
 var lighting_profile = "day"
 const ENABLE_PROCEDURAL_WINDOW_GRID_CASTER = false
+# Multiplier applied to all floor/ceiling UV repeat counts.
+# Values > 1.0 make tiles appear smaller (denser tiling). 2.0 = tiles are 50% smaller.
+# Must match FLOOR_CEIL_TEXTURE_DENSITY_BOOST in image_glb_creation.gd.
+const FLOOR_CEIL_TEXTURE_DENSITY_BOOST: float = 2.0
 var _lighting_locked = false
 var _lighting_setup_done = false
 var _frozen_lighting_profile = "day"
@@ -71,6 +75,19 @@ func _resolve_scene_plan_rotation_radians(data: Dictionary, geom_data = {}) -> f
 	elif typeof(data) == TYPE_DICTIONARY and data.has("directionangle"):
 		angle_deg = float(data.get("directionangle", 0.0))
 	return -deg_to_rad(angle_deg)
+
+func _rotation_to_radians(raw_rotation: float) -> float:
+	if _scene_rotation_is_radians:
+		return raw_rotation
+	return deg_to_rad(raw_rotation)
+
+func _world_yaw_from_source_rotation(raw_rotation: float) -> float:
+	# Match the image renderer: legacy payloads use degrees, 2.0.0 uses radians.
+	return -_rotation_to_radians(raw_rotation)
+
+func _item_front_axis_correction() -> float:
+	# Video rendering keeps the authored front axis as-is.
+	return 0.0
 
 func _resolve_scene_plan_pivot(data: Dictionary, geom_data = {}) -> Vector2:
 	var source = geom_data if typeof(geom_data) == TYPE_DICTIONARY and not geom_data.is_empty() else data
@@ -583,6 +600,11 @@ func _get_layer_altitude(layer) -> float:
 		return float(alt) * _scene_unit_scale
 	return 0.0
 
+func _get_render_layer_altitude(layer, show_all_floors: bool) -> float:
+	if not show_all_floors:
+		return 0.0
+	return _get_layer_altitude(layer)
+
 func _get_primary_layer_id(data, layer_map: Dictionary = {}) -> String:
 	var layers = layer_map
 	if layers.size() == 0:
@@ -897,7 +919,7 @@ func build_architecture(data, cam_pos = null, show_all_floors_override = null):
 				"  Vertices: ", layer_flat["vertices"].size(),
 				"  Holes: ", layer_flat.get("holes", {}).size(),
 				"  Areas: ", layer_flat.get("areas", {}).size())
-			_build_layer_geometry(layer_flat, _get_layer_altitude(layer), show_all_floors, cam_pos, render_mode)
+			_build_layer_geometry(layer_flat, _get_render_layer_altitude(layer, show_all_floors), show_all_floors, cam_pos, render_mode)
 		return
 
 	if not layer_data.has("lines") or not layer_data.has("vertices"):
@@ -1147,21 +1169,24 @@ func build_structures(data):
 	if layer_data.has("layers") and typeof(layer_data["layers"]) == TYPE_DICTIONARY:
 		var layers_dict = layer_data["layers"]
 		var show_all_floors = data.get("showAllFloors", true)
-		var selected_layer = data.get("selectedLayer", "")
+		var layer_ids = layers_dict.keys()
 
-		for layer_id in layers_dict:
-			if not show_all_floors and selected_layer != "" and str(layer_id) != str(selected_layer):
+		if not show_all_floors:
+			var primary_layer_id = _get_primary_layer_id(data, layers_dict)
+			layer_ids = []
+			if primary_layer_id != "":
+				layer_ids.append(primary_layer_id)
+
+		for layer_id in layer_ids:
+			if not layers_dict.has(layer_id):
 				continue
-
 			var layer = layers_dict[layer_id]
 			if typeof(layer) != TYPE_DICTIONARY:
 				continue
 
 			var layer_flat = _arrays_to_dicts(layer)
-			var layer_alt = _get_layer_altitude(layer)
-
 			if layer_flat.has("structures"):
-				_load_layer_structures(layer_flat["structures"], layer_alt, str(layer_id))
+				_load_layer_structures(layer_flat["structures"], _get_render_layer_altitude(layer, show_all_floors), str(layer_id))
 	elif layer_data.has("structures"):
 		_load_layer_structures(layer_data["structures"], 0.0, "root")
 
@@ -1206,7 +1231,7 @@ func _build_structure_mesh(structure: Dictionary, layer_altitude: float, layer_i
 		rot = float(structure["rotation"])
 	elif props.has("rotation"):
 		rot = float(props["rotation"])
-	root.rotation.y = -deg_to_rad(rot)
+	root.rotation.y = _world_yaw_from_source_rotation(rot)
 	root.scale = Vector3(
 		-1.0 if bool(structure.get("flipX", false)) else 1.0,
 		1.0,
@@ -1856,10 +1881,19 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 					if props.has("altitude"): h_alt    = get_dimension_value(props["altitude"]) * scale_factor
 
 				var offset_ratio = 0.5
+				var raw_offset = 0.0
 				if hole.has("offset"):
-					offset_ratio = float(hole["offset"])
+					raw_offset = float(hole["offset"])
 				elif hole.has("properties") and hole["properties"].has("offset"):
-					offset_ratio = float(hole["properties"]["offset"])
+					raw_offset = float(hole["properties"]["offset"])
+				if raw_offset > 1.0:
+					if length > 0.0001:
+						# Convert absolute source units to metres, then to a wall ratio.
+						offset_ratio = clamp((raw_offset * scale_factor) / length, 0.0, 1.0)
+					else:
+						offset_ratio = raw_offset
+				else:
+					offset_ratio = raw_offset
 
 				var hole_pos_xz  = p1.lerp(p2, offset_ratio)
 				var h_center_pos = hole_pos_xz
@@ -2064,7 +2098,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 			floor_poly.depth      = floor_depth
 			floor_poly.rotation.x = PI / 2
 			floor_poly.position.y = layer_altitude - floor_depth
-			var floor_span = _get_polygon_world_span(uv_polygon)
+			# Use the expanded polygon span because CSGPolygon3D normalises
+			# its UVs to [0,1] over the expanded bounding box, not the
+			# original one.  Measuring from the smaller original polygon
+			# caused every tile to appear ~3-4 % oversized.
+			var floor_span = _get_polygon_world_span(polygon)
 
 			if area.has("floor_properties") and typeof(area["floor_properties"]) == TYPE_DICTIONARY and area["floor_properties"].has("material"):
 				var f_mat = create_material(area["floor_properties"]["material"])
@@ -2127,7 +2165,8 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 			ceil_poly.depth      = ceil_depth
 			ceil_poly.rotation.x = PI / 2
 			ceil_poly.position.y = layer_altitude + ceil_height
-			var ceil_span = _get_polygon_world_span(uv_polygon)
+			# Match floor: use expanded polygon span for UV accuracy.
+			var ceil_span = _get_polygon_world_span(polygon)
 
 			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY and area["ceiling_properties"].has("material"):
 				var c_mat = create_material(area["ceiling_properties"]["material"])
@@ -2247,7 +2286,9 @@ func _apply_architecture_texture_scale(mat: StandardMaterial3D, mat_data: Dictio
 		scale_v = height / max(tile_v * _scene_unit_scale, 0.000001)
 		has_physical_repeat = true
 	if has_physical_repeat:
-		mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+		# Apply density boost — multiplying UV scale makes tiles appear smaller.
+		mat.uv1_scale = Vector3(scale_u * FLOOR_CEIL_TEXTURE_DENSITY_BOOST,
+								scale_v * FLOOR_CEIL_TEXTURE_DENSITY_BOOST, 1.0)
 		return mat
 
 	if mat_data.has("repeat"):
@@ -2260,7 +2301,9 @@ func _apply_architecture_texture_scale(mat: StandardMaterial3D, mat_data: Dictio
 			if repeat_v > 0.0:
 				scale_v = repeat_v * height / 2.4
 			if repeat_u > 0.0 or repeat_v > 0.0:
-				mat.uv1_scale = Vector3(scale_u, scale_v, 1.0)
+				# Apply density boost to legacy repeat path too.
+				mat.uv1_scale = Vector3(scale_u * FLOOR_CEIL_TEXTURE_DENSITY_BOOST,
+									scale_v * FLOOR_CEIL_TEXTURE_DENSITY_BOOST, 1.0)
 				return mat
 
 	return mat
@@ -2288,7 +2331,7 @@ func load_assets(data):
 			var layer_flat = _arrays_to_dicts(layer)
 			if not layer_flat.has("items"):
 				continue
-			_load_layer_items(layer_flat["items"], _get_layer_altitude(layer), str(layer_id))
+			_load_layer_items(layer_flat["items"], _get_render_layer_altitude(layer, show_all_floors), str(layer_id))
 		return
 
 	if data.has("items"):
@@ -2618,7 +2661,7 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 							rot = float(item["rotation"])
 						elif item.has("properties") and item["properties"].has("rotation"):
 							rot = float(item["properties"]["rotation"])
-						node.rotation.y = -deg_to_rad(rot)
+						node.rotation.y = _world_yaw_from_source_rotation(rot) + _item_front_axis_correction()
 
 						# Smart scale (same logic as image_glb_creation.gd)
 						var props = {}

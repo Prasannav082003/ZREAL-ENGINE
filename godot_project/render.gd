@@ -5,6 +5,7 @@ extends "res://image_glb_creation.gd"
 var use_threejs = true
 var convert_blender_camera = true
 var _headless = OS.has_feature("headless") or OS.has_feature("server")
+var _render_data = {}
 
 func _ready():
 	print("Godot Renderer Started (Split Architecture)")
@@ -49,15 +50,23 @@ func _ready():
 		return
 		
 	var data = json.data
+	_render_data = data
 	
 	set_resolution(data)
 	build_scene(data) # From image_glb_creation.gd
 	setup_camera(data)
 	
-	if data.has("video_animation"):
+	if _should_render_video(data):
 		call_deferred("render_video", data, output_path)
 	else:
 		call_deferred("render_image", data, output_path)
+
+
+func _should_render_video(data) -> bool:
+	if not data.has("video_animation"):
+		return false
+	var anim_data = data["video_animation"]
+	return typeof(anim_data) == TYPE_DICTIONARY and not anim_data.is_empty()
 
 func set_resolution(data):
 	var w = 1920
@@ -89,18 +98,65 @@ func set_resolution(data):
 		elif quality == "HD":
 			w = 1280
 			h = 720
-	
+
 	if data.has("width"): w = int(data["width"])
 	if data.has("height"): h = int(data["height"])
-			
-	print("Setting Resolution to: ", w, "x", h)
-	get_viewport().size = Vector2i(w, h)
-	
+
+	var aspect_ratio_text = str(data.get("aspect_ratio", "16:9")).strip_edges()
+	var aspect_ratio = _parse_aspect_ratio(aspect_ratio_text)
+	if aspect_ratio > 0.0 and abs(aspect_ratio - (float(w) / float(max(h, 1)))) > 0.001:
+		var base_long_side = max(w, h)
+		if aspect_ratio >= 1.0:
+			w = base_long_side
+			h = int(round(float(base_long_side) / aspect_ratio))
+		else:
+			h = base_long_side
+			w = int(round(float(base_long_side) * aspect_ratio))
+		w = max(w, 1)
+		h = max(h, 1)
+
+	_apply_render_resolution(w, h)
+
 	get_viewport().msaa_3d = Viewport.MSAA_8X
 	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
 	get_viewport().use_taa = true
 	get_viewport().use_debanding = true
 	get_viewport().mesh_lod_threshold = 0.0
+
+func _apply_render_resolution(w: int, h: int) -> void:
+	var size = Vector2i(max(w, 1), max(h, 1))
+	print("Setting Resolution to: ", size.x, "x", size.y)
+	get_viewport().size = size
+	DisplayServer.window_set_size(size)
+	var window = get_window()
+	if window:
+		window.size = size
+		window.content_scale_size = size
+
+func _parse_aspect_ratio(aspect_ratio_text: String) -> float:
+	var cleaned = aspect_ratio_text.strip_edges()
+	if cleaned == "":
+		return -1.0
+	if cleaned.find(":") != -1:
+		var parts = cleaned.split(":")
+		if parts.size() == 2:
+			var numerator = float(str(parts[0]).strip_edges())
+			var denominator = float(str(parts[1]).strip_edges())
+			if numerator > 0.0 and denominator > 0.0:
+				return numerator / denominator
+		return -1.0
+	if cleaned.find("/") != -1:
+		var ratio_parts = cleaned.split("/")
+		if ratio_parts.size() == 2:
+			var numerator2 = float(str(ratio_parts[0]).strip_edges())
+			var denominator2 = float(str(ratio_parts[1]).strip_edges())
+			if numerator2 > 0.0 and denominator2 > 0.0:
+				return numerator2 / denominator2
+		return -1.0
+	var numeric_ratio = float(cleaned)
+	if numeric_ratio > 0.0:
+		return numeric_ratio
+	return -1.0
 
 func setup_camera(data):
 	var cam = Camera3D.new()
@@ -108,7 +164,7 @@ func setup_camera(data):
 	var pos = Vector3(0, 1.5, 5)
 	var target = Vector3(0, 1.0, 0)
 	var need_look_at = false
-	var need_look_at_blender = false
+	var has_view_target = false
 	var use_plan_transform = abs(_scene_plan_rotation_radians) > 0.000001
 
 	var prefer_threejs = data.get("use_threejs", use_threejs)
@@ -124,22 +180,20 @@ func setup_camera(data):
 
 		cam.position = pos
 
-		if use_plan_transform and cam_data.has("target"):
-			var t = cam_data["target"]
-			target = Vector3(float(t["x"]), float(t["y"]), float(t["z"]))
-			target = _transform_plan_point_meters(target)
-			need_look_at = true   # defer until after add_child
-		elif cam_data.has("rotation"):
-			var r = cam_data["rotation"]
-			var rot_v = Vector3(float(r["x"]), float(r["y"]), float(r["z"]))
-			cam.basis = Basis.from_euler(rot_v, EULER_ORDER_XYZ)
-			print("Camera Setup (ThreeJS): Pos=", pos, " Rotation=", cam.rotation)
-		elif cam_data.has("target"):
+		if cam_data.has("target"):
 			var t = cam_data["target"]
 			target = Vector3(float(t["x"]), float(t["y"]), float(t["z"]))
 			if use_plan_transform:
 				target = _transform_plan_point_meters(target)
-			need_look_at = true   # defer until after add_child
+			has_view_target = true
+			if not cam_data.has("rotation"):
+				need_look_at = true
+		if cam_data.has("rotation"):
+			var r = cam_data["rotation"]
+			var rot_v = Vector3(float(r["x"]), float(r["y"]), float(r["z"]))
+			cam.basis = Basis.from_euler(rot_v, EULER_ORDER_XYZ)
+		elif has_view_target:
+			need_look_at = true
 
 	elif data.has("blender_camera"):
 		cam_data = data["blender_camera"]
@@ -164,8 +218,9 @@ func setup_camera(data):
 				target = Vector3(t_loc[0], t_loc[1], t_loc[2])
 			if use_plan_transform:
 				target = _transform_plan_point_meters(target)
-			need_look_at = true   # defer until after add_child
-			print("Camera Setup (Blender): Pos=", pos, " Target=", target)
+			has_view_target = true
+			if not cam_data.has("rotation_euler"):
+				need_look_at = true
 		elif cam_data.has("rotation_euler"):
 			var r = cam_data["rotation_euler"]
 			var rot_v = Vector3(float(r[0]), float(r[1]), float(r[2]))
@@ -178,60 +233,39 @@ func setup_camera(data):
 				cam.basis = godot_basis
 			else:
 				cam.basis = Basis.from_euler(rot_v, EULER_ORDER_XYZ)
-			print("Camera Setup (Blender): Pos=", pos, " Rotation=", cam.rotation)
 
 	if cam_data.has("fov"):
 		cam.fov = float(cam_data["fov"])
 
-	# CRITICAL FIX: add_child BEFORE any look_at() call.
-	# look_at() needs the node inside the scene tree to access global_transform.
-	# Calling look_at() before add_child() crashes silently and aborts _ready(),
-	# which is why Godot opens but render_image() never gets called.
 	add_child(cam)
 
-	# Now safe to call look_at() — node is in the tree
 	if need_look_at:
-		# Guard against degenerate case where camera position == target
-		if pos.distance_to(target) > 0.001:
+		if cam.global_position.distance_to(target) > 0.001:
 			cam.look_at(target, Vector3.UP)
-			print("Camera look_at: Pos=", pos, " Target=", target)
-		else:
-			print("Warning: camera pos == target, skipping look_at")
 
 func render_image(data, output_path):
 	print("Rendering Single Image...")
 	await _wait_frames(2)
 	var cam = get_node_or_null("MainCamera")
 	if cam:
-		setup_smart_point_lights(cam)
-		# Wait one more frame for lights to register if needed, 
-		# though OmniLight3D is usually immediate for the next force_draw
+		setup_fixed_fill_lights()
 		await _wait_frames(1)
 	
 	var img = await _capture_viewport_image(6)
 	if img:
 		img.save_png(output_path)
 		print("Image saved to: ", output_path)
-		# Save WebP thumbnail alongside the rendered image
 		_save_thumbnail_webp(img, output_path)
-	else:
-		print("Error: Failed to capture image from viewport.")
 	
 	save_logs(data, output_path)
 	get_tree().quit(0)
 
 func save_logs(input_data, output_image_path):
 	print("Saving logs...")
-	
-	# Save logs and input_json to sibling directories (one level above godot_project)
 	var project_root = ProjectSettings.globalize_path("res://")
-	var parent_dir = project_root.get_base_dir()  # Go up from godot_project/
+	var parent_dir = project_root.get_base_dir()
 	var logs_abs = parent_dir.path_join("logs")
 	var input_abs = parent_dir.path_join("input_json")
-	
-	# Use absolute paths for both DirAccess and FileAccess
-	var logs_dir = logs_abs
-	var input_save_dir = input_abs
 	
 	if not DirAccess.dir_exists_absolute(logs_abs):
 		DirAccess.make_dir_recursive_absolute(logs_abs)
@@ -239,89 +273,34 @@ func save_logs(input_data, output_image_path):
 		DirAccess.make_dir_recursive_absolute(input_abs)
 		
 	var timestamp = str(Time.get_unix_time_from_system())
-	
-	# Use the output render filename as the base for log/input filenames
 	var output_basename = output_image_path.get_file().get_basename()
 	
-	# 1. Save Input JSON copy
-	var input_filename = output_basename + "_input.json"
-	var input_save_path = input_save_dir.path_join(input_filename)
-	
+	var input_save_path = input_abs.path_join(output_basename + "_input.json")
 	var json_string = JSON.stringify(input_data, "\t")
 	var file_input = FileAccess.open(input_save_path, FileAccess.WRITE)
 	if file_input:
 		file_input.store_string(json_string)
 		file_input.close()
-		print("Saved copy of input JSON to: ", input_save_path)
-	else:
-		print("Error saving input JSON copy to ", input_save_path)
 		
-	# 2. detailed Log JSON
 	var log_data = {}
 	log_data["timestamp"] = timestamp
-	log_data["input_file_saved"] = input_save_path
 	log_data["output_image"] = output_image_path
 	
-	# Camera Info
 	var cam = get_node_or_null("MainCamera")
-	var cam_info = {}
 	if cam:
-		cam_info["position"] = { "x": cam.position.x, "y": cam.position.y, "z": cam.position.z }
-		cam_info["rotation_degrees"] = { "x": cam.rotation_degrees.x, "y": cam.rotation_degrees.y, "z": cam.rotation_degrees.z }
-		cam_info["fov"] = cam.fov
-		
-		# Viewing direction
-		var forward = -cam.global_transform.basis.z.normalized()
-		cam_info["look_direction_vector"] = { "x": forward.x, "y": forward.y, "z": forward.z }
-		cam_info["cardinal_direction"] = get_cardinal_direction(forward)
-		
-	log_data["camera_actual"] = cam_info
+		log_data["camera_actual"] = {
+			"position": { "x": cam.position.x, "y": cam.position.y, "z": cam.position.z },
+			"fov": cam.fov
+		}
 	
-	log_data["camera_input_threejs"] = input_data.get("threejs_camera", {})
-	log_data["camera_input_blender"] = input_data.get("blender_camera", {})
-	
-	# Assets Used
 	log_data["assets_used"] = _tracked_assets
 	
-	var log_filename = output_basename + "_render_log.json"
-	var log_path = logs_dir.path_join(log_filename)
-	
+	var log_path = logs_abs.path_join(output_basename + "_render_log.json")
 	var log_json_str = JSON.stringify(log_data, "\t")
 	var file_log = FileAccess.open(log_path, FileAccess.WRITE)
 	if file_log:
 		file_log.store_string(log_json_str)
 		file_log.close()
-		print("Saved render log to: ", log_path)
-	else:
-		print("Error saving render log to ", log_path)
-
-func get_cardinal_direction(dir: Vector3) -> String:
-	# Ignore Y component for cardinal direction
-	var flat_dir = Vector2(dir.x, dir.z).normalized()
-	
-	# Godot Coordinate System:
-	# -Z is North, +Z is South
-	# +X is East,  -X is West
-	
-	var angle = rad_to_deg(flat_dir.angle()) # Angle in -PI to PI
-	# Vector2.angle() returns angle relative to +X (East)
-	# 0 = East
-	# PI/2 (90) = South (+Z)
-	# PI (180) = West (-X)
-	# -PI/2 (-90) = North (-Z)
-	
-	var deg = rad_to_deg(flat_dir.angle())
-	
-	if deg >= -22.5 and deg < 22.5: return "East"
-	if deg >= 22.5 and deg < 67.5: return "South-East"
-	if deg >= 67.5 and deg < 112.5: return "South"
-	if deg >= 112.5 and deg < 157.5: return "South-West"
-	if deg >= 157.5 or deg < -157.5: return "West"
-	if deg >= -157.5 and deg < -112.5: return "North-West"
-	if deg >= -112.5 and deg < -67.5: return "North"
-	if deg >= -67.5 and deg < -22.5: return "North-East"
-	
-	return "Unknown"
 
 func render_video(data, output_base_path):
 	print("Rendering Video Sequence...")
@@ -344,136 +323,238 @@ func render_video(data, output_base_path):
 	var base_filename = output_base_path.get_basename()
 	var first_frame_saved = false
 	
+	setup_fixed_fill_lights() # Set up once for video
+	
 	for frame in range(total_frames):
 		var t = float(frame) / float(total_frames - 1) if total_frames > 1 else 0.0
 		cam.position = start_pos.lerp(end_pos, t)
-		setup_smart_point_lights(cam)
 		
 		await _wait_frames(1)
 		
 		var img = await _capture_viewport_image(3)
-		var frame_filename = "%s_%04d.png" % [base_filename, frame]
 		if img:
+			var frame_filename = "%s_%04d.png" % [base_filename, frame]
 			img.save_png(frame_filename)
-			# Save the 1st frame as WebP thumbnail for the video
 			if not first_frame_saved:
 				_save_thumbnail_webp(img, output_base_path)
 				first_frame_saved = true
-		else:
-			print("Warning: empty frame at index ", frame)
 		
 		if frame % 10 == 0:
 			print("Rendered frame ", frame, "/", total_frames)
 			
 	get_tree().quit(0)
 
-func setup_smart_point_lights(cam: Camera3D):
-	# Clear existing smart lights to allow re-placement (important for video)
-	var existing = get_tree().get_nodes_in_group("smart_lights")
-	for l in existing:
+func setup_fixed_fill_lights():
+	# Unified room-based lighting logic (synced with video_render.gd)
+	for l in get_tree().get_nodes_in_group("fill_lights"):
 		l.queue_free()
-	
-	var space_state = cam.get_world_3d().direct_space_state
-	if not space_state:
-		print("Warning: Physics space state not available for smart lights.")
-		return
-		
-	var cam_pos = cam.global_position
-	var basis = cam.global_transform.basis
-	var forward = -basis.z
-	var right = basis.x
-	var up = basis.y
-	
-	# Define a set of light offsets relative to the camera
-	# We want to illuminate the scene around and in front of the camera
-	var light_configs = [
-		{"offset": Vector3(0, 0.5, 0), "energy": 0.9, "range": 14.0, "name": "Near"},
-		{"offset": forward * 2.5 + up * 0.5, "energy": 0.75, "range": 12.0, "name": "Ahead"},
-		{"offset": right * 1.8 + up * 0.2, "energy": 0.55, "range": 10.0, "name": "Right"},
-		{"offset": -right * 1.8 + up * 0.2, "energy": 0.55, "range": 10.0, "name": "Left"},
-		{"offset": -forward * 1.2 + up * 1.0, "energy": 0.45, "range": 10.0, "name": "Behind"}
-	]
-	
-	print("Placing ", light_configs.size(), " smart point lights...")
-	
-	for config in light_configs:
-		var target_pos = cam_pos + config["offset"]
-		var safe_pos = _get_safe_pos(cam_pos, target_pos, space_state)
-		
+
+	# Dim automated room fills if manual light fixtures are already present
+	var energy_multiplier = 1.0
+	var fixture_count = get_tree().get_nodes_in_group("fixture_lights").size()
+	if fixture_count > 0:
+		energy_multiplier = 0.5
+		print("[Render] %d fixture lights detected. Dimming automated room fill lights (0.5x)." % fixture_count)
+
+	var placed = 0
+
+	var areas = _get_floor_plan_areas()
+	var verts = _get_floor_plan_vertices()
+
+	if areas.size() > 0 and verts.size() > 0:
+		for area_id in areas:
+			var area = areas[area_id]
+			var v_ids = area.get("vertices", [])
+			if v_ids.size() < 3:
+				continue
+
+			# ── Centroid: average of all polygon vertex positions (cm → m) ──
+			var sum_x = 0.0
+			var sum_z = 0.0
+			var count = 0
+			for v_id in v_ids:
+				var vs = str(v_id)
+				if not verts.has(vs):
+					continue
+				var v = verts[vs]
+				sum_x += float(v.get("x", 0)) * _scene_unit_scale
+				sum_z += float(v.get("y", 0)) * _scene_unit_scale  # floor-plan Y → Godot Z
+				count += 1
+			if count == 0:
+				continue
+
+			var cx = sum_x / float(count)
+			var cz = sum_z / float(count)
+
+			# ── Ceiling height for THIS room ──
+			var ceil_h = 2.4  # default 240 cm → 2.4 m
+			if area.has("ceiling_properties") and typeof(area["ceiling_properties"]) == TYPE_DICTIONARY:
+				var cp = area["ceiling_properties"]
+				if cp.has("height"):
+					var ch = cp["height"]
+					var hf = 0.0
+					if typeof(ch) == TYPE_DICTIONARY and ch.has("length"):
+						hf = float(ch["length"]) * _scene_unit_scale
+					elif typeof(ch) == TYPE_INT or typeof(ch) == TYPE_FLOAT:
+						hf = float(ch) * _scene_unit_scale
+					elif typeof(ch) == TYPE_STRING and ch.is_valid_float():
+						hf = float(ch) * _scene_unit_scale
+					if hf > 0.5:
+						ceil_h = hf
+			elif area.has("properties") and typeof(area["properties"]) == TYPE_DICTIONARY:
+				var h_prop = area["properties"].get("height", null)
+				if h_prop != null:
+					var hf = get_dimension_value(h_prop) * _scene_unit_scale
+					if hf > 0.5: ceil_h = hf
+
+			# Light hangs 30 cm below the ceiling — well inside the room
+			var light_y = ceil_h - 0.30
+			light_y = max(light_y, 1.4)  # never lower than 1.4 m
+
+			# ── Emit radius scaled to room size ──
+			var min_x = 1e9; var max_x = -1e9
+			var min_z = 1e9; var max_z = -1e9
+			for v_id in v_ids:
+				var vs = str(v_id)
+				if not verts.has(vs): continue
+				var v = verts[vs]
+				var vx = float(v.get("x", 0)) * _scene_unit_scale
+				var vz = float(v.get("y", 0)) * _scene_unit_scale
+				min_x = min(min_x, vx); max_x = max(max_x, vx)
+				min_z = min(min_z, vz); max_z = max(max_z, vz)
+			var room_w = max(max_x - min_x, 0.5)
+			var room_d = max(max_z - min_z, 0.5)
+			var diag   = sqrt(room_w * room_w + room_d * room_d)
+			
+			# Range = diagonal + 1 m headroom, clamped between 6 m and 20 m (from video_render.gd)
+			var omni_range = clamp(diag + 1.0, 6.0, 20.0)
+			# Energy scales gently with room size (0.8 to 2.0 from video_render.gd)
+			var energy = clamp(0.8 + diag * 0.12, 0.8, 2.0)
+
+			var light = OmniLight3D.new()
+			light.name = "RoomLight_" + str(area_id)
+			light.position = Vector3(cx, light_y, cz)  # ← fixed world position
+			light.light_energy = energy * energy_multiplier
+			light.omni_range = omni_range
+			light.shadow_enabled = false
+			light.light_color = Color(1.0, 0.97, 0.90)  # warm white (match video)
+			light.add_to_group("fill_lights")
+			add_child(light)
+			placed += 1
+
+	if placed == 0:
+		print("[Render] No area data found — placing single fallback fill light at scene centre.")
 		var light = OmniLight3D.new()
-		light.name = "SmartLight_" + config["name"]
-		light.position = safe_pos
-		light.light_energy = config["energy"]
-		light.omni_range = config["range"]
-		light.shadow_enabled = false  # Smart fill lights NEVER cast shadows
-		# Neutral slightly warm light
-		light.light_color = Color(1.0, 0.98, 0.92)
-		# Add to group so we can find and clean them up
-		light.add_to_group("smart_lights")
+		light.name = "RoomLight_Fallback"
+		light.position = Vector3(0, 2.1, 0)
+		light.light_energy = 1.5
+		light.omni_range = 18.0
+		light.shadow_enabled = false
+		light.light_color = Color(1.0, 0.97, 0.90)
+		light.add_to_group("fill_lights")
 		add_child(light)
-
-func _get_safe_pos(start: Vector3, end: Vector3, space_state: PhysicsDirectSpaceState3D) -> Vector3:
-	var query = PhysicsRayQueryParameters3D.create(start, end)
-	# Collide with everything (walls, floors, etc.)
-	query.collide_with_bodies = true
-	query.collide_with_areas = false
+		placed = 1
 	
-	var result = space_state.intersect_ray(query)
-	if result:
-		var hit_pos = result.position
-		var dir = (hit_pos - start).normalized()
-		var dist = (hit_pos - start).length()
-		
-		# Back off from the hit point to avoid intersecting geometry
-		# We use a smaller back-off if the total distance is very small
-		var back_off = min(0.25, dist * 0.4) 
-		return hit_pos - dir * back_off
-		
-	return end
+	print("[Render] Placed %d room light(s) — synced with video render." % placed)
 
-# ─────────────────────────────────────────────────────────────────
-# Thumbnail Generation
-# ─────────────────────────────────────────────────────────────────
+func _get_floor_plan_areas() -> Dictionary:
+	var src = _render_data
+	if src.has("floor_plan_data"):
+		var fp = src["floor_plan_data"]
+		if typeof(fp) == TYPE_STRING:
+			var j = JSON.new()
+			if j.parse(fp) == OK: src = j.data
+		elif typeof(fp) == TYPE_DICTIONARY:
+			src = fp
+
+	# Handle nested layers structure (from video_render.gd)
+	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
+		var merged = {}
+		for l_id in src["layers"]:
+			var layer = src["layers"][l_id]
+			if typeof(layer) == TYPE_DICTIONARY and layer.has("areas"):
+				var raw_areas = layer["areas"]
+				if typeof(raw_areas) == TYPE_DICTIONARY:
+					for a_id in raw_areas:
+						merged[str(a_id)] = raw_areas[a_id]
+				elif typeof(raw_areas) == TYPE_ARRAY:
+					for a in raw_areas:
+						if typeof(a) == TYPE_DICTIONARY and a.has("id"):
+							merged[str(a["id"])] = a
+		return merged
+	
+	var raw = src.get("areas", null)
+	if raw == null: return {}
+	if typeof(raw) == TYPE_DICTIONARY: return raw
+	# Array format fallback
+	var d = {}
+	for a in raw:
+		if typeof(a) == TYPE_DICTIONARY and a.has("id"):
+			d[str(a["id"])] = a
+	return d
+
+func _get_floor_plan_vertices() -> Dictionary:
+	var src = _render_data
+	if src.has("floor_plan_data"):
+		var fp = src["floor_plan_data"]
+		if typeof(fp) == TYPE_STRING:
+			var j = JSON.new()
+			if j.parse(fp) == OK: src = j.data
+		elif typeof(fp) == TYPE_DICTIONARY:
+			src = fp
+
+	# Handle nested layers structure (from video_render.gd)
+	if src.has("layers") and typeof(src["layers"]) == TYPE_DICTIONARY:
+		var merged = {}
+		for l_id in src["layers"]:
+			var layer = src["layers"][l_id]
+			if typeof(layer) == TYPE_DICTIONARY and layer.has("vertices"):
+				var raw_verts = layer["vertices"]
+				if typeof(raw_verts) == TYPE_DICTIONARY:
+					for v_id in raw_verts:
+						merged[str(v_id)] = raw_verts[v_id]
+				elif typeof(raw_verts) == TYPE_ARRAY:
+					for v in raw_verts:
+						if typeof(v) == TYPE_DICTIONARY and v.has("id"):
+							merged[str(v["id"])] = v
+		return merged
+	
+	var raw = src.get("vertices", null)
+	if raw == null: return {}
+	if typeof(raw) == TYPE_DICTIONARY: return raw
+	# Array format fallback
+	var d = {}
+	for v in raw:
+		if typeof(v) == TYPE_DICTIONARY and v.has("id"):
+			d[str(v["id"])] = v
+	return d
+
+func get_cardinal_direction(dir: Vector3) -> String:
+	var flat_dir = Vector2(dir.x, dir.z).normalized()
+	var deg = rad_to_deg(flat_dir.angle())
+	if deg >= -22.5 and deg < 22.5: return "East"
+	if deg >= 22.5 and deg < 67.5: return "South-East"
+	if deg >= 67.5 and deg < 112.5: return "South"
+	if deg >= 112.5 and deg < 157.5: return "South-West"
+	if deg >= 157.5 or deg < -157.5: return "West"
+	if deg >= -157.5 and deg < -112.5: return "North-West"
+	if deg >= -112.5 and deg < -67.5: return "North"
+	if deg >= -67.5 and deg < -22.5: return "North-East"
+	return "Unknown"
+
 func _save_thumbnail_webp(source_image: Image, output_path: String) -> void:
-	"""Saves a small WebP thumbnail next to the render output.
-	The thumbnail is saved with a '_thumb.webp' suffix in the same directory.
-	Max dimension is 480px, WebP quality 75% to keep file size low."""
-	if source_image == null or source_image.is_empty():
-		print("Warning: Cannot create thumbnail — source image is empty.")
-		return
-	
-	# Determine thumbnail path: same directory, basename + _thumb.webp
-	var dir = output_path.get_base_dir()
-	var basename = output_path.get_file().get_basename()
-	var thumb_path = dir.path_join(basename + "_thumb.webp")
-	
-	# Create a copy to avoid mutating the original image
+	if source_image == null or source_image.is_empty(): return
+	var thumb_path = output_path.get_base_dir().path_join(output_path.get_file().get_basename() + "_thumb.webp")
 	var thumb = source_image.duplicate()
-	
-	# Resize to max 480px on the longest side, preserving aspect ratio
 	var max_dim = 480
-	var w = thumb.get_width()
-	var h = thumb.get_height()
+	var w = thumb.get_width(); var h = thumb.get_height()
 	if w > max_dim or h > max_dim:
-		if w >= h:
-			var new_w = max_dim
-			var new_h = int(float(h) * float(max_dim) / float(w))
-			thumb.resize(new_w, max(new_h, 1), Image.INTERPOLATE_LANCZOS)
-		else:
-			var new_h = max_dim
-			var new_w = int(float(w) * float(max_dim) / float(h))
-			thumb.resize(max(new_w, 1), new_h, Image.INTERPOLATE_LANCZOS)
-	
-	# Save as WebP with lossy compression (quality 0.75 = 75%)
-	var err = thumb.save_webp(thumb_path, true, 0.75)
-	if err == OK:
-		print("Thumbnail saved to: ", thumb_path)
-	else:
-		print("Warning: Failed to save thumbnail. Error code: ", err)
+		if w >= h: thumb.resize(max_dim, int(float(h)*max_dim/w), Image.INTERPOLATE_LANCZOS)
+		else: thumb.resize(int(float(w)*max_dim/h), max_dim, Image.INTERPOLATE_LANCZOS)
+	thumb.save_webp(thumb_path, true, 0.75)
 
 func _wait_frames(count: int) -> void:
-	for i in range(count):
-		await get_tree().process_frame
+	for i in range(count): await get_tree().process_frame
 
 func _capture_viewport_image(retries: int = 3):
 	var vp = get_viewport()
@@ -483,7 +564,6 @@ func _capture_viewport_image(retries: int = 3):
 		var tex = vp.get_texture()
 		if tex:
 			var img = tex.get_image()
-			if img and not img.is_empty():
-				return img
+			if img and not img.is_empty(): return img
 		await get_tree().process_frame
 	return null
