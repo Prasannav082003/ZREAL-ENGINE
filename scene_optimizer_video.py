@@ -5,9 +5,36 @@ import sys
 import time
 from typing import Dict, List, Any, Set, Tuple, Optional
 
+from scene_optimizer import (
+    _resolve_scene_cm_per_unit,
+    _resolve_scene_rotation_radians,
+    _resolve_scene_plan_pivot_cm,
+    _transform_plan_point_cm,
+)
+
 # Configuration
 # Legacy payloads use metre-based camera data; 2.0.0 video paths use cm.
 SCALE_METERS_TO_CM = 100.0
+
+
+def _resolve_camera_cm_per_unit(payload: dict) -> float:
+    """
+    Resolve the camera coordinate scale in centimetres per source unit.
+
+    Newer video payloads often store camera paths in centimetres already
+    (units="cm"), while older callers emitted metres. Default to metres
+    when the payload does not provide an explicit unit hint.
+    """
+    unit = str(payload.get("units", "")).strip().lower() if isinstance(payload, dict) else ""
+    if unit in {"cm", "centimeter", "centimeters", "centimetre", "centimetres"}:
+        return 1.0
+    if unit in {"mm", "millimeter", "millimeters", "millimetre", "millimetres"}:
+        return 0.1
+    if unit in {"ft", "feet", "foot"}:
+        return 30.48
+    if unit in {"m", "meter", "meters", "metre", "metres"}:
+        return 100.0
+    return 100.0
 
 # Culling logs folder
 CULLING_LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "culling_logs")
@@ -27,6 +54,10 @@ EXTERIOR_ITEM_KEYWORDS = ["roof", "grill", "balcony", "exterior", "facade", "chi
 
 # Item proximity rescue tolerance (cm) — catches items slightly outside polygon
 ITEM_RESCUE_TOLERANCE_CM = 85.0
+
+# Extra visibility slack for items.  We still keep the item-aware cone test,
+# but this gives a small buffer so partially visible furniture is not dropped.
+ITEM_VIEW_MARGIN_DEG = 15.0
 
 # Tolerance for matching vertex positions between rooms (cm)
 POSITION_TOLERANCE_CM = 1.0
@@ -158,6 +189,7 @@ def _portal_world_endpoints(
     line: dict,
     hole: dict,
     vertices: dict,
+    cm_per_unit: float,
 ) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
     """Compute the 2D plan endpoints of a hole on a wall."""
     v_ids = line.get("vertices", [])
@@ -178,9 +210,15 @@ def _portal_world_endpoints(
     ux = (bx - ax) / wall_len
     uy = (by - ay) / wall_len
 
-    offset = float(hole.get("offset", 0.5))
-    cx = ax + offset * (bx - ax)
-    cy = ay + offset * (by - ay)
+    raw_offset = float(hole.get("offset", 0.5))
+    # Match the image pipeline: offsets may be stored either as a wall
+    # fraction (0..1) or as an absolute source-unit distance along the wall.
+    if abs(raw_offset) <= 1.5:
+        offset_cm = raw_offset * wall_len
+    else:
+        offset_cm = raw_offset * cm_per_unit
+    cx = ax + offset_cm * ux
+    cy = ay + offset_cm * uy
 
     raw_w = hole.get("properties", {}).get("width", hole.get("width", 100))
     if isinstance(raw_w, dict):
@@ -236,6 +274,7 @@ def _collect_portal_visible_rooms(
     lines: dict,
     holes: dict,
     vertices: dict,
+    cm_per_unit: float,
     cam_x: float,
     cam_y: float,
     dir_x: float,
@@ -274,7 +313,7 @@ def _collect_portal_visible_rooms(
             if not hole:
                 continue
 
-            endpoints = _portal_world_endpoints(line, hole, vertices)
+            endpoints = _portal_world_endpoints(line, hole, vertices, cm_per_unit)
             if not endpoints:
                 continue
 
@@ -430,6 +469,85 @@ def _is_exterior_asset_video(item: dict) -> bool:
     return any(kw in full_desc for kw in EXTERIOR_ITEM_KEYWORDS)
 
 
+def _item_dimension_cm(
+    item: dict,
+    key: str,
+    default_cm: float = 100.0,
+    cm_per_unit: float = 1.0,
+) -> float:
+    """Read an item's dimension in centimetres from top-level or properties."""
+    raw = item.get(key, None)
+    if raw is None and isinstance(item.get("properties"), dict):
+        raw = item["properties"].get(key, None)
+
+    if isinstance(raw, dict):
+        if "length" in raw:
+            try:
+                return float(raw.get("length", default_cm))
+            except Exception:
+                return default_cm
+        if "value" in raw:
+            try:
+                return float(raw.get("value", default_cm))
+            except Exception:
+                return default_cm
+    try:
+        if raw is not None:
+            return float(raw) * cm_per_unit
+    except Exception:
+        pass
+    return default_cm
+
+
+def _item_footprint_radius_cm(item: dict, cm_per_unit: float = 1.0) -> float:
+    """
+    Approximate the item footprint with a circle radius in plan view.
+    Using half the diagonal keeps partially visible furniture from being
+    culled when only part of it enters the camera cone.
+    Item dimensions are stored in the same source units as the plan, so we
+    scale them to centimetres before visibility checks.
+    """
+    width = max(_item_dimension_cm(item, "width", 100.0, cm_per_unit), 1.0)
+    depth = max(_item_dimension_cm(item, "depth", 100.0, cm_per_unit), 1.0)
+    return 0.5 * math.hypot(width, depth)
+
+
+def _item_visible_from_sample(
+    item: dict,
+    sample: Dict[str, Any],
+    item_x: float,
+    item_y: float,
+    max_view_dist_cm: float,
+    cm_per_unit: float = 1.0,
+) -> bool:
+    """Return True when the item's footprint overlaps the camera view cone."""
+    cam_x = float(sample["cam_x"])
+    cam_y = float(sample["cam_y"])
+    cam_dir_x = float(sample["cam_dir_x"])
+    cam_dir_y = float(sample["cam_dir_y"])
+    fov_half_deg = float(sample["fov_half_deg"])
+
+    radius_cm = _item_footprint_radius_cm(item, cm_per_unit)
+    dist_cm = math.hypot(item_x - cam_x, item_y - cam_y)
+    if max(0.0, dist_cm - radius_cm) > max_view_dist_cm:
+        return False
+
+    angle_deg = math.degrees(
+        _angle_to_point(cam_x, cam_y, cam_dir_x, cam_dir_y, item_x, item_y)
+    )
+    # Expand the FOV by the item's apparent angular radius so items that only
+    # partially overlap the cone are kept.
+    if dist_cm < 1e-6:
+        angular_radius_deg = 90.0
+    else:
+        angular_radius_deg = math.degrees(
+            math.asin(min(1.0, radius_cm / max(dist_cm, 1.0)))
+        )
+
+    fov_limit_deg = fov_half_deg + ITEM_VIEW_MARGIN_DEG + angular_radius_deg
+    return angle_deg <= fov_limit_deg
+
+
 def _cull_interior_video(
     active_area_ids: Set[str],
     active_samples: List[Dict[str, Any]],
@@ -438,6 +556,9 @@ def _cull_interior_video(
     areas: dict,
     items: dict,
     holes: dict,
+    cm_per_unit: float,
+    rotation_radians: float,
+    pivot: Tuple[float, float],
     log_fn,
     max_view_dist_cm: float = DEFAULT_VIEW_DISTANCE_CM,
 ) -> Tuple[dict, dict, dict, dict, dict]:
@@ -462,6 +583,32 @@ def _cull_interior_video(
         f"  Interior samples: {len(active_samples)} | MaxDist={max_view_dist_cm:.0f}cm"
     )
 
+    transformed_vertices: Dict[str, dict] = {}
+    for vid, vertex in vertices.items():
+        if not isinstance(vertex, dict):
+            continue
+        tx, ty = _transform_plan_point_cm(
+            float(vertex.get("x", 0.0)),
+            float(vertex.get("y", 0.0)),
+            cm_per_unit,
+            rotation_radians,
+            pivot,
+        )
+        v_copy = dict(vertex)
+        v_copy["x"] = tx
+        v_copy["y"] = ty
+        transformed_vertices[vid] = v_copy
+
+    transformed_area_polys: Dict[str, List[Tuple[float, float]]] = {}
+    for aid, area in areas.items():
+        poly_verts: List[Tuple[float, float]] = []
+        for v_id in area.get("vertices", []):
+            v = transformed_vertices.get(str(v_id), transformed_vertices.get(v_id))
+            if v:
+                poly_verts.append((float(v.get("x", 0.0)), float(v.get("y", 0.0))))
+        if poly_verts:
+            transformed_area_polys[aid] = poly_verts
+
     kept_area_ids: Set[str] = set(active_area_ids)
     for idx, sample in enumerate(active_samples):
         active_area_id = sample.get("active_area_id")
@@ -473,7 +620,8 @@ def _cull_interior_video(
             areas,
             lines,
             holes,
-            vertices,
+            transformed_vertices,
+            cm_per_unit,
             float(sample["cam_x"]),
             float(sample["cam_y"]),
             float(sample["cam_dir_x"]),
@@ -500,14 +648,14 @@ def _cull_interior_video(
 
     kept_positions: Set[Tuple] = set()
     for vid in kept_vertex_ids:
-        v = vertices.get(vid)
+        v = transformed_vertices.get(vid)
         if v:
             kept_positions.add((round(v.get("x", 0), 0), round(v.get("y", 0), 0)))
 
     def vertex_is_near_kept(vid: str) -> bool:
         if vid in kept_vertex_ids:
             return True
-        v = vertices.get(vid)
+        v = transformed_vertices.get(vid)
         if v:
             return (round(v.get("x", 0), 0), round(v.get("y", 0), 0)) in kept_positions
         return False
@@ -524,7 +672,7 @@ def _cull_interior_video(
         for vid in area.get("vertices", []):
             vid = str(vid)
             active_room_vertex_ids.add(vid)
-            v = vertices.get(vid)
+            v = transformed_vertices.get(vid)
             if v:
                 active_room_positions.add((round(v.get("x", 0), 0), round(v.get("y", 0), 0)))
 
@@ -532,7 +680,7 @@ def _cull_interior_video(
         if v1_id in active_room_vertex_ids or v2_id in active_room_vertex_ids:
             return True
         for vid in (v1_id, v2_id):
-            v = vertices.get(vid)
+            v = transformed_vertices.get(vid)
             if not v:
                 continue
             if (round(v.get("x", 0), 0), round(v.get("y", 0), 0)) in active_room_positions:
@@ -606,27 +754,17 @@ def _cull_interior_video(
             log_fn(f"  🗑️ Removing exterior-only asset in interior render: '{item.get('name', 'Unknown')}' ({iid})")
             continue
 
-        ix, iy = float(item.get("x", 0)), float(item.get("y", 0))
+        ix, iy = _transform_plan_point_cm(
+            float(item.get("x", 0)),
+            float(item.get("y", 0)),
+            cm_per_unit,
+            rotation_radians,
+            pivot,
+        )
 
         visible_from_path = False
         for sample in active_samples:
-            cam_x = float(sample["cam_x"])
-            cam_y = float(sample["cam_y"])
-            dist = math.hypot(ix - cam_x, iy - cam_y)
-            if dist > max_view_dist_cm:
-                continue
-
-            angle_deg = math.degrees(
-                _angle_to_point(
-                    cam_x,
-                    cam_y,
-                    float(sample["cam_dir_x"]),
-                    float(sample["cam_dir_y"]),
-                    ix,
-                    iy,
-                )
-            )
-            if angle_deg <= float(sample["fov_half_deg"]) + 15.0:
+            if _item_visible_from_sample(item, sample, ix, iy, max_view_dist_cm, cm_per_unit):
                 visible_from_path = True
                 break
 
@@ -639,14 +777,7 @@ def _cull_interior_video(
         # Pass 1 – polygon inclusion
         is_kept = False
         for aid in kept_area_ids:
-            area = areas.get(aid)
-            if not area:
-                continue
-            poly_verts = []
-            for v_id in area.get("vertices", []):
-                v = vertices.get(v_id)
-                if v:
-                    poly_verts.append((v.get("x", 0), v.get("y", 0)))
+            poly_verts = transformed_area_polys.get(aid, [])
             if poly_verts and _point_in_polygon(ix, iy, poly_verts):
                 is_kept = True
                 break
@@ -658,14 +789,7 @@ def _cull_interior_video(
         # Pass 2 – proximity rescue
         rescued = False
         for aid in kept_area_ids:
-            area = areas.get(aid)
-            if not area:
-                continue
-            poly_verts = []
-            for v_id in area.get("vertices", []):
-                v = vertices.get(v_id)
-                if v:
-                    poly_verts.append((v.get("x", 0), v.get("y", 0)))
+            poly_verts = transformed_area_polys.get(aid, [])
             if not poly_verts:
                 continue
             min_dist = _min_dist_to_polygon(ix, iy, poly_verts)
@@ -699,6 +823,9 @@ def _cull_exterior_video(
     areas: dict,
     items: dict,
     holes: dict,
+    cm_per_unit: float,
+    rotation_radians: float,
+    pivot: Tuple[float, float],
     log_fn,
 ) -> Tuple[dict, dict, dict, dict, dict]:
     """
@@ -728,6 +855,32 @@ def _cull_exterior_video(
     new_areas    = dict(areas)
     new_lines    = dict(lines)
     new_vertices = dict(vertices)
+
+    transformed_vertices: Dict[str, dict] = {}
+    for vid, vertex in vertices.items():
+        if not isinstance(vertex, dict):
+            continue
+        tx, ty = _transform_plan_point_cm(
+            float(vertex.get("x", 0.0)),
+            float(vertex.get("y", 0.0)),
+            cm_per_unit,
+            rotation_radians,
+            pivot,
+        )
+        v_copy = dict(vertex)
+        v_copy["x"] = tx
+        v_copy["y"] = ty
+        transformed_vertices[vid] = v_copy
+
+    transformed_area_polys: Dict[str, List[Tuple[float, float]]] = {}
+    for aid, area in areas.items():
+        poly_verts: List[Tuple[float, float]] = []
+        for v_id in area.get("vertices", []):
+            v = transformed_vertices.get(str(v_id), transformed_vertices.get(v_id))
+            if v:
+                poly_verts.append((float(v.get("x", 0.0)), float(v.get("y", 0.0))))
+        if poly_verts:
+            transformed_area_polys[aid] = poly_verts
 
     log_fn(f"  ✓ Keeping ALL {len(new_areas)} areas  (structural mesh)")
     log_fn(f"  ✓ Keeping ALL {len(new_lines)} walls  (building shell)")
@@ -761,7 +914,13 @@ def _cull_exterior_video(
     for iid, item in items.items():
         item_type = str(item.get("type", "")).lower()
         item_name = str(item.get("name", "")).lower()
-        ix, iy    = item.get("x", 0), item.get("y", 0)
+        ix, iy = _transform_plan_point_cm(
+            float(item.get("x", 0)),
+            float(item.get("y", 0)),
+            cm_per_unit,
+            rotation_radians,
+            pivot,
+        )
 
         # Always keep floor/slab assets
         if any(kw in item_type or kw in item_name for kw in FLOOR_ITEM_KEYWORDS):
@@ -780,7 +939,11 @@ def _cull_exterior_video(
             continue
 
         # Item outside all room polygons → external → keep
-        is_outside = not _point_in_any_area(ix, iy, areas, vertices)
+        is_outside = True
+        for poly_verts in transformed_area_polys.values():
+            if _point_in_polygon(ix, iy, poly_verts):
+                is_outside = False
+                break
         if is_outside:
             new_items[iid] = item
             kept_exterior_items.append(f"{item.get('name', 'Unknown')} ({iid}) [outside rooms]")
@@ -876,7 +1039,16 @@ class VideoSceneOptimizer:
                     return payload
 
             fp_version = str(fp_data.get("version", "")).strip() if isinstance(fp_data, dict) else ""
-            camera_scale = 10.0 if fp_version == "2.0.0" else SCALE_METERS_TO_CM
+            cm_per_unit = _resolve_scene_cm_per_unit(fp_data)
+            plan_rotation_radians = _resolve_scene_rotation_radians(fp_data)
+            plan_pivot_cm = _resolve_scene_plan_pivot_cm(fp_data, cm_per_unit)
+            camera_cm_per_unit = _resolve_camera_cm_per_unit(payload)
+            self.log(
+                f"   Plan units: {cm_per_unit:.2f} cm/source unit | "
+                f"camera units: {camera_cm_per_unit:.2f} cm/source unit | "
+                f"rotation: {math.degrees(plan_rotation_radians):.1f}° | "
+                f"pivot: ({plan_pivot_cm[0]:.1f}, {plan_pivot_cm[1]:.1f})"
+            )
 
             # ── 2. Collect camera visibility samples from the animation path ──
             camera_samples: List[Dict[str, Any]] = []
@@ -897,13 +1069,25 @@ class VideoSceneOptimizer:
                         tjs = kf.get("threejs_camera_data")
                         if tjs and isinstance(tjs, dict) and "position" in tjs:
                             pos = tjs["position"]
-                            cam_x = float(pos.get("x", 0.0)) * camera_scale
-                            cam_y = float(pos.get("z", 0.0)) * camera_scale
+                            cam_x, cam_y = _transform_plan_point_cm(
+                                float(pos.get("x", 0.0)),
+                                float(pos.get("z", 0.0)),
+                                camera_cm_per_unit,
+                                plan_rotation_radians,
+                                plan_pivot_cm,
+                            )
                             dir_x, dir_y = 1.0, 0.0
                             look_at = tjs.get("lookAt")
                             if isinstance(look_at, dict):
-                                dx = float(look_at.get("x", cam_x / camera_scale)) * camera_scale - cam_x
-                                dy = float(look_at.get("z", cam_y / camera_scale)) * camera_scale - cam_y
+                                look_x, look_y = _transform_plan_point_cm(
+                                    float(look_at.get("x", pos.get("x", 0.0))),
+                                    float(look_at.get("z", pos.get("z", 0.0))),
+                                    camera_cm_per_unit,
+                                    plan_rotation_radians,
+                                    plan_pivot_cm,
+                                )
+                                dx = look_x - cam_x
+                                dy = look_y - cam_y
                                 mag = math.hypot(dx, dy)
                                 if mag > 1e-6:
                                     dir_x, dir_y = dx / mag, dy / mag
@@ -921,13 +1105,25 @@ class VideoSceneOptimizer:
                             })
                         elif "position" in kf:
                             pos = kf["position"]
-                            cam_x = float(pos.get("x", 0.0)) * camera_scale
-                            cam_y = float(pos.get("z", 0.0)) * camera_scale
+                            cam_x, cam_y = _transform_plan_point_cm(
+                                float(pos.get("x", 0.0)),
+                                float(pos.get("z", 0.0)),
+                                camera_cm_per_unit,
+                                plan_rotation_radians,
+                                plan_pivot_cm,
+                            )
                             dir_x, dir_y = 1.0, 0.0
                             target = kf.get("target")
                             if isinstance(target, dict):
-                                dx = float(target.get("x", cam_x / camera_scale)) * camera_scale - cam_x
-                                dy = float(target.get("z", cam_y / camera_scale)) * camera_scale - cam_y
+                                target_x, target_y = _transform_plan_point_cm(
+                                    float(target.get("x", pos.get("x", 0.0))),
+                                    float(target.get("z", pos.get("z", 0.0))),
+                                    camera_cm_per_unit,
+                                    plan_rotation_radians,
+                                    plan_pivot_cm,
+                                )
+                                dx = target_x - cam_x
+                                dy = target_y - cam_y
                                 mag = math.hypot(dx, dy)
                                 if mag > 1e-6:
                                     dir_x, dir_y = dx / mag, dy / mag
@@ -952,13 +1148,25 @@ class VideoSceneOptimizer:
                 if "threejs_camera" in payload and payload["threejs_camera"] is not None:
                     camera = payload["threejs_camera"]
                     pos = camera.get("position", {})
-                    cam_x = float(pos.get("x", 0)) * camera_scale
-                    cam_y = float(pos.get("z", 0)) * camera_scale
+                    cam_x, cam_y = _transform_plan_point_cm(
+                        float(pos.get("x", 0.0)),
+                        float(pos.get("z", 0.0)),
+                        camera_cm_per_unit,
+                        plan_rotation_radians,
+                        plan_pivot_cm,
+                    )
                     dir_x, dir_y = 1.0, 0.0
                     target = camera.get("target")
                     if isinstance(target, dict):
-                        dx = float(target.get("x", 0)) * camera_scale - cam_x
-                        dy = float(target.get("z", 0)) * camera_scale - cam_y
+                        target_x, target_y = _transform_plan_point_cm(
+                            float(target.get("x", pos.get("x", 0.0))),
+                            float(target.get("z", pos.get("z", 0.0))),
+                            camera_cm_per_unit,
+                            plan_rotation_radians,
+                            plan_pivot_cm,
+                        )
+                        dx = target_x - cam_x
+                        dy = target_y - cam_y
                         mag = math.hypot(dx, dy)
                         if mag > 1e-6:
                             dir_x, dir_y = dx / mag, dy / mag
@@ -993,11 +1201,40 @@ class VideoSceneOptimizer:
                     self.log("⚠️ Layered floor_plan_data found, but no usable layer could be selected.")
                     return payload
 
+                # Match the old single-floor video flow: once we isolate one layer
+                # for render, place it at ground level so it does not float at its
+                # original building altitude.
+                if not bool(fp_data.get("showAllFloors", True)):
+                    original_altitude = layer.get("altitude", 0)
+                    if isinstance(original_altitude, dict):
+                        original_altitude = original_altitude.get("length", 0)
+                    try:
+                        original_altitude_value = float(original_altitude)
+                    except Exception:
+                        original_altitude_value = 0.0
+                    if abs(original_altitude_value) > 1e-6:
+                        self.log(
+                            f"ℹ️ Flattening selected layer '{layer.get('name', target_layer_id)}' "
+                            f"altitude {original_altitude_value} to 0 for video render."
+                        )
+                    layer["altitude"] = 0
+
                 vertices = layer.get("vertices", {})
                 lines    = layer.get("lines",    {})
                 areas    = layer.get("areas",    {})
                 items    = layer.get("items",    {})
                 holes    = layer.get("holes",    {})
+                cull_vertices = {
+                    vid: _transform_plan_point_cm(
+                        float(v.get("x", 0.0)),
+                        float(v.get("y", 0.0)),
+                        cm_per_unit,
+                        plan_rotation_radians,
+                        plan_pivot_cm,
+                    )
+                    for vid, v in vertices.items()
+                    if isinstance(v, dict)
+                }
             else:
                 is_flat = True
                 self.log("ℹ️ No 'layers' key found. Trying flat structure...")
@@ -1012,6 +1249,17 @@ class VideoSceneOptimizer:
                 areas    = list_to_dict(fp_data.get("areas",    {}))
                 items    = list_to_dict(fp_data.get("items",    {}))
                 holes    = list_to_dict(fp_data.get("holes",    {}))
+                cull_vertices = {
+                    vid: _transform_plan_point_cm(
+                        float(v.get("x", 0.0)),
+                        float(v.get("y", 0.0)),
+                        cm_per_unit,
+                        plan_rotation_radians,
+                        plan_pivot_cm,
+                    )
+                    for vid, v in vertices.items()
+                    if isinstance(v, dict)
+                }
 
                 if not vertices and not areas:
                     self.log("⚠️ No vertices or areas found. Skipping.")
@@ -1032,9 +1280,9 @@ class VideoSceneOptimizer:
             for area_id, area in areas.items():
                 poly_verts = []
                 for v_id in area.get("vertices", []):
-                    v = vertices.get(v_id)
+                    v = cull_vertices.get(str(v_id), cull_vertices.get(v_id))
                     if v:
-                        poly_verts.append((v.get("x", 0), v.get("y", 0)))
+                        poly_verts.append((float(v[0]), float(v[1])) if isinstance(v, tuple) else (float(v.get("x", 0)), float(v.get("y", 0))))
                 if poly_verts:
                     xs = [p[0] for p in poly_verts]
                     ys = [p[1] for p in poly_verts]
@@ -1079,6 +1327,9 @@ class VideoSceneOptimizer:
                     areas,
                     items,
                     holes,
+                    cm_per_unit,
+                    plan_rotation_radians,
+                    plan_pivot_cm,
                     self.log,
                     max_view_dist_cm=max_view_dist_cm,
                 )
@@ -1089,7 +1340,15 @@ class VideoSceneOptimizer:
                     f"(Camera entirely outside building — windows will render BLACK)"
                 )
                 new_vertices, new_lines, new_areas, new_items, new_holes = _cull_exterior_video(
-                    vertices, lines, areas, items, holes, self.log
+                    vertices,
+                    lines,
+                    areas,
+                    items,
+                    holes,
+                    cm_per_unit,
+                    plan_rotation_radians,
+                    plan_pivot_cm,
+                    self.log,
                 )
 
             # ── 7. Summary ────────────────────────────────────────────────────

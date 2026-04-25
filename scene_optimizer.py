@@ -45,6 +45,9 @@ EXTERIOR_GLB_PATH_PREFIXES = ["glb-assets/exterior/", "asset-library/exterior/"]
 # Item proximity rescue tolerance (cm) — catches items slightly outside polygon
 ITEM_RESCUE_TOLERANCE_CM = 85.0
 
+# Extra visibility slack for items.  Partially visible furniture should stay.
+ITEM_VIEW_MARGIN_DEG = 15.0
+
 # Tolerance for matching vertex positions between rooms (cm)
 POSITION_TOLERANCE_CM = 1.0
 
@@ -120,6 +123,86 @@ def _resolve_scene_rotation_radians(fp_data: dict) -> float:
     return -math.radians(float(fp_data.get("directionangle", 0.0)))
 
 
+def _item_dimension_cm(
+    item: dict,
+    key: str,
+    default_cm: float = 100.0,
+    cm_per_unit: float = 1.0,
+) -> float:
+    """Read an item's dimension in centimetres from top-level or properties."""
+    raw = item.get(key, None)
+    if raw is None:
+        props = item.get("properties")
+        if isinstance(props, dict):
+            raw = props.get(key, None)
+
+    if isinstance(raw, dict):
+        if "length" in raw:
+            try:
+                return float(raw.get("length", default_cm))
+            except Exception:
+                return default_cm
+        if "value" in raw:
+            try:
+                return float(raw.get("value", default_cm))
+            except Exception:
+                return default_cm
+
+    try:
+        if raw is not None:
+            return float(raw) * cm_per_unit
+    except Exception:
+        pass
+    return default_cm
+
+
+def _item_footprint_radius_cm(item: dict, cm_per_unit: float = 1.0) -> float:
+    """
+    Approximate an item's footprint as a circle in plan view.
+    Half the diagonal gives a conservative keep radius.
+    The stored item dimensions follow the same source units as the plan data,
+    so we convert them to centimetres before using them in visibility tests.
+    """
+    width = max(_item_dimension_cm(item, "width", 100.0, cm_per_unit), 1.0)
+    depth = max(_item_dimension_cm(item, "depth", 100.0, cm_per_unit), 1.0)
+    return 0.5 * math.hypot(width, depth)
+
+
+def _item_visible_from_sample(
+    item: dict,
+    sample: Dict[str, Any],
+    item_x: float,
+    item_y: float,
+    max_view_dist_cm: float,
+    cm_per_unit: float = 1.0,
+) -> bool:
+    """Return True when the item's footprint overlaps the camera cone."""
+    cam_x = float(sample["cam_x"])
+    cam_y = float(sample["cam_y"])
+    cam_dir_x = float(sample["cam_dir_x"])
+    cam_dir_y = float(sample["cam_dir_y"])
+    fov_half_deg = float(sample["fov_half_deg"])
+
+    radius_cm = _item_footprint_radius_cm(item, cm_per_unit)
+    dist_cm = math.hypot(item_x - cam_x, item_y - cam_y)
+    if max(0.0, dist_cm - radius_cm) > max_view_dist_cm:
+        return False
+
+    angle_deg = math.degrees(
+        _angle_to_point(cam_x, cam_y, cam_dir_x, cam_dir_y, item_x, item_y)
+    )
+
+    if dist_cm < 1e-6:
+        angular_radius_deg = 90.0
+    else:
+        angular_radius_deg = math.degrees(
+            math.asin(min(1.0, radius_cm / max(dist_cm, 1.0)))
+        )
+
+    fov_limit_deg = fov_half_deg + ITEM_VIEW_MARGIN_DEG + angular_radius_deg
+    return angle_deg <= fov_limit_deg
+
+
 def _rotate_point_around_pivot(
     x: float,
     y: float,
@@ -167,6 +250,91 @@ def _transform_camera_point_cm(
         pivot[0],
         pivot[1],
     )
+
+
+def _point_to_segment_distance_2d(
+    px: float,
+    py: float,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+) -> float:
+    """Return the shortest 2-D distance from a point to a line segment."""
+    dx = bx - ax
+    dy = by - ay
+    seg_len_sq = (dx * dx) + (dy * dy)
+    if seg_len_sq < 1e-12:
+        return math.hypot(px - ax, py - ay)
+
+    t = (((px - ax) * dx) + ((py - ay) * dy)) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+    cx = ax + (t * dx)
+    cy = ay + (t * dy)
+    return math.hypot(px - cx, py - cy)
+
+
+def _segment_intersection_2d(
+    a1: Tuple[float, float],
+    a2: Tuple[float, float],
+    b1: Tuple[float, float],
+    b2: Tuple[float, float],
+) -> Optional[Tuple[float, float]]:
+    """Return the intersection point of two segments, or None."""
+    r_x = a2[0] - a1[0]
+    r_y = a2[1] - a1[1]
+    s_x = b2[0] - b1[0]
+    s_y = b2[1] - b1[1]
+    denom = (r_x * s_y) - (r_y * s_x)
+    if abs(denom) < 1e-9:
+        return None
+
+    qp_x = b1[0] - a1[0]
+    qp_y = b1[1] - a1[1]
+    t = ((qp_x * s_y) - (qp_y * s_x)) / denom
+    u = ((qp_x * r_y) - (qp_y * r_x)) / denom
+    if t < 0.0 or t > 1.0 or u < 0.0 or u > 1.0:
+        return None
+    return (a1[0] + (t * r_x), a1[1] + (t * r_y))
+
+
+def _segment_distance_2d(
+    a1: Tuple[float, float],
+    a2: Tuple[float, float],
+    b1: Tuple[float, float],
+    b2: Tuple[float, float],
+) -> float:
+    """Shortest 2-D distance between two line segments."""
+    if _segment_intersection_2d(a1, a2, b1, b2) is not None:
+        return 0.0
+    return min(
+        _point_to_segment_distance_2d(a1[0], a1[1], b1[0], b1[1], b2[0], b2[1]),
+        _point_to_segment_distance_2d(a2[0], a2[1], b1[0], b1[1], b2[0], b2[1]),
+        _point_to_segment_distance_2d(b1[0], b1[1], a1[0], a1[1], a2[0], a2[1]),
+        _point_to_segment_distance_2d(b2[0], b2[1], a1[0], a1[1], a2[0], a2[1]),
+    )
+
+
+def _camera_view_segment_2d(
+    cam_x: float,
+    cam_y: float,
+    cam_dir_x: float,
+    cam_dir_y: float,
+    cam_target_x: Optional[float] = None,
+    cam_target_y: Optional[float] = None,
+    max_view_dist_cm: float = DEFAULT_VIEW_DISTANCE_CM,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Build the camera's plan-view segment used for blocker culling."""
+    start = (float(cam_x), float(cam_y))
+    if cam_target_x is not None and cam_target_y is not None:
+        end = (float(cam_target_x), float(cam_target_y))
+        if math.hypot(end[0] - start[0], end[1] - start[1]) > 1e-6:
+            return start, end
+    end = (
+        float(cam_x) + (float(cam_dir_x) * max_view_dist_cm),
+        float(cam_y) + (float(cam_dir_y) * max_view_dist_cm),
+    )
+    return start, end
 
 
 def _resolve_scene_plan_pivot_cm(fp_data: dict, cm_per_unit: float) -> Tuple[float, float]:
@@ -804,6 +972,9 @@ def _cull_interior(
     cam_y: float = 0.0,
     cam_dir_x: float = 1.0,
     cam_dir_y: float = 0.0,
+    cam_target_x: Optional[float] = None,
+    cam_target_y: Optional[float] = None,
+    cam_height_m: float = 0.0,
     fov_half_deg: float = DEFAULT_FOV_HALF_DEG,
     max_view_dist_cm: float = DEFAULT_VIEW_DISTANCE_CM,
     meters_per_unit: float = 0.01,
@@ -851,6 +1022,20 @@ def _cull_interior(
     )
 
     fov_half_rad = math.radians(fov_half_deg)
+    camera_segment = _camera_view_segment_2d(
+        cam_x,
+        cam_y,
+        cam_dir_x,
+        cam_dir_y,
+        cam_target_x,
+        cam_target_y,
+        max_view_dist_cm,
+    )
+    log_fn(
+        f"  👁️ Camera blocker segment: "
+        f"({camera_segment[0][0]:.1f}, {camera_segment[0][1]:.1f}) -> "
+        f"({camera_segment[1][0]:.1f}, {camera_segment[1][1]:.1f})"
+    )
 
     # ── Step 1: Portal sweep — find rooms visible through active room's openings ─
     neighbour_ids = _collect_portal_visible_rooms(
@@ -956,23 +1141,37 @@ def _cull_interior(
             
         p1x, p1y = float(vd1["x"]), float(vd1["y"])
         p2x, p2y = float(vd2["x"]), float(vd2["y"])
-        
-        # Midpoint for distance check
-        mx, my = (p1x + p2x) / 2.0, (p1y + p2y) / 2.0
-        dist = math.hypot(mx - cam_x, my - cam_y)
-        
-        if dist > max_view_dist_cm:
-            culled_walls.append(f"Wall {lid} [dist {dist:.0f}cm > {max_view_dist_cm:.0f}cm]")
-            continue
 
-        # Walls on the active room boundary are part of the shell and should
-        # stay visible even when they fall behind the camera.
+        # The active room shell must always survive culling.  If we let the
+        # camera-ray blocker run first, it can delete the wall the viewer is
+        # actually looking at, which leaves the room open and visually broken.
         if wall_belongs_to_active_room(v1h, v2h):
             new_lines[lid] = line
             for vid in (v1h, v2h):
                 if vid not in new_vertices and vid in vertices:
                     new_vertices[vid] = vertices[vid]
                     kept_vertex_ids.add(vid)
+            continue
+
+        wall_thickness_cm = _source_length_to_cm(
+            line.get("properties", {}).get("thickness", 20.0),
+            cm_per_unit,
+        )
+        wall_block_tol_cm = max(8.0, wall_thickness_cm * 0.5)
+        # Fix: only cull if the camera point itself is too close to the wall (stuck inside)
+        dist_to_cam = _point_to_segment_distance_2d(cam_x, cam_y, p1x, p1y, p2x, p2y)
+        if dist_to_cam <= wall_block_tol_cm:
+            culled_walls.append(
+                f"Wall {lid} [camera is stuck inside wall (dist {dist_to_cam:.1f}cm)]"
+            )
+            continue
+
+        # Midpoint for distance check
+        mx, my = (p1x + p2x) / 2.0, (p1y + p2y) / 2.0
+        dist = math.hypot(mx - cam_x, my - cam_y)
+        
+        if dist > max_view_dist_cm:
+            culled_walls.append(f"Wall {lid} [dist {dist:.0f}cm > {max_view_dist_cm:.0f}cm]")
             continue
 
         # FOV check using segment-sampling helper
@@ -1037,36 +1236,49 @@ def _cull_interior(
 
         ix, iy = float(item.get("x", 0)), float(item.get("y", 0))
 
-        # Smart rescue for active-room furniture near the wall line.
-        # These items are visually part of the current room even if their
-        # center point falls outside the forward FOV cone.
+        # Keep anything that is physically inside the active room.  For image
+        # renders the user expects the room to stay furnished even when the
+        # camera is pointed toward a window or opposite wall.
         if active_room_poly and _point_in_polygon(ix, iy, active_room_poly):
-            boundary_dist = _min_dist_to_polygon(ix, iy, active_room_poly)
-            if boundary_dist <= ITEM_RESCUE_TOLERANCE_CM:
-                new_items[iid] = item
-                log_fn(
-                    f"  ✨ Keeping active-room boundary item: "
-                    f"'{item.get('name', 'Unknown')}' ({iid}) dist={boundary_dist:.0f}cm"
+            new_items[iid] = item
+            log_fn(f"  ✓ Item in active room: '{item.get('name', 'Unknown')}' ({iid})")
+            continue
+
+        item_alt_m = _item_altitude_m(item, meters_per_unit)
+        if item_alt_m <= cam_height_m + 1.25:
+            item_x_cm = float(item.get("x", 0.0))
+            item_y_cm = float(item.get("y", 0.0))
+            item_radius_cm = max(_item_footprint_radius_cm(item, cm_per_unit), 25.0)
+            # Fix: only cull if the camera point itself is too close to the item (stuck inside)
+            dist_to_cam = math.hypot(item_x_cm - cam_x, item_y_cm - cam_y)
+            if dist_to_cam <= item_radius_cm:
+                culled_items.append(
+                    f"{item.get('name', 'Unknown')} ({iid}) [camera is stuck inside item (dist {dist_to_cam:.1f}cm)]"
                 )
                 continue
 
-        # ── Distance & FOV Culling (30m Range & Camera View) ──
-        # Only keep assets that are within the 30m range AND generally in front 
-        # of the camera (within FOV + safety margin).
-        dist = math.hypot(ix - cam_x, iy - cam_y)
-        angle_rad = _angle_to_point(cam_x, cam_y, cam_dir_x, cam_dir_y, ix, iy)
-        angle_deg = math.degrees(angle_rad)
-        
-        # We use a generous margin (e.g. 15°) beyond the actual FOV half-angle
-        # to ensure side-assets are kept for peripheral vision/reflections.
-        fov_limit = fov_half_deg + 15.0 
-
-        if dist > max_view_dist_cm:
-            culled_items.append(f"{item.get('name', 'Unknown')} ({iid}) [out of {max_view_dist_cm/100:.0f}m range: {dist:.0f}cm]")
-            continue
-            
-        if angle_deg > fov_limit:
-            culled_items.append(f"{item.get('name', 'Unknown')} ({iid}) [outside FOV sector: {angle_deg:.1f}°]")
+        # Keep items when their footprint overlaps the camera cone.
+        # This avoids dropping cabinets/sofas that are only partially visible.
+        camera_sample = {
+            "cam_x": cam_x,
+            "cam_y": cam_y,
+            "cam_dir_x": cam_dir_x,
+            "cam_dir_y": cam_dir_y,
+            "fov_half_deg": fov_half_deg,
+        }
+        if not _item_visible_from_sample(item, camera_sample, ix, iy, max_view_dist_cm, cm_per_unit):
+            dist = math.hypot(ix - cam_x, iy - cam_y)
+            angle_deg = math.degrees(
+                _angle_to_point(cam_x, cam_y, cam_dir_x, cam_dir_y, ix, iy)
+            )
+            if dist > max_view_dist_cm:
+                culled_items.append(
+                    f"{item.get('name', 'Unknown')} ({iid}) [out of {max_view_dist_cm/100:.0f}m range: {dist:.0f}cm]"
+                )
+            else:
+                culled_items.append(
+                    f"{item.get('name', 'Unknown')} ({iid}) [outside FOV sector: {angle_deg:.1f}°]"
+                )
             continue
 
         # Pass 1 — strict polygon containment
@@ -1506,7 +1718,29 @@ class SceneOptimizer:
             cam_source = "none"
 
             if "threejs_camera" in payload and "position" in payload["threejs_camera"]:
-                pos          = payload["threejs_camera"]["position"]
+                tj = payload.get("threejs_camera", {})
+                pos = tj.get("position")
+                tgt = tj.get("target")
+
+                # ── 2a. Move camera frontwards ────────────────────────────────
+                # Push the camera forward along its look direction by a fixed amount.
+                # This helps to get "inside" the room and avoid culling the wall
+                # the camera is currently attached to.
+                # Reverted: zoom-based logic. Now using simple fixed push.
+                PUSH_DISTANCE_CM = 100.0 
+                if PUSH_DISTANCE_CM > 0.0 and pos and tgt:
+                    px, py, pz = float(pos["x"]), float(pos["y"]), float(pos["z"])
+                    tx, ty, tz = float(tgt["x"]), float(tgt["y"]), float(tgt["z"])
+                    dx, dy, dz = tx - px, ty - py, tz - pz
+                    mag = math.hypot(math.hypot(dx, dy), dz)
+                    if mag > 1e-6:
+                        ux, uy, uz = dx/mag, dy/mag, dz/mag
+                        push_m = min(PUSH_DISTANCE_CM / 100.0, mag * 0.5)
+                        pos["x"] = px + ux * push_m
+                        pos["y"] = py + uy * push_m
+                        pos["z"] = pz + uz * push_m
+                        self.log(f"🚀 Pushing camera frontwards by {PUSH_DISTANCE_CM}cm")
+
                 cam_x, cam_y = _transform_camera_point_cm(
                     float(pos.get("x", 0.0)),
                     float(pos.get("z", 0.0)),
@@ -1564,6 +1798,25 @@ class SceneOptimizer:
                     self.log(f"📐 FOV: default ±{cam_fov_half_deg:.0f}°")
 
             cam_view_dist_cm = float(payload.get("interior_view_dist_cm", DEFAULT_VIEW_DISTANCE_CM))
+
+            cam_target_x: Optional[float] = None
+            cam_target_y: Optional[float] = None
+            cam_target_source = "fallback"
+            if isinstance(tgt, dict) and "x" in tgt and "z" in tgt:
+                cam_target_x, cam_target_y = _transform_camera_point_cm(
+                    float(tgt.get("x", 0.0)),
+                    float(tgt.get("z", 0.0)),
+                    plan_rotation_radians,
+                    plan_pivot_cm,
+                )
+                cam_target_source = "threejs_target"
+            else:
+                cam_target_x = cam_x + (cam_dir_x * cam_view_dist_cm)
+                cam_target_y = cam_y + (cam_dir_y * cam_view_dist_cm)
+            self.log(
+                f"📐 Camera target: ({cam_target_x:.1f}, {cam_target_y:.1f}) cm "
+                f"source={cam_target_source}"
+            )
 
             # ── 2b. Top-view: override camera XY to home centroid ─────────────
             if is_top_view:
@@ -2034,6 +2287,9 @@ class SceneOptimizer:
                             self.log,
                             cam_x=cam_x, cam_y=cam_y,
                             cam_dir_x=cam_dir_x, cam_dir_y=cam_dir_y,
+                            cam_target_x=cam_target_x,
+                            cam_target_y=cam_target_y,
+                            cam_height_m=cam_height_m,
                             fov_half_deg=cam_fov_half_deg,
                             max_view_dist_cm=cam_view_dist_cm,
                             meters_per_unit=meters_per_unit,
@@ -2096,6 +2352,9 @@ class SceneOptimizer:
                         cam_y=cam_y,
                         cam_dir_x=cam_dir_x,
                         cam_dir_y=cam_dir_y,
+                        cam_target_x=cam_target_x,
+                        cam_target_y=cam_target_y,
+                        cam_height_m=cam_height_m,
                         fov_half_deg=cam_fov_half_deg,
                         max_view_dist_cm=cam_view_dist_cm,
                         meters_per_unit=meters_per_unit,

@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import uuid
+import hashlib
 import subprocess
 import requests
 import tempfile
@@ -48,10 +49,10 @@ COLOR_BLUE = "\033[94m"
 COLOR_RESET = "\033[0m"
 
 # --- ASSET & TEXTURE MASTERY API CONFIGURATION ---
-ASSETS_AND_TEXTURE_API_KEY = "zrsk_beta_8a1d4c7e6f2b9a5d3c1e0f8b6a4d"
+ASSETS_AND_TEXTURE_API_KEY         = "zrsk_dev_41fbb72c9a0e5f1c8d2a9b6d4e8f3c2"
 ASSETS_AND_TEXTURE_API_HEADER_NAME = "ZRealtyServiceApiKey"
-ASSET_ENDPOINT = "http://216.48.178.133:4050/api/v1/AssetMaster/GetAllAssets3D"
-TEXTURE_ENDPOINT = "http://216.48.178.133:4050/api/v1/TextureMaster/GetAllTextureLibraries"
+ASSET_ENDPOINT   = "http://216.48.182.24:4050/api/v1/AssetMaster/GetAllAssets3D"
+TEXTURE_ENDPOINT = "http://216.48.182.24:4050/api/v1/TextureMaster/GetAllTextureLibraries"
 
 # --- BASE DIRECTORY ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -1021,7 +1022,9 @@ class GenerationPayload(BaseModel):
     ambient_light: Optional[AmbientLight] = None
     aspect_ratio: str
     render_quality: str
-    timestamp: int
+    # Some callers omit this field for image renders; keep it optional so the
+    # request can still start instead of failing validation up front.
+    timestamp: int = 0
     hdri_filename: Optional[str] = "kloppenheim_06_puresky_4k.exr"
     # Camera data fields (optional, will be extracted from JSON)
     threejs_camera: Optional[Dict[str, Any]] = None
@@ -1256,6 +1259,163 @@ def _repair_glb_file(filepath: str):
         print(f"{COLOR_RED}  ❌ Repair error: {e}{COLOR_RESET}")
         return False
 
+def _check_glb_for_draco(filepath: str) -> bool:
+    """
+    Checks if a GLB file contains Draco mesh compression.
+    """
+    if not os.path.exists(filepath):
+        return False
+    try:
+        with open(filepath, 'rb') as f:
+            magic = f.read(4)
+            if magic != b'glTF':
+                return False
+            f.read(8)
+            chunk_length = struct.unpack('<I', f.read(4))[0]
+            chunk_type = f.read(4)
+            if chunk_type != b'JSON':
+                return False
+            json_bytes = f.read(chunk_length)
+            json_text = json_bytes.decode('utf-8', errors='ignore')
+            return "KHR_draco_mesh_compression" in json_text
+    except Exception as e:
+        print(f"{COLOR_YELLOW}  ⚠️  Warning: Could not inspect GLB {os.path.basename(filepath)}: {e}{COLOR_RESET}")
+        return False
+
+def _build_godot_compatible_glb_path(source_url: str, local_path: str) -> str:
+    """
+    Builds a stable output path for a Godot-compatible GLB copy.
+    """
+    compat_dir = os.path.abspath(os.path.join(ASSET_DOWNLOAD_DIR, "_godot_compatible"))
+    os.makedirs(compat_dir, exist_ok=True)
+
+    source_key = source_url or local_path or ""
+    digest = hashlib.sha1(source_key.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    base_name = os.path.splitext(os.path.basename(local_path))[0] or "asset"
+    return os.path.join(compat_dir, f"{digest}_{base_name}_nodraco.glb")
+
+def _convert_draco_glb_to_plain_glb(input_path: str, output_path: str) -> tuple[bool, str]:
+    """
+    Uses a small Python helper to decode Draco-compressed meshes into a plain GLB.
+    """
+    script_path = os.path.join(SCRIPT_DIR, "tools", "decompress_draco_glb.py")
+    if not os.path.exists(script_path):
+        return False, f"Missing Draco conversion helper: {script_path}"
+
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        timeout_seconds = int(os.getenv("DRACO_GLB_CONVERSION_TIMEOUT_SECONDS", "300"))
+        result = subprocess.run(
+            [sys.executable, script_path, input_path, output_path],
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()
+            if not message:
+                message = f"Node helper exited with code {result.returncode}"
+            return False, message
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            return False, "Draco conversion finished but output file was not created"
+        return True, ""
+    except FileNotFoundError:
+        return False, "Python interpreter was not found"
+    except subprocess.TimeoutExpired:
+        return False, f"Draco conversion timed out after {timeout_seconds}s"
+    except Exception as e:
+        return False, str(e)
+
+def _convert_glb_webp_textures_to_png(input_path: str, output_path: str) -> tuple[bool, str]:
+    """
+    Rewrites embedded WebP textures in a GLB as PNGs.
+    """
+    script_path = os.path.join(SCRIPT_DIR, "tools", "convert_glb_webp_to_png.py")
+    if not os.path.exists(script_path):
+        return False, f"Missing WebP conversion helper: {script_path}"
+
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        result = subprocess.run(
+            [sys.executable, script_path, input_path, output_path],
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=int(os.getenv("GLB_WEBP_CONVERSION_TIMEOUT_SECONDS", "300")),
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()
+            if not message:
+                message = f"Python helper exited with code {result.returncode}"
+            return False, message
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            return False, "WebP conversion finished but output file was not created"
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "WebP conversion timed out"
+    except Exception as e:
+        return False, str(e)
+
+def _ensure_godot_compatible_glb(source_url: str, local_path: str) -> str:
+    """
+    Converts Draco-compressed GLBs and embedded WebP textures into a Godot-friendly GLB.
+    Returns the original path if conversion is not needed or fails.
+    """
+    if not local_path or not isinstance(local_path, str):
+        return local_path
+    if not local_path.lower().endswith(".glb"):
+        return local_path
+    draco_present = _check_glb_for_draco(local_path)
+    webp_present = _check_glb_for_webp(local_path)
+    if not draco_present and not webp_present:
+        return local_path
+
+    current_path = local_path
+    show_details = os.getenv("ASSETS_DETAIL_PRINT", "false").lower() == "true"
+
+    if draco_present:
+        compatible_path = _build_godot_compatible_glb_path(source_url, local_path)
+        needs_draco_convert = (
+            not os.path.exists(compatible_path)
+            or os.path.getsize(compatible_path) == 0
+            or _check_glb_for_draco(compatible_path)
+            or _check_glb_for_webp(compatible_path)
+        )
+        if needs_draco_convert:
+            if show_details:
+                print(f"{COLOR_YELLOW}  ↻ Draco GLB detected, converting for Godot:{COLOR_RESET} {os.path.basename(local_path)}")
+            ok, error = _convert_draco_glb_to_plain_glb(current_path, compatible_path)
+            if not ok:
+                print(f"{COLOR_YELLOW}  ⚠️  Draco conversion failed, keeping original GLB:{COLOR_RESET} {os.path.basename(local_path)} ({error})")
+                return local_path
+        current_path = compatible_path
+
+    if _check_glb_for_webp(current_path):
+        png_tmp_path = current_path + ".pngtmp"
+        if show_details:
+            print(f"{COLOR_YELLOW}  ↻ WebP textures detected, converting to PNG:{COLOR_RESET} {os.path.basename(current_path)}")
+        ok, error = _convert_glb_webp_textures_to_png(current_path, png_tmp_path)
+        if ok:
+            os.replace(png_tmp_path, current_path)
+        else:
+            print(f"{COLOR_YELLOW}  ⚠️  WebP texture conversion failed, keeping current GLB:{COLOR_RESET} {os.path.basename(current_path)} ({error})")
+            if os.path.exists(png_tmp_path):
+                try:
+                    os.remove(png_tmp_path)
+                except OSError:
+                    pass
+            if draco_present and current_path != local_path:
+                # Keep the Draco-decoded file even if texture conversion failed.
+                if source_url:
+                    _add_to_asset_url_map(source_url, current_path)
+                return current_path
+            return local_path
+
+    if source_url:
+        _add_to_asset_url_map(source_url, current_path)
+    return current_path
+
 def _convert_glb_path_to_url(glb_path: str) -> str:
     """
     Converts a relative GLB path to a full Azure Blob Storage URL.
@@ -1296,6 +1456,7 @@ def _timed_download_worker(url: str, context: str = ""):
         if cached_path.lower().endswith('.glb'):
             if _check_glb_for_webp(cached_path):
                 _repair_glb_file(cached_path)
+            cached_path = _ensure_godot_compatible_glb(cleaned_url, cached_path)
         
         duration = time.monotonic() - start_time
         print(f"{COLOR_GREEN}✓ {context} Using cached:{COLOR_RESET} {os.path.basename(cleaned_url)} {COLOR_YELLOW}({duration:.3f}s){COLOR_RESET}")
@@ -1326,6 +1487,7 @@ def _timed_download_worker(url: str, context: str = ""):
             if cleaned_url.lower().endswith('.glb'):
                 if _check_glb_for_webp(local_path):
                     _repair_glb_file(local_path)
+                local_path = _ensure_godot_compatible_glb(cleaned_url, local_path)
 
 
             # Save URL-to-local-path mapping

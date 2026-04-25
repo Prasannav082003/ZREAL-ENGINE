@@ -1,5 +1,14 @@
 # install torch
 pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
-
+ 
+# working here
+.\venv\Scripts\python.exe -m pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+ 
 #check setup isnide venv run this comment 
-python gpu_tensor_test.py
+.\venv\Scripts\python.exe gpu_tensor_test.py
+ 
+# works here
+.\venv\Scripts\python.exe gpu_tensor_test.py
+ 
+# run server
+.\venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
