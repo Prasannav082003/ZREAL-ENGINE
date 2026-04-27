@@ -1722,28 +1722,38 @@ class SceneOptimizer:
                 pos = tj.get("position")
                 tgt = tj.get("target")
 
-                # ── 2a. Move camera frontwards ────────────────────────────────
-                # Push the camera forward along its look direction by a fixed amount.
-                # This helps to get "inside" the room and avoid culling the wall
-                # the camera is currently attached to.
-                # Reverted: zoom-based logic. Now using simple fixed push.
-                PUSH_DISTANCE_CM = 100.0 
-                if PUSH_DISTANCE_CM > 0.0 and pos and tgt:
-                    px, py, pz = float(pos["x"]), float(pos["y"]), float(pos["z"])
-                    tx, ty, tz = float(tgt["x"]), float(tgt["y"]), float(tgt["z"])
-                    dx, dy, dz = tx - px, ty - py, tz - pz
-                    mag = math.hypot(math.hypot(dx, dy), dz)
+                # ── 2a. Apply a small cull-only forward offset ───────────────
+                # Keep the authored camera position intact for the final image.
+                # We only nudge the culling sample a little bit forward so a
+                # camera that is flush against a wall does not remove the wall
+                # or nearby assets it is meant to see.
+                cull_pos = dict(pos) if isinstance(pos, dict) else None
+                PUSH_DISTANCE_CM = 20.0
+                if not is_top_view and PUSH_DISTANCE_CM > 0.0 and cull_pos and tgt:
+                    px = float(cull_pos.get("x", 0.0))
+                    pz = float(cull_pos.get("z", 0.0))
+                    tx = float(tgt.get("x", 0.0))
+                    tz = float(tgt.get("z", 0.0))
+                    dx, dz = tx - px, tz - pz
+                    mag = math.hypot(dx, dz)
                     if mag > 1e-6:
-                        ux, uy, uz = dx/mag, dy/mag, dz/mag
-                        push_m = min(PUSH_DISTANCE_CM / 100.0, mag * 0.5)
-                        pos["x"] = px + ux * push_m
-                        pos["y"] = py + uy * push_m
-                        pos["z"] = pz + uz * push_m
-                        self.log(f"🚀 Pushing camera frontwards by {PUSH_DISTANCE_CM}cm")
+                        ux, uz = dx / mag, dz / mag
+                        push_m = min(PUSH_DISTANCE_CM / 100.0, mag * 0.15)
+                        cull_pos["x"] = px + ux * push_m
+                        cull_pos["z"] = pz + uz * push_m
+                        self.log(
+                            f"🚀 Applying cull-only forward offset of {PUSH_DISTANCE_CM:.0f}cm"
+                        )
+
+                cull_x = float(pos.get("x", 0.0)) if isinstance(pos, dict) else 0.0
+                cull_z = float(pos.get("z", 0.0)) if isinstance(pos, dict) else 0.0
+                if isinstance(cull_pos, dict):
+                    cull_x = float(cull_pos.get("x", cull_x))
+                    cull_z = float(cull_pos.get("z", cull_z))
 
                 cam_x, cam_y = _transform_camera_point_cm(
-                    float(pos.get("x", 0.0)),
-                    float(pos.get("z", 0.0)),
+                    cull_x,
+                    cull_z,
                     plan_rotation_radians,
                     plan_pivot_cm,
                 )

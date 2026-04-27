@@ -2458,6 +2458,44 @@ func _apply_light_fixture_emission(node: Node3D, light_color: Color, emission_en
 				applied = true
 	return applied
 
+func _normalize_material_label(value: String) -> String:
+	var text := str(value).strip_edges().to_lower()
+	var normalized := ""
+	var allowed := "abcdefghijklmnopqrstuvwxyz0123456789_"
+	for i in range(text.length()):
+		var ch := text.substr(i, 1)
+		if ch in allowed:
+			normalized += ch
+	return normalized
+
+func _material_key_matches_surface(key: String, mat_name: String, surface_name: String) -> bool:
+	# Keep material overrides surgical: only exact-name matches should win.
+	# This avoids one bookshelf texture update bleeding into every similarly
+	# named mesh part that happens to share a loose substring match.
+	var key_norm := _normalize_material_label(key)
+	if key_norm == "":
+		return false
+
+	for candidate in [mat_name, surface_name]:
+		var candidate_norm := _normalize_material_label(candidate)
+		if candidate_norm != "" and candidate_norm == key_norm:
+			return true
+
+	return false
+
+func _material_key_is_generic(key: String) -> bool:
+	var key_norm := _normalize_material_label(key)
+	return key_norm in [
+		"wood",
+		"material",
+		"materials",
+		"default",
+		"surface",
+		"surfaces",
+		"mat",
+		"texture",
+	]
+
 func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB, final_scale: Vector3) -> void:
 	if item.get("is_exterior_black", false):
 		return
@@ -2753,6 +2791,11 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 						# Material overrides per surface
 						if item.has("materials") and typeof(item["materials"]) == TYPE_DICTIONARY:
 							var item_mats = item["materials"]
+							var applied_material_keys = {}
+							var limit_single_generic_key = item_mats.size() == 1
+							if limit_single_generic_key:
+								var only_key = str(item_mats.keys()[0])
+								limit_single_generic_key = _material_key_is_generic(only_key)
 							var meshes    = _get_all_meshes(node)
 							for m in meshes:
 								if not m.mesh: continue
@@ -2761,22 +2804,20 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 									if mat and mat is StandardMaterial3D:
 										var mat_name       = str(mat.resource_name)
 										var surface_name   = str(m.mesh.surface_get_name(i))
-										var mat_name_l     = mat_name.to_lower()
-										var surface_name_l = surface_name.to_lower()
 
 										var matched_key = ""
 										for key in item_mats:
-											var key_l = str(key).to_lower()
-											if key_l == "": continue
-											if (mat_name_l != "" and (key_l in mat_name_l or mat_name_l in key_l)) \
-											or (surface_name_l != "" and (key_l in surface_name_l or surface_name_l in key_l)):
+											if _material_key_matches_surface(str(key), mat_name, surface_name):
 												matched_key = key
 												break
 
-										if matched_key == "" and item_mats.size() == 1:
+										if matched_key == "" and item_mats.size() == 1 and m.mesh.get_surface_count() == 1:
 											matched_key = item_mats.keys()[0]
 
 										if matched_key != "":
+											var matched_key_text = str(matched_key)
+											if applied_material_keys.has(matched_key_text):
+												continue
 											var mat_opt = item_mats[matched_key]
 											if typeof(mat_opt) == TYPE_DICTIONARY:
 												var new_mat  = mat.duplicate()
@@ -2864,6 +2905,12 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 
 												if modified:
 													m.set_surface_override_material(i, new_mat)
+													applied_material_keys[matched_key_text] = true
+													if limit_single_generic_key:
+														break
+
+								if limit_single_generic_key and applied_material_keys.size() > 0:
+									break
 
 						_add_light_fixture_effect(node, item, aabb, final_scale)
 
