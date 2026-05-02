@@ -10,6 +10,8 @@ from scene_optimizer import (
     _resolve_scene_rotation_radians,
     _resolve_scene_plan_pivot_cm,
     _transform_plan_point_cm,
+    _is_elevation_asset,
+    STRICT_IMAGE_PORTAL_ROOM_LIMIT,
 )
 
 # Configuration
@@ -283,6 +285,7 @@ def _collect_portal_visible_rooms(
     max_dist_cm: float,
     log_fn,
     sample_label: str = "",
+    strict_room_limit: int = 0,
 ) -> Set[str]:
     """Collect rooms visible through the active room's portals."""
     prefix = f"{sample_label} " if sample_label else ""
@@ -290,7 +293,40 @@ def _collect_portal_visible_rooms(
 
     active_verts: Set[str] = set(str(v) for v in areas[active_area_id].get("vertices", []))
     visible_rooms: Set[str] = set()
+    room_scores: Dict[str, Tuple[float, float, float]] = {}
     effective_fov = fov_half_rad + math.radians(PORTAL_ANGLE_MARGIN_DEG)
+
+    def _area_centroid(a_id: str) -> Optional[Tuple[float, float]]:
+        area = areas.get(a_id)
+        if not area:
+            return None
+        pts: List[Tuple[float, float]] = []
+        for v_id in area.get("vertices", []):
+            v = vertices.get(str(v_id))
+            if v:
+                pts.append((float(v["x"]), float(v["y"])))
+        if not pts:
+            return None
+        return (
+            sum(x for x, _ in pts) / len(pts),
+            sum(y for _, y in pts) / len(pts),
+        )
+
+    def _register_room_candidate(
+        room_id: str,
+        kind_bias: float,
+        room_centroid: Optional[Tuple[float, float]],
+        portal_dist_cm: float,
+    ) -> None:
+        if room_id == active_area_id or room_centroid is None:
+            return
+        room_angle_deg = math.degrees(
+            _angle_to_point(cam_x, cam_y, dir_x, dir_y, room_centroid[0], room_centroid[1])
+        )
+        score = (kind_bias, abs(room_angle_deg), portal_dist_cm)
+        current = room_scores.get(room_id)
+        if current is None or score < current:
+            room_scores[room_id] = score
 
     for lid, line in lines.items():
         v_ids = [str(v) for v in line.get("vertices", [])[:2]]
@@ -332,7 +368,9 @@ def _collect_portal_visible_rooms(
 
             beyond = _rooms_beyond_portal(line, active_area_id, areas, vertices)
             if beyond:
-                visible_rooms.update(beyond)
+                for aid in beyond:
+                    centroid = _area_centroid(aid)
+                    _register_room_candidate(aid, 0.0, centroid, dist)
 
         # (b) Hidden walls (entire wall spans acts as a portal)
         if is_hidden:
@@ -347,7 +385,23 @@ def _collect_portal_visible_rooms(
                     if _portal_visible_in_fov(cam_x, cam_y, dir_x, dir_y, effective_fov, p1x, p1y, p2x, p2y):
                         beyond = _rooms_beyond_portal(line, active_area_id, areas, vertices)
                         if beyond:
-                            visible_rooms.update(beyond)
+                            for aid in beyond:
+                                centroid = _area_centroid(aid)
+                                _register_room_candidate(aid, 0.1, centroid, dist)
+
+    if room_scores:
+        limit = strict_room_limit if strict_room_limit > 0 else STRICT_IMAGE_PORTAL_ROOM_LIMIT
+        ordered_rooms = sorted(room_scores.items(), key=lambda kv: kv[1])[:limit]
+        visible_rooms = {room_id for room_id, _ in ordered_rooms}
+        log_fn(
+            f"  Portal clamp: keeping {len(visible_rooms)} neighbour room(s) "
+            f"out of {len(room_scores)} candidate(s)"
+        )
+        for room_id, score in ordered_rooms:
+            log_fn(
+                f"     • {areas.get(room_id, {}).get('name', room_id)} ({room_id}) "
+                f"score={score[0]:.2f}/{score[1]:.1f}/{score[2]:.0f}"
+            )
 
     return visible_rooms
 
@@ -483,12 +537,12 @@ def _item_dimension_cm(
     if isinstance(raw, dict):
         if "length" in raw:
             try:
-                return float(raw.get("length", default_cm))
+                return float(raw.get("length", default_cm)) * cm_per_unit
             except Exception:
                 return default_cm
         if "value" in raw:
             try:
-                return float(raw.get("value", default_cm))
+                return float(raw.get("value", default_cm)) * cm_per_unit
             except Exception:
                 return default_cm
     try:
@@ -928,6 +982,16 @@ def _cull_exterior_video(
             log_fn(f"  🛡️ Preserving Floor Asset: '{item.get('name')}' ({iid})")
             continue
 
+        # Always keep elevation assets - building shell geometry should never
+        # disappear in video renders.
+        if _is_elevation_asset(item):
+            new_items[iid] = item
+            log_fn(
+                f"  🏛️ Preserving Elevation Asset (never culled): "
+                f"'{item.get('name')}' ({iid})"
+            )
+            continue
+
         # Keep exterior-named assets (roof, grill, balcony, etc.) — by keyword
         if _is_exterior_asset_video(item):
             new_items[iid] = item
@@ -1319,9 +1383,17 @@ class VideoSceneOptimizer:
                 for aid in active_area_ids:
                     self.log(f"     ✓ {areas[aid].get('name', 'Unknown')} ({aid})")
 
+                portal_samples = active_samples
+                if len(active_area_ids) == 1 and len(active_samples) > 1:
+                    portal_samples = [active_samples[0]]
+                    self.log(
+                        "   Single-room path detected. Using the first sample "
+                        "for image-like portal culling."
+                    )
+
                 new_vertices, new_lines, new_areas, new_items, new_holes = _cull_interior_video(
                     active_area_ids,
-                    active_samples,
+                    portal_samples,
                     vertices,
                     lines,
                     areas,

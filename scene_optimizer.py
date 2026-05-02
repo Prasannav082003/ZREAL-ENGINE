@@ -48,6 +48,17 @@ ITEM_RESCUE_TOLERANCE_CM = 85.0
 # Extra visibility slack for items.  Partially visible furniture should stay.
 ITEM_VIEW_MARGIN_DEG = 15.0
 
+# Image renders should be noticeably stricter than the generic item rule.
+# This trims away furnishings that sit inside the same room polygon but are
+# not meaningfully present in the camera's view.
+STRICT_IMAGE_ITEM_VIEW_MARGIN_DEG = 0.0
+STRICT_IMAGE_ITEM_RESCUE_TOLERANCE_CM = 20.0
+
+# Image renders should also be stricter about cross-room expansion.
+# Keep only the single best portal-connected neighboring room instead of
+# every room reachable from the active room.
+STRICT_IMAGE_PORTAL_ROOM_LIMIT = 1
+
 # Tolerance for matching vertex positions between rooms (cm)
 POSITION_TOLERANCE_CM = 1.0
 
@@ -123,6 +134,112 @@ def _resolve_scene_rotation_radians(fp_data: dict) -> float:
     return -math.radians(float(fp_data.get("directionangle", 0.0)))
 
 
+def _parse_aspect_ratio(raw_value: Any) -> Optional[float]:
+    """Parse an aspect ratio as width / height from common encodings."""
+    if raw_value is None:
+        return None
+
+    if isinstance(raw_value, (int, float)):
+        value = float(raw_value)
+        return value if value > 0.0 else None
+
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return None
+        if ":" in text:
+            parts = text.split(":")
+            if len(parts) == 2:
+                try:
+                    width = float(parts[0].strip())
+                    height = float(parts[1].strip())
+                    if width > 0.0 and height > 0.0:
+                        return width / height
+                except Exception:
+                    return None
+        try:
+            value = float(text)
+            return value if value > 0.0 else None
+        except Exception:
+            return None
+
+    if isinstance(raw_value, dict):
+        width = raw_value.get("width", raw_value.get("w"))
+        height = raw_value.get("height", raw_value.get("h"))
+        if width is not None and height is not None:
+            try:
+                width_f = float(width)
+                height_f = float(height)
+                if width_f > 0.0 and height_f > 0.0:
+                    return width_f / height_f
+            except Exception:
+                pass
+        if "x" in raw_value and "y" in raw_value:
+            try:
+                width_f = float(raw_value.get("x"))
+                height_f = float(raw_value.get("y"))
+                if width_f > 0.0 and height_f > 0.0:
+                    return width_f / height_f
+            except Exception:
+                pass
+
+    return None
+
+
+def _resolve_scene_aspect_ratio(payload: dict) -> Optional[float]:
+    """Resolve the render aspect ratio from payload fields when available."""
+    if not isinstance(payload, dict):
+        return None
+
+    candidates = [payload.get("aspect_ratio"), payload.get("render_aspect_ratio")]
+    threejs_camera = payload.get("threejs_camera", {})
+    if isinstance(threejs_camera, dict):
+        candidates.extend(
+            [
+                threejs_camera.get("aspect_ratio"),
+                threejs_camera.get("aspect"),
+                threejs_camera.get("aspectRatio"),
+            ]
+        )
+
+    for raw_value in candidates:
+        aspect_ratio = _parse_aspect_ratio(raw_value)
+        if aspect_ratio:
+            return aspect_ratio
+    return None
+
+
+def _resolve_camera_plan_half_fov_deg(payload: dict) -> Tuple[float, Optional[float], Optional[float]]:
+    """
+    Resolve the plan-view half FOV used by the image culler.
+
+    Three.js stores vertical FOV, while the optimizer culls in plan view.
+    Convert to the horizontal plan cone using the render aspect ratio when
+    possible so we do not over-cull objects that are still inside the frame.
+    """
+    if not isinstance(payload, dict):
+        return DEFAULT_FOV_HALF_DEG, None, None
+
+    aspect_ratio = _resolve_scene_aspect_ratio(payload)
+    threejs_camera = payload.get("threejs_camera", {})
+    tj_fov = threejs_camera.get("fov") if isinstance(threejs_camera, dict) else None
+
+    if "interior_fov_half_deg" in payload:
+        return float(payload["interior_fov_half_deg"]), None, aspect_ratio
+
+    if tj_fov:
+        vertical_fov_deg = float(tj_fov)
+        vertical_half_deg = vertical_fov_deg / 2.0
+        if aspect_ratio and aspect_ratio > 0.0:
+            horizontal_half_rad = math.atan(
+                math.tan(math.radians(vertical_half_deg)) * aspect_ratio
+            )
+            return math.degrees(horizontal_half_rad), vertical_fov_deg, aspect_ratio
+        return vertical_half_deg, vertical_fov_deg, aspect_ratio
+
+    return DEFAULT_FOV_HALF_DEG, None, aspect_ratio
+
+
 def _item_dimension_cm(
     item: dict,
     key: str,
@@ -139,12 +256,12 @@ def _item_dimension_cm(
     if isinstance(raw, dict):
         if "length" in raw:
             try:
-                return float(raw.get("length", default_cm))
+                return float(raw.get("length", default_cm)) * cm_per_unit
             except Exception:
                 return default_cm
         if "value" in raw:
             try:
-                return float(raw.get("value", default_cm))
+                return float(raw.get("value", default_cm)) * cm_per_unit
             except Exception:
                 return default_cm
 
@@ -168,6 +285,72 @@ def _item_footprint_radius_cm(item: dict, cm_per_unit: float = 1.0) -> float:
     return 0.5 * math.hypot(width, depth)
 
 
+def _item_plan_sample_points_cm(item: dict, cm_per_unit: float = 1.0) -> List[Tuple[float, float]]:
+    """
+    Build a small set of plan-view footprint samples for an item.
+
+    We treat the item origin as the center of a conservative footprint box.
+    That is intentionally generous for items whose authored origin is off-center:
+    if any sampled part overlaps the active room or camera cone, we keep the item.
+    """
+    center_x = float(item.get("x", 0.0))
+    center_y = float(item.get("y", 0.0))
+    rotation = float(item.get("rotation", 0.0) or 0.0)
+
+    width_cm = max(_item_dimension_cm(item, "width", 100.0, cm_per_unit), 1.0)
+    depth_cm = max(_item_dimension_cm(item, "depth", 100.0, cm_per_unit), 1.0)
+    half_w = max(width_cm * 0.5, 10.0)
+    half_d = max(depth_cm * 0.5, 10.0)
+
+    local_samples = [
+        (0.0, 0.0),
+        (half_w, 0.0),
+        (-half_w, 0.0),
+        (0.0, half_d),
+        (0.0, -half_d),
+        (half_w, half_d),
+        (half_w, -half_d),
+        (-half_w, half_d),
+        (-half_w, -half_d),
+    ]
+
+    samples: List[Tuple[float, float]] = []
+    for lx, ly in local_samples:
+        sx, sy = _rotate_point_around_pivot(
+            center_x + lx,
+            center_y + ly,
+            rotation,
+            center_x,
+            center_y,
+        )
+        samples.append((sx, sy))
+    return samples
+
+
+def _point_visible_from_sample(
+    sample: Dict[str, Any],
+    point_x: float,
+    point_y: float,
+    max_view_dist_cm: float,
+    view_margin_deg: float = 0.0,
+) -> bool:
+    """Return True when a plan-point lies inside the camera cone."""
+    cam_x = float(sample["cam_x"])
+    cam_y = float(sample["cam_y"])
+    cam_dir_x = float(sample["cam_dir_x"])
+    cam_dir_y = float(sample["cam_dir_y"])
+    fov_half_deg = float(sample["fov_half_deg"])
+
+    dist_cm = math.hypot(point_x - cam_x, point_y - cam_y)
+    if dist_cm > max_view_dist_cm:
+        return False
+
+    angle_deg = math.degrees(
+        _angle_to_point(cam_x, cam_y, cam_dir_x, cam_dir_y, point_x, point_y)
+    )
+    return angle_deg <= (fov_half_deg + view_margin_deg)
+
+
 def _item_visible_from_sample(
     item: dict,
     sample: Dict[str, Any],
@@ -175,32 +358,19 @@ def _item_visible_from_sample(
     item_y: float,
     max_view_dist_cm: float,
     cm_per_unit: float = 1.0,
+    view_margin_deg: float = ITEM_VIEW_MARGIN_DEG,
 ) -> bool:
     """Return True when the item's footprint overlaps the camera cone."""
+    radius_cm = _item_footprint_radius_cm(item, cm_per_unit)
     cam_x = float(sample["cam_x"])
     cam_y = float(sample["cam_y"])
-    cam_dir_x = float(sample["cam_dir_x"])
-    cam_dir_y = float(sample["cam_dir_y"])
-    fov_half_deg = float(sample["fov_half_deg"])
-
-    radius_cm = _item_footprint_radius_cm(item, cm_per_unit)
     dist_cm = math.hypot(item_x - cam_x, item_y - cam_y)
     if max(0.0, dist_cm - radius_cm) > max_view_dist_cm:
         return False
 
-    angle_deg = math.degrees(
-        _angle_to_point(cam_x, cam_y, cam_dir_x, cam_dir_y, item_x, item_y)
-    )
-
-    if dist_cm < 1e-6:
-        angular_radius_deg = 90.0
-    else:
-        angular_radius_deg = math.degrees(
-            math.asin(min(1.0, radius_cm / max(dist_cm, 1.0)))
-        )
-
-    fov_limit_deg = fov_half_deg + ITEM_VIEW_MARGIN_DEG + angular_radius_deg
-    return angle_deg <= fov_limit_deg
+    if not _point_visible_from_sample(sample, item_x, item_y, max_view_dist_cm, view_margin_deg):
+        return False
+    return True
 
 
 def _rotate_point_around_pivot(
@@ -448,6 +618,108 @@ def _min_dist_to_polygon(ix: float, iy: float, poly_verts: List[Tuple[float, flo
     return min_dist
 
 
+def _camera_forward_collision_push_cm(
+    cam_x: float,
+    cam_y: float,
+    cam_dir_x: float,
+    cam_dir_y: float,
+    cam_height_m: float,
+    layers: dict,
+    transformed_layers: dict,
+    meters_per_unit: float,
+    cm_per_unit: float,
+    camera_layer_id: Optional[str] = None,
+    is_top_view: bool = False,
+) -> Tuple[float, Optional[str]]:
+    """
+    Return a small forward push for the cull camera when it overlaps a wall.
+
+    The authored camera position is left untouched; we only move the culling sample
+    forward so a camera embedded in geometry still keeps the nearby scene visible.
+    """
+    if is_top_view:
+        return 0.0, None
+
+    if abs(cam_dir_x) < 1e-6 and abs(cam_dir_y) < 1e-6:
+        return 0.0, None
+
+    candidate_layer_ids: List[str] = []
+    if camera_layer_id and camera_layer_id in layers:
+        candidate_layer_ids.append(camera_layer_id)
+    else:
+        for lid, layer in layers.items():
+            if not isinstance(layer, dict):
+                continue
+            layer_alt_m = _source_length_to_m(layer.get("altitude", 0), meters_per_unit)
+            wall_heights_m: List[float] = []
+            for wall in layer.get("lines", {}).values():
+                wall_h_m = _source_length_to_m(
+                    wall.get("properties", {}).get("height", {}),
+                    meters_per_unit,
+                )
+                if wall_h_m > 0.1:
+                    wall_heights_m.append(wall_h_m)
+            layer_top_m = layer_alt_m + (max(wall_heights_m) if wall_heights_m else 3.0)
+            if layer_alt_m <= cam_height_m < layer_top_m:
+                candidate_layer_ids.append(lid)
+
+    if not candidate_layer_ids:
+        return 0.0, None
+
+    def _sample_collision_label(sample_x: float, sample_y: float) -> Optional[str]:
+        for lid in candidate_layer_ids:
+            layer = layers.get(lid)
+            transformed = transformed_layers.get(lid, {})
+            if not isinstance(layer, dict) or not isinstance(transformed, dict):
+                continue
+
+            verts = transformed.get("vertices", {})
+            transformed_items = transformed.get("items", {})
+
+            for line_id, line in layer.get("lines", {}).items():
+                v_ids = line.get("vertices", [])
+                if len(v_ids) < 2:
+                    continue
+                v1 = verts.get(str(v_ids[0]))
+                v2 = verts.get(str(v_ids[1]))
+                if not v1 or not v2:
+                    continue
+                p1x, p1y = float(v1["x"]), float(v1["y"])
+                p2x, p2y = float(v2["x"]), float(v2["y"])
+                wall_thickness_cm = _source_length_to_cm(
+                    line.get("properties", {}).get("thickness", 20.0),
+                    cm_per_unit,
+                )
+                # Use the full wall thickness as the collision band.  Half-thickness
+                # was too tight and missed cameras that were sitting just outside the
+                # room face, which incorrectly kept them in EXTERIOR mode.
+                wall_block_tol_cm = max(20.0, wall_thickness_cm)
+                dist_to_wall = _point_to_segment_distance_2d(
+                    sample_x,
+                    sample_y,
+                    p1x,
+                    p1y,
+                    p2x,
+                    p2y,
+                )
+                if dist_to_wall <= wall_block_tol_cm:
+                    return f"wall '{line.get('name', line_id)}' in layer '{lid}'"
+
+        return None
+
+    collision_label = _sample_collision_label(cam_x, cam_y)
+    if not collision_label:
+        return 0.0, None
+
+    for push_cm in (20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0):
+        test_x = cam_x + (cam_dir_x * push_cm)
+        test_y = cam_y + (cam_dir_y * push_cm)
+        if _sample_collision_label(test_x, test_y) is None:
+            return push_cm, collision_label
+
+    return 160.0, collision_label
+
+
 def _resolve_selected_layer_hint(
     selected_layer_raw: str,
     layers: Dict[str, Any],
@@ -652,6 +924,7 @@ def _collect_portal_visible_rooms(
     fov_half_rad: float,
     max_dist_cm: float,
     log_fn,
+    strict_room_limit: int = 0,
 ) -> Set[str]:
     """
     Finds all rooms that should be created in INTERIOR mode by doing
@@ -681,9 +954,44 @@ def _collect_portal_visible_rooms(
         if v:
             active_positions.add((round(float(v["x"]), 0), round(float(v["y"]), 0)))
 
+    def _area_centroid(a_id: str) -> Optional[Tuple[float, float]]:
+        area = areas.get(a_id)
+        if not area:
+            return None
+        pts: List[Tuple[float, float]] = []
+        for v_id in area.get("vertices", []):
+            v = vertices.get(str(v_id))
+            if v:
+                pts.append((float(v["x"]), float(v["y"])))
+        if not pts:
+            return None
+        return (
+            sum(x for x, _ in pts) / len(pts),
+            sum(y for _, y in pts) / len(pts),
+        )
+
     visible_rooms: Set[str] = set()
+    room_scores: Dict[str, Tuple[float, float, float]] = {}
+
+    def _register_room_candidate(
+        room_id: str,
+        kind_bias: float,
+        room_centroid: Optional[Tuple[float, float]],
+        portal_dist_cm: float,
+    ) -> None:
+        if room_id == active_area_id or room_centroid is None:
+            return
+        room_angle_deg = math.degrees(
+            _angle_to_point(cam_x, cam_y, dir_x, dir_y, room_centroid[0], room_centroid[1])
+        )
+        score = (kind_bias, abs(room_angle_deg), portal_dist_cm)
+        current = room_scores.get(room_id)
+        if current is None or score < current:
+            room_scores[room_id] = score
+
     portal_margin_rad = math.radians(PORTAL_ANGLE_MARGIN_DEG)
     effective_fov = fov_half_rad + portal_margin_rad
+    facing_wall_room_margin_rad = math.radians(20.0)
 
     for lid, line in lines.items():
         v_ids = [str(v) for v in line.get("vertices", [])[:2]]
@@ -707,9 +1015,6 @@ def _collect_portal_visible_rooms(
         line_holes = line.get("holes", [])
         is_hidden  = line.get("visible") is False
         
-        if not line_holes and not is_hidden:
-            continue
-
         # (a) Handle regular portals (doors/windows)
         for hole_id in line_holes:
             hid = str(hole_id)
@@ -759,7 +1064,9 @@ def _collect_portal_visible_rooms(
                     f"angle={portal_angle:.1f}° dist={dist:.0f}cm → "
                     f"reveal: {[areas[a].get('name', a) for a in beyond if a in areas]}"
                 )
-                visible_rooms.update(beyond)
+                for aid in beyond:
+                    centroid = _area_centroid(aid)
+                    _register_room_candidate(aid, 0.0, centroid, dist)
             else:
                 log_fn(
                     f"    ⚠️  Portal '{hole.get('name', hid)}' on wall {lid} "
@@ -784,7 +1091,67 @@ def _collect_portal_visible_rooms(
                                 f"    ✅ Hidden Wall {lid} angle={portal_angle:.1f}° dist={dist:.0f}cm → "
                                 f"reveal: {[areas[a].get('name', a) for a in beyond if a in areas]}"
                             )
-                            visible_rooms.update(beyond)
+                            for aid in beyond:
+                                centroid = _area_centroid(aid)
+                                _register_room_candidate(aid, 0.1, centroid, dist)
+        elif line_holes:
+            # Portals already handled above. This branch keeps the function
+            # structure explicit and avoids treating them as plain walls.
+            pass
+        else:
+            # Image-only fallback: some new plans export the next room boundary
+            # as a plain visible wall. If the wall faces the camera and the
+            # neighboring room sits on the far side of that wall, keep it.
+            vd1 = vertices.get(v_ids[0])
+            vd2 = vertices.get(v_ids[1])
+            if vd1 and vd2:
+                p1x, p1y = float(vd1["x"]), float(vd1["y"])
+                p2x, p2y = float(vd2["x"]), float(vd2["y"])
+                mid_x, mid_y = (p1x + p2x) / 2.0, (p1y + p2y) / 2.0
+                dist = math.hypot(mid_x - cam_x, mid_y - cam_y)
+                if dist <= max_dist_cm and _portal_visible_in_fov(
+                    cam_x, cam_y, dir_x, dir_y, effective_fov, p1x, p1y, p2x, p2y
+                ):
+                    beyond = _rooms_beyond_portal(line, active_area_id, areas, vertices)
+                    keep_rooms: Set[str] = set()
+                    for aid in beyond:
+                        if aid == active_area_id:
+                            continue
+                        centroid = _area_centroid(aid)
+                        if not centroid:
+                            continue
+                        # Keep only rooms that are on the far side of the wall.
+                        if (
+                            ((centroid[0] - mid_x) * (cam_x - mid_x))
+                            + ((centroid[1] - mid_y) * (cam_y - mid_y))
+                        ) < 0.0:
+                            room_angle = _angle_to_point(
+                                cam_x, cam_y, dir_x, dir_y, centroid[0], centroid[1]
+                            )
+                            if room_angle <= (effective_fov + facing_wall_room_margin_rad):
+                                keep_rooms.add(aid)
+
+                    if keep_rooms:
+                        visible_rooms.update(keep_rooms)
+                        log_fn(
+                            f"    ✅ Facing Wall {lid} angle={math.degrees(_angle_to_point(cam_x, cam_y, dir_x, dir_y, mid_x, mid_y)):.1f}° "
+                            f"dist={dist:.0f}cm → reveal: {[areas[a].get('name', a) for a in keep_rooms if a in areas]}"
+                        )
+
+    if room_scores:
+        ordered_rooms = sorted(room_scores.items(), key=lambda kv: kv[1])
+        if strict_room_limit > 0:
+            ordered_rooms = ordered_rooms[:strict_room_limit]
+        visible_rooms = {room_id for room_id, _ in ordered_rooms}
+        log_fn(
+            f"  🔒 Image room clamp: keeping {len(visible_rooms)} portal-neighbour room(s) "
+            f"out of {len(room_scores)} candidate(s)"
+        )
+        for room_id, score in ordered_rooms:
+            log_fn(
+                f"     • {areas.get(room_id, {}).get('name', room_id)} ({room_id}) "
+                f"score={score[0]:.2f}/{score[1]:.1f}/{score[2]:.0f}"
+            )
 
     return visible_rooms
 
@@ -981,6 +1348,7 @@ def _cull_interior(
     cm_per_unit: float = 1.0,
     source_vertices: Optional[dict] = None,
     source_items: Optional[dict] = None,
+    strict_room_limit: int = 0,
 ) -> Tuple[dict, dict, dict, dict, dict]:
     """
     INTERIOR MODE — camera is inside a room.  Portal-based precision culling.
@@ -1044,17 +1412,11 @@ def _cull_interior(
         cam_x, cam_y, cam_dir_x, cam_dir_y,
         fov_half_rad, max_view_dist_cm,
         log_fn,
+        strict_room_limit=strict_room_limit or STRICT_IMAGE_PORTAL_ROOM_LIMIT,
     )
 
     # Active room is ALWAYS kept
     kept_area_ids: Set[str] = {active_area_id} | neighbour_ids
-    active_room_poly: List[Tuple[float, float]] = []
-    active_area = areas.get(active_area_id)
-    if active_area:
-        for v_id in active_area.get("vertices", []):
-            v = vertices.get(str(v_id))
-            if v:
-                active_room_poly.append((float(v["x"]), float(v["y"])))
 
     log_fn(f"  🎯 Kept rooms on {layer_id}: {len(kept_area_ids)} "
            f"(active + {len(neighbour_ids)} portal-visible)")
@@ -1102,6 +1464,7 @@ def _cull_interior(
     # and door frames don't clip at the edges of the view.
     wall_fov_margin_rad = math.radians(fov_half_deg + 20.0)
 
+    active_area = areas.get(active_area_id)
     active_room_vertex_ids: Set[str] = set()
     active_room_positions: Set[Tuple[float, float]] = set()
     if active_area:
@@ -1212,6 +1575,8 @@ def _cull_interior(
     # ── Step 6: Filter items ─────────────────────────────────────────────────
     new_items: Dict[str, Any] = {}
     culled_items: List[str] = []
+    image_item_view_margin_deg = STRICT_IMAGE_ITEM_VIEW_MARGIN_DEG
+    image_item_rescue_tolerance_cm = STRICT_IMAGE_ITEM_RESCUE_TOLERANCE_CM
 
     for iid, item in items.items():
         item_type = str(item.get("type", "")).lower()
@@ -1235,30 +1600,7 @@ def _cull_interior(
             continue
 
         ix, iy = float(item.get("x", 0)), float(item.get("y", 0))
-
-        # Keep anything that is physically inside the active room.  For image
-        # renders the user expects the room to stay furnished even when the
-        # camera is pointed toward a window or opposite wall.
-        if active_room_poly and _point_in_polygon(ix, iy, active_room_poly):
-            new_items[iid] = item
-            log_fn(f"  ✓ Item in active room: '{item.get('name', 'Unknown')}' ({iid})")
-            continue
-
-        item_alt_m = _item_altitude_m(item, meters_per_unit)
-        if item_alt_m <= cam_height_m + 1.25:
-            item_x_cm = float(item.get("x", 0.0))
-            item_y_cm = float(item.get("y", 0.0))
-            item_radius_cm = max(_item_footprint_radius_cm(item, cm_per_unit), 25.0)
-            # Fix: only cull if the camera point itself is too close to the item (stuck inside)
-            dist_to_cam = math.hypot(item_x_cm - cam_x, item_y_cm - cam_y)
-            if dist_to_cam <= item_radius_cm:
-                culled_items.append(
-                    f"{item.get('name', 'Unknown')} ({iid}) [camera is stuck inside item (dist {dist_to_cam:.1f}cm)]"
-                )
-                continue
-
-        # Keep items when their footprint overlaps the camera cone.
-        # This avoids dropping cabinets/sofas that are only partially visible.
+        item_samples = _item_plan_sample_points_cm(item, cm_per_unit)
         camera_sample = {
             "cam_x": cam_x,
             "cam_y": cam_y,
@@ -1266,7 +1608,34 @@ def _cull_interior(
             "cam_dir_y": cam_dir_y,
             "fov_half_deg": fov_half_deg,
         }
-        if not _item_visible_from_sample(item, camera_sample, ix, iy, max_view_dist_cm, cm_per_unit):
+        visible_samples = [
+            (sx, sy)
+            for sx, sy in item_samples
+            if _point_visible_from_sample(
+                camera_sample,
+                sx,
+                sy,
+                max_view_dist_cm,
+                image_item_view_margin_deg,
+            )
+        ]
+
+        item_alt_m = _item_altitude_m(item, meters_per_unit)
+        item_radius_cm = max(_item_footprint_radius_cm(item, cm_per_unit), 25.0)
+        dist_to_cam = math.hypot(ix - cam_x, iy - cam_y)
+
+        # If the camera sits inside the item's footprint, only cull it when
+        # none of the sampled footprint points still fall inside the view cone.
+        if item_alt_m <= cam_height_m + 1.25 and dist_to_cam <= item_radius_cm and not visible_samples:
+            culled_items.append(
+                f"{item.get('name', 'Unknown')} ({iid}) [camera is stuck inside item (dist {dist_to_cam:.1f}cm)]"
+            )
+            continue
+
+        # Keep items when any sampled point from their footprint overlaps the
+        # camera cone. This avoids dropping large sofas/carpets when the item
+        # origin sits just outside the active room polygon.
+        if not visible_samples:
             dist = math.hypot(ix - cam_x, iy - cam_y)
             angle_deg = math.degrees(
                 _angle_to_point(cam_x, cam_y, cam_dir_x, cam_dir_y, ix, iy)
@@ -1281,18 +1650,31 @@ def _cull_interior(
                 )
             continue
 
-        # Pass 1 — strict polygon containment
+        # Pass 1 — footprint-aware room containment
         kept = False
+        rescue_tol_cm = min(image_item_rescue_tolerance_cm, ITEM_RESCUE_TOLERANCE_CM)
         for aid in kept_area_ids:
             area = areas.get(aid)
             if not area:
                 continue
             poly = [(float(vertices[str(v)]["x"]), float(vertices[str(v)]["y"]))
                     for v in area.get("vertices", []) if str(v) in vertices]
-            if poly and _point_in_polygon(ix, iy, poly):
-                kept = True
-                log_fn(f"  ✓ Item in room: '{item.get('name', 'Unknown')}' ({iid})")
-                break
+            if not poly:
+                continue
+
+            sample_in_poly = any(_point_in_polygon(sx, sy, poly) for sx, sy in item_samples)
+            sample_near_poly = any(_min_dist_to_polygon(sx, sy, poly) <= rescue_tol_cm for sx, sy in item_samples)
+
+            if aid == active_area_id:
+                if sample_in_poly or sample_near_poly:
+                    kept = True
+                    log_fn(f"  ✓ Item in active room: '{item.get('name', 'Unknown')}' ({iid})")
+                    break
+            else:
+                if sample_in_poly:
+                    kept = True
+                    log_fn(f"  ✓ Item in room: '{item.get('name', 'Unknown')}' ({iid})")
+                    break
 
         if kept:
             new_items[iid] = item
@@ -1308,8 +1690,8 @@ def _cull_interior(
                     for v in area.get("vertices", []) if str(v) in vertices]
             if not poly:
                 continue
-            d = _min_dist_to_polygon(ix, iy, poly)
-            if d <= ITEM_RESCUE_TOLERANCE_CM:
+            d = min((_min_dist_to_polygon(sx, sy, poly) for sx, sy in item_samples), default=float("inf"))
+            if d <= rescue_tol_cm:
                 log_fn(f"  ✨ Rescue item '{item.get('name', 'Unknown')}' ({iid}) dist={d:.0f}cm")
                 new_items[iid] = item
                 rescued = True
@@ -1365,12 +1747,12 @@ def _cull_exterior(
       • Elevation-type items (always kept, never removed in any mode)
       • Exterior-named items (roof, grill, balcony, etc.) — by keyword match,
         with indoor-keyword exclusion guard and GLB path check
-      • Items physically OUTSIDE all room polygons (garden, trees, etc.)
       • Floor assets always
 
     Remove:
-      • ALL interior items that sit INSIDE any room polygon
-        (sofas, fridges, lights, frames, pictures, mirrors, etc.)
+      • ALL non-exterior items, including anything inside a room polygon and
+        anything outside room polygons if it is not explicitly exterior
+        (sofas, fridges, lights, frames, pictures, mirrors, carpets, cabinets)
       • Altitude-aware: items whose altitude places them outside this layer's
         vertical range are NOT used for polygon culling (they belong elsewhere)
 
@@ -1455,20 +1837,9 @@ def _cull_exterior(
             )
             continue
 
-        # Item outside all room polygons → external landscaping → keep
-        is_outside = not _point_in_any_area(ix, iy, areas, vertices)
-        if is_outside:
-            new_items[iid] = item
-            kept_exterior_items.append(f"{item.get('name', 'Unknown')} ({iid}) [outside rooms]")
-            log_fn(
-                f"  🌳 Keeping external item (outside all rooms): "
-                f"'{item.get('name', 'Unknown')}' ({iid}) at ({ix:.1f}, {iy:.1f})"
-            )
-            continue
-
-        # Everything else inside rooms → cull
+        # Everything else is treated as interior clutter and removed.
         culled_items.append(f"{item.get('name', 'Unknown')} ({iid})")
-        log_fn(f"  🗑️ Culling interior item: '{item.get('name', 'Unknown')}' ({iid})")
+        log_fn(f"  🗑️ Culling non-exterior item: '{item.get('name', 'Unknown')}' ({iid})")
 
     if kept_exterior_items:
         log_fn(f"\n  🌳 Kept {len(kept_exterior_items)} exterior items:")
@@ -1722,28 +2093,12 @@ class SceneOptimizer:
                 pos = tj.get("position")
                 tgt = tj.get("target")
 
-                # ── 2a. Apply a small cull-only forward offset ───────────────
-                # Keep the authored camera position intact for the final image.
-                # We only nudge the culling sample a little bit forward so a
-                # camera that is flush against a wall does not remove the wall
-                # or nearby assets it is meant to see.
+                # ── 2a. Keep the authored camera position intact here ────────
+                # Collision-aware camera nudging is applied later only when the
+                # camera actually overlaps walls or assets.  Do not apply an
+                # unconditional forward offset, otherwise the render can shift
+                # even when the camera is already clear of geometry.
                 cull_pos = dict(pos) if isinstance(pos, dict) else None
-                PUSH_DISTANCE_CM = 20.0
-                if not is_top_view and PUSH_DISTANCE_CM > 0.0 and cull_pos and tgt:
-                    px = float(cull_pos.get("x", 0.0))
-                    pz = float(cull_pos.get("z", 0.0))
-                    tx = float(tgt.get("x", 0.0))
-                    tz = float(tgt.get("z", 0.0))
-                    dx, dz = tx - px, tz - pz
-                    mag = math.hypot(dx, dz)
-                    if mag > 1e-6:
-                        ux, uz = dx / mag, dz / mag
-                        push_m = min(PUSH_DISTANCE_CM / 100.0, mag * 0.15)
-                        cull_pos["x"] = px + ux * push_m
-                        cull_pos["z"] = pz + uz * push_m
-                        self.log(
-                            f"🚀 Applying cull-only forward offset of {PUSH_DISTANCE_CM:.0f}cm"
-                        )
 
                 cull_x = float(pos.get("x", 0.0)) if isinstance(pos, dict) else 0.0
                 cull_z = float(pos.get("z", 0.0)) if isinstance(pos, dict) else 0.0
@@ -1794,20 +2149,19 @@ class SceneOptimizer:
                 f"source={dir_source}"
             )
 
-            # ── 2c. Derive FOV half-angle ─────────────────────────────────────
-            if "interior_fov_half_deg" in payload:
-                cam_fov_half_deg = float(payload["interior_fov_half_deg"])
-                self.log(f"📐 FOV: payload override ±{cam_fov_half_deg:.0f}°")
-            else:
-                tj_fov = payload.get("threejs_camera", {}).get("fov")
-                if tj_fov:
-                    cam_fov_half_deg = float(tj_fov) / 2.0
-                    self.log(f"📐 FOV: threejs fov={tj_fov}° → ±{cam_fov_half_deg:.0f}°")
-                else:
-                    cam_fov_half_deg = DEFAULT_FOV_HALF_DEG
-                    self.log(f"📐 FOV: default ±{cam_fov_half_deg:.0f}°")
-
             cam_view_dist_cm = float(payload.get("interior_view_dist_cm", DEFAULT_VIEW_DISTANCE_CM))
+            cam_fov_half_deg, cam_vertical_fov_deg, cam_aspect_ratio = _resolve_camera_plan_half_fov_deg(payload)
+            if "interior_fov_half_deg" in payload:
+                self.log(f"📐 FOV: payload override ±{cam_fov_half_deg:.0f}°")
+            elif cam_vertical_fov_deg and cam_aspect_ratio:
+                self.log(
+                    f"📐 FOV: threejs fov={cam_vertical_fov_deg:.0f}° "
+                    f"aspect={cam_aspect_ratio:.3f} → plan ±{cam_fov_half_deg:.0f}°"
+                )
+            elif cam_vertical_fov_deg:
+                self.log(f"📐 FOV: threejs fov={cam_vertical_fov_deg:.0f}° → ±{cam_fov_half_deg:.0f}°")
+            else:
+                self.log(f"📐 FOV: default ±{cam_fov_half_deg:.0f}°")
 
             cam_target_x: Optional[float] = None
             cam_target_y: Optional[float] = None
@@ -1827,6 +2181,51 @@ class SceneOptimizer:
                 f"📐 Camera target: ({cam_target_x:.1f}, {cam_target_y:.1f}) cm "
                 f"source={cam_target_source}"
             )
+
+            layers = fp_data.get("layers", {})
+
+            def _transform_layer_for_culling(layer_data: dict) -> Tuple[dict, dict]:
+                transformed_vertices: Dict[str, Any] = {}
+                transformed_items: Dict[str, Any] = {}
+
+                for vid, vertex in layer_data.get("vertices", {}).items():
+                    if not isinstance(vertex, dict):
+                        continue
+                    tx, ty = _transform_plan_point_cm(
+                        float(vertex.get("x", 0.0)),
+                        float(vertex.get("y", 0.0)),
+                        cm_per_unit,
+                        plan_rotation_radians,
+                        plan_pivot_cm,
+                    )
+                    v_copy = dict(vertex)
+                    v_copy["x"] = tx
+                    v_copy["y"] = ty
+                    transformed_vertices[vid] = v_copy
+
+                for iid, item in layer_data.get("items", {}).items():
+                    if not isinstance(item, dict):
+                        continue
+                    i_copy = dict(item)
+                    if "x" in i_copy and "y" in i_copy:
+                        tx, ty = _transform_plan_point_cm(
+                            float(i_copy.get("x", 0.0)),
+                            float(i_copy.get("y", 0.0)),
+                            cm_per_unit,
+                            plan_rotation_radians,
+                            plan_pivot_cm,
+                        )
+                        i_copy["x"] = tx
+                        i_copy["y"] = ty
+                    transformed_items[iid] = i_copy
+
+                return transformed_vertices, transformed_items
+
+            transformed_layers: Dict[str, Dict[str, dict]] = {}
+            for _lid, _layer in layers.items():
+                if isinstance(_layer, dict):
+                    _tv, _ti = _transform_layer_for_culling(_layer)
+                    transformed_layers[_lid] = {"vertices": _tv, "items": _ti}
 
             # ── 2b. Top-view: override camera XY to home centroid ─────────────
             if is_top_view:
@@ -1901,49 +2300,6 @@ class SceneOptimizer:
             #   • showAllFloors=true + EXTERIOR: camera_layer_id stays None →
             #     _do_layer_isolation=False → all floors are rendered (correct).
             #   • showAllFloors=false: selectedLayer / spatial scan → isolate.
-            def _transform_layer_for_culling(layer_data: dict) -> Tuple[dict, dict]:
-                transformed_vertices: Dict[str, Any] = {}
-                transformed_items: Dict[str, Any] = {}
-
-                for vid, vertex in layer_data.get("vertices", {}).items():
-                    if not isinstance(vertex, dict):
-                        continue
-                    tx, ty = _transform_plan_point_cm(
-                        float(vertex.get("x", 0.0)),
-                        float(vertex.get("y", 0.0)),
-                        cm_per_unit,
-                        plan_rotation_radians,
-                        plan_pivot_cm,
-                    )
-                    v_copy = dict(vertex)
-                    v_copy["x"] = tx
-                    v_copy["y"] = ty
-                    transformed_vertices[vid] = v_copy
-
-                for iid, item in layer_data.get("items", {}).items():
-                    if not isinstance(item, dict):
-                        continue
-                    i_copy = dict(item)
-                    if "x" in i_copy and "y" in i_copy:
-                        tx, ty = _transform_plan_point_cm(
-                            float(i_copy.get("x", 0.0)),
-                            float(i_copy.get("y", 0.0)),
-                            cm_per_unit,
-                            plan_rotation_radians,
-                            plan_pivot_cm,
-                        )
-                        i_copy["x"] = tx
-                        i_copy["y"] = ty
-                    transformed_items[iid] = i_copy
-
-                return transformed_vertices, transformed_items
-
-            transformed_layers: Dict[str, Dict[str, dict]] = {}
-            for _lid, _layer in layers.items():
-                if isinstance(_layer, dict):
-                    _tv, _ti = _transform_layer_for_culling(_layer)
-                    transformed_layers[_lid] = {"vertices": _tv, "items": _ti}
-
             camera_layer_id: Optional[str] = None
             _selected_layer_raw: str = str(fp_data.get("selectedLayer", "")).strip()
             # True when camera_layer_id was set from the selectedLayer hint (not spatial scan).
@@ -2162,6 +2518,92 @@ class SceneOptimizer:
             )
             render_mode = "UNKNOWN"
 
+            collision_push_cm, collision_label = _camera_forward_collision_push_cm(
+                cam_x=cam_x,
+                cam_y=cam_y,
+                cam_dir_x=cam_dir_x,
+                cam_dir_y=cam_dir_y,
+                cam_height_m=cam_height_m,
+                layers=layers,
+                transformed_layers=transformed_layers,
+                meters_per_unit=meters_per_unit,
+                cm_per_unit=cm_per_unit,
+                camera_layer_id=camera_layer_id,
+                is_top_view=is_top_view,
+            )
+            if collision_push_cm > 0.0:
+                camera_log = self._log_data.get("camera") if isinstance(self._log_data.get("camera"), dict) else None
+                orig_world_pos = dict(pos) if isinstance(pos, dict) else None
+                original_plan_x_cm = cam_x
+                original_plan_y_cm = cam_y
+                orig_cam_x, orig_cam_y = cam_x, cam_y
+                cam_x += cam_dir_x * collision_push_cm
+                cam_y += cam_dir_y * collision_push_cm
+                if cam_target_x is not None and cam_target_y is not None:
+                    cam_target_x += cam_dir_x * collision_push_cm
+                    cam_target_y += cam_dir_y * collision_push_cm
+
+                push_m = collision_push_cm / 100.0
+                if isinstance(pos, dict):
+                    px = float(orig_world_pos.get("x", 0.0)) if orig_world_pos else float(pos.get("x", 0.0))
+                    pz = float(orig_world_pos.get("z", 0.0)) if orig_world_pos else float(pos.get("z", 0.0))
+                    pos["x"] = px + (cam_dir_x * push_m)
+                    pos["z"] = pz + (cam_dir_y * push_m)
+
+                if isinstance(camera_log, dict):
+                    camera_log["camera_move_applied"] = True
+                    camera_log["camera_move_reason"] = collision_label
+                    camera_log["camera_move_cm"] = round(collision_push_cm, 2)
+                    camera_log["original_plan_x_cm"] = round(original_plan_x_cm, 2)
+                    camera_log["original_plan_y_cm"] = round(original_plan_y_cm, 2)
+                    camera_log["moved_plan_x_cm"] = round(cam_x, 2)
+                    camera_log["moved_plan_y_cm"] = round(cam_y, 2)
+                    camera_log["plan_x_cm"] = round(cam_x, 2)
+                    camera_log["plan_y_cm"] = round(cam_y, 2)
+                    if orig_world_pos:
+                        camera_log["camera_move_original_threejs"] = {
+                            "x": round(float(orig_world_pos.get("x", 0.0)), 6),
+                            "y": round(float(orig_world_pos.get("y", 0.0)), 6),
+                            "z": round(float(orig_world_pos.get("z", 0.0)), 6),
+                        }
+                    if isinstance(pos, dict):
+                        camera_log["camera_move_adjusted_threejs"] = {
+                            "x": round(float(pos.get("x", 0.0)), 6),
+                            "y": round(float(pos.get("y", 0.0)), 6),
+                            "z": round(float(pos.get("z", 0.0)), 6),
+                        }
+                self.log(
+                    f"  🚧 Camera collision detected with {collision_label}; "
+                    f"moved camera forward by {collision_push_cm:.0f}cm "
+                    f"from plan ({orig_cam_x:.1f}, {orig_cam_y:.1f}) cm "
+                    f"to ({cam_x:.1f}, {cam_y:.1f}) cm."
+                )
+                if orig_world_pos and isinstance(pos, dict):
+                    self.log(
+                        f"     ThreeJS camera: ({orig_world_pos['x']:.3f}, {orig_world_pos['y']:.3f}, {orig_world_pos['z']:.3f}) "
+                        f"→ ({pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f})"
+                    )
+            elif isinstance(self._log_data.get("camera"), dict):
+                camera_log = self._log_data["camera"]
+                camera_log["camera_move_applied"] = False
+                camera_log["camera_move_reason"] = None
+                camera_log["camera_move_cm"] = 0.0
+                camera_log["original_plan_x_cm"] = round(cam_x, 2)
+                camera_log["original_plan_y_cm"] = round(cam_y, 2)
+                camera_log["moved_plan_x_cm"] = round(cam_x, 2)
+                camera_log["moved_plan_y_cm"] = round(cam_y, 2)
+                if isinstance(pos, dict):
+                    camera_log["camera_move_original_threejs"] = {
+                        "x": round(float(pos.get("x", 0.0)), 6),
+                        "y": round(float(pos.get("y", 0.0)), 6),
+                        "z": round(float(pos.get("z", 0.0)), 6),
+                    }
+                    camera_log["camera_move_adjusted_threejs"] = {
+                        "x": round(float(pos.get("x", 0.0)), 6),
+                        "y": round(float(pos.get("y", 0.0)), 6),
+                        "z": round(float(pos.get("z", 0.0)), 6),
+                    }
+
             for layer_id, layer in layers.items():
                 self.log(f"\n{'─'*60}")
                 self.log(f"🔍 Inspecting Layer: {layer_id}")
@@ -2279,10 +2721,13 @@ class SceneOptimizer:
                     )
 
                 if not show_all_floors:
-                    if use_showall and cam_height_m > (_layer_top_m + 0.5):
-                        is_above_ceiling = True
-                    else:
-                        is_above_ceiling = False
+                    is_above_ceiling = cam_height_m > (_layer_top_m + 0.5)
+                    if is_above_ceiling:
+                        self.log(
+                            f"  🏗️ Camera above layer '{layer_id}' ceiling "
+                            f"(cam_height={cam_height_m:.3f}m > top={_layer_top_m:.3f}m) "
+                            "→ force exterior cleanup."
+                        )
 
                     if active_area_id and not is_top_view and not is_above_ceiling:
                         # Eye-level interior shot: Keep room assets
@@ -2329,15 +2774,21 @@ class SceneOptimizer:
                     render_mode = "TOP_VIEW"
                     self.log(f"\n  🔭 MODE: TOP VIEW RENDER (show_all={show_all})")
                     if not show_all:
-                        # show_all=False → keep ALL interior assets, only strip
-                        # exterior-named items that shouldn't appear in a top-down plan
-                        self.log("  📦 show_all=False → interior assets preserved (no culling of interior items)")
-                        new_vertices, new_lines, new_areas, new_items, new_holes = \
-                            _cull_top_view_keep_interior(
-                                layer_id,
-                                source_vertices, lines, areas, source_items, holes,
-                                self.log,
-                            )
+                        # Top-view exterior: treat this as a strict facade pass.
+                        # Interior furnishings are removed; only shell / elevation /
+                        # explicit exterior assets survive.
+                        render_mode = "EXTERIOR_CLEAN"
+                        self.log("  🗑️ show_all=False → top-view exterior cleanup (removing all interior items)")
+                        new_vertices, new_lines, new_areas, new_items, new_holes = _cull_exterior(
+                            layer_id,
+                            vertices, lines, areas, items, holes,
+                            self.log,
+                            layer_alt_m=_layer_alt_m,
+                            layer_top_m=_layer_top_m,
+                            meters_per_unit=meters_per_unit,
+                            source_vertices=source_vertices,
+                            source_items=source_items,
+                        )
                     else:
                         # show_all=True → behave like exterior (cull interior items)
                         self.log("  🗑️  show_all=True → interior items culled (exterior-style)")
@@ -2371,6 +2822,7 @@ class SceneOptimizer:
                         cm_per_unit=cm_per_unit,
                         source_vertices=source_vertices,
                         source_items=source_items,
+                        strict_room_limit=STRICT_IMAGE_PORTAL_ROOM_LIMIT,
                     )
                 else:
                     render_mode = "EXTERIOR"

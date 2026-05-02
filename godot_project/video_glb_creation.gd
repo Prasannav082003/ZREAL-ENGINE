@@ -24,6 +24,12 @@ var _frozen_lighting_profile = "day"
 var _frozen_camera_pose = null
 var _scene_built = false  # TRUE after first full build — prevents light/asset accumulation
 var _dir_light = null
+var _directional_light_authoring_locked = false
+var _lighting_color_mood: String = "day"
+var _lighting_illumination_scale: float = 1.0
+# Count of ceiling_mount fixtures — used by sqrt normalisation to prevent
+# N fixtures contributing N× the intended luminance additively.
+var _ceiling_fixture_count: int = 1
 var _scene_unit_scale: float = 0.01
 var _scene_rotation_is_radians: bool = false
 var _scene_plan_rotation_radians: float = 0.0
@@ -156,6 +162,157 @@ func _transform_camera_plan_point(point: Vector3) -> Vector3:
 func _camera_cm_to_m(point: Vector3) -> Vector3:
 	return Vector3(point.x * 0.01, point.y * 0.01, point.z * 0.01)
 
+func _resolve_directional_light_transform(data: Dictionary) -> Dictionary:
+	var result = {
+		"has_position": false,
+		"position": Vector3.ZERO,
+		"has_target": false,
+		"target": Vector3.ZERO
+	}
+	if typeof(data) != TYPE_DICTIONARY:
+		return result
+
+	var sources: Array = []
+	if data.has("directional_light") and typeof(data["directional_light"]) == TYPE_DICTIONARY:
+		sources.append(data["directional_light"])
+	if data.has("_lightingSettings") and typeof(data["_lightingSettings"]) == TYPE_DICTIONARY:
+		sources.append(data["_lightingSettings"])
+
+	for source in sources:
+		if not result["has_position"]:
+			if source.has("position") and typeof(source["position"]) == TYPE_DICTIONARY:
+				result["position"] = parse_vec3(source["position"])
+				result["has_position"] = true
+			elif source.has("directionalPosition") and typeof(source["directionalPosition"]) == TYPE_DICTIONARY:
+				result["position"] = parse_vec3(source["directionalPosition"])
+				result["has_position"] = true
+
+		if not result["has_target"]:
+			if source.has("target") and typeof(source["target"]) == TYPE_DICTIONARY:
+				result["target"] = parse_vec3(source["target"])
+				result["has_target"] = true
+			elif source.has("directionalTarget") and typeof(source["directionalTarget"]) == TYPE_DICTIONARY:
+				result["target"] = parse_vec3(source["directionalTarget"])
+				result["has_target"] = true
+
+	return result
+
+func _resolve_color_mood(data: Dictionary) -> String:
+	var candidate := ""
+	if typeof(data) != TYPE_DICTIONARY:
+		return "day"
+
+	if data.has("colorMood"):
+		candidate = str(data["colorMood"])
+	elif data.has("color_mood"):
+		candidate = str(data["color_mood"])
+	elif data.has("_lightingSettings") and typeof(data["_lightingSettings"]) == TYPE_DICTIONARY:
+		var lighting_settings = data["_lightingSettings"]
+		if lighting_settings.has("colorMood"):
+			candidate = str(lighting_settings["colorMood"])
+
+	candidate = candidate.to_lower().strip_edges()
+	if candidate == "":
+		return "day"
+	if candidate in ["warm", "soft", "neutral", "nuetral", "day", "cool"]:
+		return "neutral" if candidate == "nuetral" else candidate
+	if "warm" in candidate:
+		return "warm"
+	if "soft" in candidate:
+		return "soft"
+	if "neutral" in candidate:
+		return "neutral"
+	if "nuetral" in candidate:
+		return "neutral"
+	if "cool" in candidate:
+		return "cool"
+	if "day" in candidate:
+		return "day"
+	return "day"
+
+func _resolve_illumination_scale(data: Dictionary) -> float:
+	var level := 5
+	if typeof(data) != TYPE_DICTIONARY:
+		return 1.0
+
+	if data.has("illuminationLevel"):
+		level = int(data["illuminationLevel"])
+	elif data.has("illumination_level"):
+		level = int(data["illumination_level"])
+	elif data.has("_lightingSettings") and typeof(data["_lightingSettings"]) == TYPE_DICTIONARY:
+		var lighting_settings = data["_lightingSettings"]
+		if lighting_settings.has("illuminationLevel"):
+			level = int(lighting_settings["illuminationLevel"])
+		elif lighting_settings.has("illumination_level"):
+			level = int(lighting_settings["illumination_level"])
+
+	level = int(clamp(level, 1, 5))
+	return float(level) * 0.2
+
+func _get_color_mood_light_color(role: String) -> Color:
+	var mood := _lighting_color_mood
+	match mood:
+		"warm":
+			match role:
+				"ambient":
+					return Color(0.76, 0.62, 0.54)
+				"fixture":
+					return Color(1.0, 0.83, 0.66)
+				"fill":
+					return Color(1.0, 0.89, 0.76)
+				_:
+					return Color(1.0, 0.86, 0.72)
+		"soft":
+			match role:
+				"ambient":
+					return Color8(255, 214, 170)
+				"fixture":
+					return Color8(255, 214, 170)
+				"fill":
+					return Color8(255, 214, 170)
+				_:
+					return Color8(255, 214, 170)
+		"neutral":
+			match role:
+				"ambient":
+					return Color8(255, 228, 206)
+				"fixture":
+					return Color8(255, 228, 206)
+				"fill":
+					return Color8(255, 228, 206)
+				_:
+					return Color8(255, 228, 206)
+		"cool":
+			match role:
+				"ambient":
+					return Color(0.72, 0.80, 0.96)
+				"fixture":
+					return Color(0.90, 0.95, 1.0)
+				"fill":
+					return Color(0.88, 0.92, 1.0)
+				_:
+					return Color(0.92, 0.96, 1.0)
+		"day":
+			match role:
+				"ambient":
+					return Color(0.92, 0.94, 0.98)
+				"fixture":
+					return Color(1.0, 1.0, 0.98)
+				"fill":
+					return Color(1.0, 1.0, 1.0)
+				_:
+					return Color(1.0, 0.99, 0.96)
+		_:
+			match role:
+				"ambient":
+					return Color(0.84, 0.88, 0.94)
+				"fixture":
+					return Color(1.0, 0.98, 0.95)
+				"fill":
+					return Color(0.98, 0.99, 1.0)
+				_:
+					return Color(1.0, 0.99, 0.95)
+
 # ─────────────────────────────────────────────────────────────────
 # Entry-point (called by video_render.gd)
 # ─────────────────────────────────────────────────────────────────
@@ -243,8 +400,10 @@ func build_scene(data):
 	build_structures(geom_data)
 	load_assets(geom_data)
 	
-	if _dir_light != null:
+	if _dir_light != null and not _directional_light_authoring_locked:
 		_orient_directional_light_from_windows(_dir_light, cam_pose)
+	elif _dir_light != null:
+		print("[VideoGLB] Skipping window-based directional light reorientation because JSON provided an authored transform.")
 	
 	_apply_anisotropic_filtering_to_all(self)
 
@@ -270,6 +429,17 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 		print("[VideoGLB] Lighting already initialized; reusing first-frame setup.")
 		return
 	var lighting = _get_lighting_profile_settings()
+	_lighting_color_mood = _resolve_color_mood(data)
+	if lighting_profile == "day":
+		# Day videos should stay neutral; mood tinting is reserved for night.
+		_lighting_color_mood = "day"
+	_lighting_illumination_scale = _resolve_illumination_scale(data)
+	# Pre-count ceiling fixtures for sqrt energy normalisation.
+	if typeof(geom_data) == TYPE_DICTIONARY:
+		_ceiling_fixture_count = max(1, _count_ceiling_fixture_lights(geom_data))
+		print("[VideoGLB] Lighting mood=", _lighting_color_mood, " illumination_scale=", _lighting_illumination_scale, " ceiling_fixtures=", _ceiling_fixture_count, " sqrt_factor=", snappedf(sqrt(float(_ceiling_fixture_count)), 0.01))
+	else:
+		print("[VideoGLB] Lighting mood=", _lighting_color_mood, " illumination_scale=", _lighting_illumination_scale)
 
 	# Extract camera pose for light anchor and room bounds
 	var cam_pose     = cam_pose_override if cam_pose_override != null else _extract_camera_pose(data)
@@ -302,24 +472,52 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	dir_light.shadow_blur                        = 1.5
 	dir_light.light_angular_distance             = 0.5
 
+	var directional_transform = _resolve_directional_light_transform(data)
+	_directional_light_authoring_locked = false
+
+	var dir_energy = lighting["dir_energy"]
+	var dir_color = lighting["dir_color"]
+	if data.has("_lightingSettings") and typeof(data["_lightingSettings"]) == TYPE_DICTIONARY:
+		var ls = data["_lightingSettings"]
+		if ls.has("directional"):
+			dir_energy = float(ls.get("directional", dir_energy))
+		if ls.has("directionalColor") and typeof(ls["directionalColor"]) == TYPE_DICTIONARY:
+			var ls_color = ls["directionalColor"]
+			dir_color = Color(
+				float(ls_color.get("r", dir_color.r)),
+				float(ls_color.get("g", dir_color.g)),
+				float(ls_color.get("b", dir_color.b))
+			)
+
 	if data.has("directional_light"):
 		var l = data["directional_light"]
-		dir_light.light_energy = l.get("intensity", lighting["dir_energy"])
+		dir_energy = float(l.get("intensity", dir_energy))
 		if l.has("color") and typeof(l["color"]) == TYPE_DICTIONARY:
 			var c = l["color"]
-			var default_dir_color = lighting["dir_color"]
-			dir_light.light_color = Color(
-				float(c.get("r", default_dir_color.r)),
-				float(c.get("g", default_dir_color.g)),
-				float(c.get("b", default_dir_color.b))
+			dir_color = Color(
+				float(c.get("r", dir_color.r)),
+				float(c.get("g", dir_color.g)),
+				float(c.get("b", dir_color.b))
 			)
-		else:
-			dir_light.light_color = lighting["dir_color"]
-		if l.has("position"):
-			dir_light.position = parse_vec3(l["position"])
-	else:
-		dir_light.light_energy = lighting["dir_energy"]
-		dir_light.light_color  = lighting["dir_color"]
+	var mood_dir_color = _get_color_mood_light_color("directional")
+	dir_light.light_energy = dir_energy * _lighting_illumination_scale
+	dir_light.light_color = Color(
+		dir_color.r * mood_dir_color.r,
+		dir_color.g * mood_dir_color.g,
+		dir_color.b * mood_dir_color.b
+	)
+
+	if directional_transform["has_position"]:
+		dir_light.position = directional_transform["position"]
+		_directional_light_authoring_locked = true
+	if directional_transform["has_target"]:
+		var target_pos: Vector3 = directional_transform["target"]
+		if dir_light.position.distance_to(target_pos) > 0.001:
+			dir_light.look_at(target_pos, Vector3.UP)
+		_directional_light_authoring_locked = true
+
+	if _directional_light_authoring_locked:
+		print("[VideoGLB] Using authored directional light transform from JSON.")
 
 	# Save to instance variable and add to tree
 	_dir_light = dir_light
@@ -362,18 +560,38 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	# ── Ambient Light ──────────────────────────────────────────────────────────
 	# Use COLOR ambient for enclosed rooms — avoids sky-light bleeding at corners.
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color  = lighting["ambient_color"]
-	env.ambient_light_energy = lighting["ambient_energy"]
+	var mood_ambient_color = _get_color_mood_light_color("ambient")
+	env.ambient_light_color  = Color(
+		lighting["ambient_color"].r * mood_ambient_color.r,
+		lighting["ambient_color"].g * mood_ambient_color.g,
+		lighting["ambient_color"].b * mood_ambient_color.b
+	)
+	env.ambient_light_energy = lighting["ambient_energy"] * _lighting_illumination_scale
 
 	# ── Tone Mapping ───────────────────────────────────────────────────────────
-	env.tonemap_mode     = Environment.TONE_MAPPER_FILMIC
+	# AGX tonemapper: better shadow detail and naturalistic highlight rolloff vs filmic.
+	env.tonemap_mode     = Environment.TONE_MAPPER_AGX
 	env.tonemap_exposure = lighting["tonemap_exposure"]
-	env.tonemap_white    = lighting["tonemap_white"]
+	env.tonemap_white    = lighting.get("tonemap_agx_white", lighting["tonemap_white"])
+	# Bake AGX contrast into exposure (Godot 4 AGX has no separate contrast param).
+	env.tonemap_exposure = env.tonemap_exposure * lighting.get("tonemap_agx_contrast", 1.0)
 
 	# ── Disabled effects (crash / black in headless export) ────────────────────
 	env.sdfgi_enabled = false
-	env.ssil_enabled  = false
-	env.ssr_enabled   = false
+
+	# Screen-Space Indirect Light (safe GI replacement for headless)
+	env.ssil_enabled        = true
+	env.ssil_radius         = 5.0     # Sample radius in world units (default: 5.0)
+	env.ssil_intensity      = 0.5     # Indirect light intensity (default: 1.0)
+	env.ssil_sharpness      = 0.98    # Edge-preservation sharpness (default: 0.98)
+	env.ssil_normal_rejection = 1.0
+
+	# Screen-Space Reflections: DISABLED in headless (depth buffer missing)
+	env.ssr_enabled = true
+	env.ssr_max_steps = 64    # default 64, increase for longer reflections
+	env.ssr_fade_in = 0.15
+	env.ssr_fade_out = 2.0
+	env.ssr_depth_tolerance = 0.2
 
 	# ── SSAO ───────────────────────────────────────────────────────────────────
 	env.ssao_enabled   = true
@@ -399,11 +617,26 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 	env.adjustment_saturation = 1.10
 
 # ── ReflectionProbe ────────────────────────────────────────────────────────
-	# Removed entirely for video renders.
-	# Godot's ReflectionProbe UPDATE_ONCE takes exactly 6 frames to bake its cubemap.
-	# During frames 0-4, the ambient lighting falls back to a dark unbaked state,
-	# causing a visually jarring "pop" on frame 5 when the probe completes.
-	# For continuous video rendering, we rely exclusively on the WorldEnvironment.
+	# Using UPDATE_ALWAYS (not UPDATE_ONCE) to avoid the 6-frame cubemap bake
+	# delay that causes a jarring dark "pop" on frame 5 in video renders.
+	# UPDATE_ALWAYS re-bakes every frame — slower but artifact-free for video.
+	var probe = ReflectionProbe.new()
+	probe.name = "RoomReflectionProbe"
+	probe.size = Vector3(
+		max(20.0, room_extent.x + 2.0),
+		max(8.0,  room_ceiling_y - room_center.y + 2.0),
+		max(20.0, room_extent.y + 2.0)
+	)
+	probe.update_mode    = ReflectionProbe.UPDATE_ALWAYS
+	probe.intensity      = 3.0
+	probe.max_distance   = 0.0
+	probe.blend_distance = 1.0
+	probe.position       = room_center
+	probe.interior       = true
+	probe.box_projection = true
+	probe.enable_shadows = true
+	add_child(probe)
+	print("[VideoGLB] ReflectionProbe (ALWAYS) at: ", room_center, " size: ", probe.size)
 
 	var world_env = WorldEnvironment.new()
 	world_env.environment = env
@@ -414,9 +647,14 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 		var fill = OmniLight3D.new()
 		fill.name           = "FillLight"
 		fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
-		fill.light_energy   = lighting["fill_energy"]
+		fill.light_energy   = lighting["fill_energy"] * _lighting_illumination_scale
 		fill.omni_range     = max(room_extent.x, room_extent.y) * 2.5 + 10.0
-		fill.light_color    = lighting["fill_color"]
+		var mood_fill_color = _get_color_mood_light_color("fill")
+		fill.light_color    = Color(
+			lighting["fill_color"].r * mood_fill_color.r,
+			lighting["fill_color"].g * mood_fill_color.g,
+			lighting["fill_color"].b * mood_fill_color.b
+		)
 		fill.light_specular = 0.0
 		fill.shadow_enabled = false
 		add_child(fill)
@@ -426,9 +664,13 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 		var fill_front = OmniLight3D.new()
 		fill_front.name           = "FrontFillLight"
 		fill_front.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) + cam_forward * fill_offset
-		fill_front.light_energy   = lighting["front_back_fill_energy"]
+		fill_front.light_energy   = lighting["front_back_fill_energy"] * _lighting_illumination_scale
 		fill_front.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
-		fill_front.light_color    = lighting["front_back_fill_color"]
+		fill_front.light_color    = Color(
+			lighting["front_back_fill_color"].r * mood_fill_color.r,
+			lighting["front_back_fill_color"].g * mood_fill_color.g,
+			lighting["front_back_fill_color"].b * mood_fill_color.b
+		)
 		fill_front.light_specular = 0.0
 		fill_front.shadow_enabled = false
 		add_child(fill_front)
@@ -436,9 +678,13 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 		var fill_back = OmniLight3D.new()
 		fill_back.name           = "BackFillLight"
 		fill_back.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) - cam_forward * fill_offset
-		fill_back.light_energy   = lighting["front_back_fill_energy"]
+		fill_back.light_energy   = lighting["front_back_fill_energy"] * _lighting_illumination_scale
 		fill_back.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
-		fill_back.light_color    = lighting["front_back_fill_color"]
+		fill_back.light_color    = Color(
+			lighting["front_back_fill_color"].r * mood_fill_color.r,
+			lighting["front_back_fill_color"].g * mood_fill_color.g,
+			lighting["front_back_fill_color"].b * mood_fill_color.b
+		)
 		fill_back.light_specular = 0.0
 		fill_back.shadow_enabled = false
 		add_child(fill_back)
@@ -446,9 +692,14 @@ func setup_lighting(data, geom_data = {}, cam_pose_override = null):
 		var fill = OmniLight3D.new()
 		fill.name           = "FillLight"
 		fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
-		fill.light_energy   = lighting["fill_energy"]
+		fill.light_energy   = lighting["fill_energy"] * _lighting_illumination_scale
 		fill.omni_range     = max(room_extent.x, room_extent.y) * 2.2 + 7.0
-		fill.light_color    = lighting["fill_color"]
+		var mood_fill_color = _get_color_mood_light_color("fill")
+		fill.light_color    = Color(
+			lighting["fill_color"].r * mood_fill_color.r,
+			lighting["fill_color"].g * mood_fill_color.g,
+			lighting["fill_color"].b * mood_fill_color.b
+		)
 		fill.light_specular = 0.0
 		fill.shadow_enabled = false
 		add_child(fill)
@@ -665,6 +916,8 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"ambient_energy": 0.05,
 				"tonemap_exposure": 0.45,
 				"tonemap_white": 4.8,
+				"tonemap_agx_white": 14.0,
+				"tonemap_agx_contrast": 1.12,
 				"glow_intensity": 0.26,
 				"glow_bloom": 0.10,
 				"glow_hdr_threshold": 1.15,
@@ -689,6 +942,8 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"ambient_energy": 0.28,
 				"tonemap_exposure": 0.78,
 				"tonemap_white": 4.6,
+				"tonemap_agx_white": 16.0,
+				"tonemap_agx_contrast": 1.30,
 				"glow_intensity": 0.28,
 				"glow_bloom": 0.11,
 				"glow_hdr_threshold": 1.10,
@@ -713,6 +968,8 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"ambient_energy": 0.15,
 				"tonemap_exposure": 0.72,
 				"tonemap_white": 5.0,
+				"tonemap_agx_white": 16.29,
+				"tonemap_agx_contrast": 1.18,
 				"glow_intensity": 0.22,
 				"glow_bloom": 0.08,
 				"glow_hdr_threshold": 1.35,
@@ -1098,8 +1355,10 @@ func _is_point_in_polygon(point: Vector2, polygon: Array) -> bool:
 # Priority: asset_urls block → inner/outer_properties → cross-fallback → null
 # ─────────────────────────────────────────────────────────────────
 func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
-	var prop_key = face + "_properties"
-	var other_face = "outer" if face == "inner" else "inner"
+	var lookup_face = face
+	# Walls already carry authored inner/outer faces in the correct orientation.
+	var prop_key = lookup_face + "_properties"
+	var other_face = "outer" if lookup_face == "inner" else "inner"
 	var other_prop_key = other_face + "_properties"
 	var has_face_material = false
 	if line.has(prop_key) and typeof(line[prop_key]) == TYPE_DICTIONARY:
@@ -1112,8 +1371,8 @@ func _resolve_wall_face_material(line: Dictionary, face: String) -> Variant:
 	# 1. asset_urls block
 	if line.has("asset_urls") and typeof(line["asset_urls"]) == TYPE_DICTIONARY:
 		var au = line["asset_urls"]
-		if au.has(face) and typeof(au[face]) == TYPE_DICTIONARY:
-			var block    = au[face]
+		if au.has(lookup_face) and typeof(au[lookup_face]) == TYPE_DICTIONARY:
+			var block    = au[lookup_face]
 			var mat_data = {}
 
 			if block.has("mapUrl") and block["mapUrl"] != null and str(block["mapUrl"]) != "":
@@ -1739,8 +1998,11 @@ func _build_layer_geometry(layer_data, layer_altitude, show_all_floors = true, c
 		var wall_angle = -atan2(diff.z, diff.x)
 		var wall_pos   = Vector3(center.x, layer_altitude + height / 2.0, center.z)
 
-		# Extend wall at both ends to fill corner gaps
-		var corner_length = length + wall_thickness
+		# Keep a tiny seam gap so adjacent colored walls do not overlap.
+		# This avoids visible color/texture blending at wall joins while
+		# staying effectively invisible in the final render.
+		var wall_join_gap = 0.001
+		var corner_length = max(length - wall_join_gap, 0.05)
 
 		# ── Determine inner/outer facing (mirrors frontend exactly) ───────────
 		var wall_facing = _get_wall_facing_direction(line, vertices, areas)
@@ -2458,6 +2720,73 @@ func _apply_light_fixture_emission(node: Node3D, light_color: Color, emission_en
 				applied = true
 	return applied
 
+func _node_has_emissive_material(node: Node3D) -> bool:
+	var meshes = _get_all_meshes(node)
+	var emissive_keywords = [
+		"emiss", "glow", "bulb", "led",
+		"filament", "diffuser", "lamp_head",
+		"shade_inner", "tube"
+	]
+
+	for m in meshes:
+		if not m.mesh:
+			continue
+		for i in range(m.mesh.get_surface_count()):
+			var mat = m.get_active_material(i)
+			if mat == null:
+				mat = m.mesh.surface_get_material(i)
+
+			if mat and mat is StandardMaterial3D:
+				if mat.emission_enabled or mat.emission_energy_multiplier > 0.05:
+					return true
+
+			var mat_name = ""
+			var surface_name = ""
+			if mat != null:
+				mat_name = str(mat.resource_name).to_lower()
+			surface_name = str(m.mesh.surface_get_name(i)).to_lower()
+			for kw in emissive_keywords:
+				if kw in mat_name or kw in surface_name:
+					return true
+
+	return false
+
+func _should_add_light_fixture_effect(node: Node3D, item: Dictionary) -> bool:
+	# ONLY items whose metadata explicitly identifies them as light fixtures
+	# should get an OmniLight3D.  The _node_has_emissive_material() fallback
+	# was adding OmniLights to beds, sofas, and other furniture whose GLBs
+	# happened to have emissive materials — causing a warm center blob in renders.
+	if _is_light_fixture_item(item):
+		print("[LightFixture] ACCEPTED: ", item.get("name", "?"), " type=", item.get("type", "?"), " mount=", item.get("mounting_type", "?"))
+		return true
+	return false
+
+# Counts only ceiling_mount light fixtures — the denominator for sqrt normalisation.
+func _count_ceiling_fixture_lights(geom_data: Dictionary) -> int:
+	var count := 0
+	var _scan := func(items) -> void:
+		if typeof(items) == TYPE_ARRAY:
+			for item in items:
+				if typeof(item) == TYPE_DICTIONARY \
+				and str(item.get("mounting_type", "")).to_lower() == "ceiling_mount" \
+				and _is_light_fixture_item(item):
+					count += 1
+		elif typeof(items) == TYPE_DICTIONARY:
+			for id in items:
+				var item = items[id]
+				if typeof(item) == TYPE_DICTIONARY \
+				and str(item.get("mounting_type", "")).to_lower() == "ceiling_mount" \
+				and _is_light_fixture_item(item):
+					count += 1
+	if geom_data.has("items"):
+		_scan.call(geom_data["items"])
+	if geom_data.has("layers") and typeof(geom_data["layers"]) == TYPE_DICTIONARY:
+		for layer_id in geom_data["layers"]:
+			var layer = geom_data["layers"][layer_id]
+			if typeof(layer) == TYPE_DICTIONARY and layer.has("items"):
+				_scan.call(layer["items"])
+	return count
+
 func _normalize_material_label(value: String) -> String:
 	var text := str(value).strip_edges().to_lower()
 	var normalized := ""
@@ -2499,7 +2828,7 @@ func _material_key_is_generic(key: String) -> bool:
 func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB, final_scale: Vector3) -> void:
 	if item.get("is_exterior_black", false):
 		return
-	if not _is_light_fixture_item(item):
+	if not _should_add_light_fixture_effect(node, item):
 		return
 
 	var item_type = str(item.get("type", "")).to_lower()
@@ -2594,20 +2923,63 @@ func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB,
 				light_energy = 5.0
 				emission_energy = 10.0
 
+	# Ceiling fixture sqrt normalisation — mirrors image_glb_creation.gd.
+	# Divides per-fixture energy by sqrt(N) so total luminance grows as sqrt(N) not N.
+	# Cap divisor at sqrt(16)=4.0 to avoid over-dimming in very large plans.
+	if mounting_type == "ceiling_mount":
+		var sqrt_n := sqrt(float(clamp(_ceiling_fixture_count, 1, 16)))
+		light_energy    /= sqrt_n
+		emission_energy /= sqrt_n
+
 	var emissive_surface_found = _apply_light_fixture_emission(node, light_color, emission_energy)
 
 	var world_pos = node.to_global(emitter_local)
-	if mounting_type == "ceiling_mount" or "wall" in full_desc or is_street_light:
+	var is_wall_panel_light = (
+		"wall" in full_desc
+		and (
+			"panel" in full_desc
+			or "led" in full_desc
+			or "walllamp" in full_desc
+			or "wall lamp" in full_desc
+		)
+	)
+
+	if is_wall_panel_light:
+		var omni = OmniLight3D.new()
+		omni.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		omni.global_position = world_pos
+		omni.light_color = light_color
+		omni.light_energy = light_energy
+		omni.light_specular = 0.25
+		omni.shadow_enabled = false
+		omni.omni_range = max(light_range, 6.0)
+		omni.add_to_group("fixture_lights")
+		add_child(omni)
+	elif mounting_type == "ceiling_mount":
+		# Ceiling fixtures — OmniLight3D radiates evenly in all directions
+		var omni_ceil = OmniLight3D.new()
+		omni_ceil.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
+		omni_ceil.global_position = world_pos
+		omni_ceil.light_color     = light_color
+		omni_ceil.light_energy    = light_energy
+		omni_ceil.light_specular  = 0.25
+		omni_ceil.shadow_enabled  = false
+		omni_ceil.omni_range      = light_range
+		omni_ceil.add_to_group("fixture_lights")
+		add_child(omni_ceil)
+	elif "wall" in full_desc or is_street_light:
+		# Wall sconces and street lights — SpotLight3D aimed downward/outward
 		var spot = SpotLight3D.new()
 		spot.name = "FixtureLight_" + str(item.get("id", item.get("name", "Light")))
 		spot.global_position = world_pos
-		spot.light_color = light_color
-		spot.light_energy = light_energy
-		spot.light_specular = 0.25
-		spot.shadow_enabled = false
-		spot.spot_range = light_range
-		spot.spot_angle = 62.0 if mounting_type == "ceiling_mount" else 48.0
+		spot.light_color     = light_color
+		spot.light_energy    = light_energy
+		spot.light_specular  = 0.25
+		spot.shadow_enabled  = false
+		spot.spot_range      = light_range
+		spot.spot_angle      = 48.0
 		spot.spot_attenuation = 0.75
+		spot.add_to_group("fixture_lights")
 		add_child(spot)
 
 		var target_local = emitter_local + Vector3(0, -max(1.0, light_range * 0.45), 0)
@@ -2623,6 +2995,7 @@ func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB,
 		omni.light_specular = 0.25
 		omni.shadow_enabled = false
 		omni.omni_range = light_range
+		omni.add_to_group("fixture_lights")
 		add_child(omni)
 
 	if not emissive_surface_found:
@@ -2758,6 +3131,21 @@ func _load_layer_items(items, layer_altitude, layer_id = "root"):
 							final_scale = Vector3(scale_x, scale_y, scale_z)
 
 						node.scale = final_scale
+						var flip_x = bool(item.get("flipX", false))
+						var flip_y = bool(item.get("flipY", item.get("fipy", false)))
+						var flip_z = bool(item.get("flipZ", false))
+						var applied_flips: Array = []
+						if flip_x:
+							node.scale.x = -abs(node.scale.x)
+							applied_flips.append("X")
+						if flip_y:
+							node.scale.y = -abs(node.scale.y)
+							applied_flips.append("Y")
+						if flip_z:
+							node.scale.z = -abs(node.scale.z)
+							applied_flips.append("Z")
+						if not applied_flips.is_empty():
+							print("[VideoGLB] Applied flip(s) on axis/axes ", applied_flips, " for asset: ", item.get("name", "Unknown"))
 						var bounds_y_min = aabb.position.y * final_scale.y
 						node.position.y  = pz - bounds_y_min
 						

@@ -2483,6 +2483,13 @@ def _encode_png_sequence_to_mp4(output_dir: str, base_name: str, output_mp4_path
 
 
 
+def _get_thumbnail_path(file_path: str) -> str:
+    """Return the expected thumbnail path next to a rendered image or video."""
+    base_dir = os.path.dirname(os.path.abspath(file_path))
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    return os.path.join(base_dir, f"{base_name}_thumb.webp")
+
+
 def _upload_to_blob_storage(file_path: str, blob_container: str = "render-images") -> str:
     """
     Uploads the rendered file (image or video) to Azure Blob Storage and returns the blob URL.
@@ -2510,6 +2517,9 @@ def _upload_to_blob_storage(file_path: str, blob_container: str = "render-images
         elif file_ext in ['.png', '.jpg', '.jpeg']:
             content_type = 'image/png' if file_ext == '.png' else 'image/jpeg'
             file_type = "Image"
+        elif file_ext == '.webp':
+            content_type = 'image/webp'
+            file_type = "Thumbnail"
         else:
             content_type = 'application/octet-stream'
             file_type = "File"
@@ -2567,6 +2577,7 @@ def _send_status_update(
     render_type: str = "IMAGE",
     file_path: Optional[str] = None,
     blob_url: Optional[str] = None,
+    thumbnail_url: Optional[str] = None,
     details: Optional[Dict[str, Any]] = None,
     logger: Optional[RenderLogger] = None,
     api_endpoint: Optional[str] = None,
@@ -2648,6 +2659,9 @@ def _send_status_update(
                 payload_details.setdefault("image_url", blob_url)
                 payload_details.setdefault("output_url", blob_url)
                 payload_details.setdefault("blob_url", blob_url)
+            if thumbnail_url:
+                status_payload_form["ThumbnailUrl"] = thumbnail_url
+                payload_details.setdefault("thumbnail_url", thumbnail_url)
 
             if payload_details:
                 status_payload_form["Details"] = json.dumps(payload_details)
@@ -2656,7 +2670,7 @@ def _send_status_update(
             upload_url = api_endpoint if api_endpoint else (VIDEO_UPLOAD_API_URL if render_type == "VIDEO" else UPLOAD_API_URL)
             
             print(f"\n{COLOR_BLUE}📡 [Background] Sending Status: {status_name} ({progress}%) - {message}{COLOR_RESET}")
-            # DEBUG: Print payload to verify ImageUrl/VideoUrl
+            # DEBUG: Print payload to verify ImageUrl/VideoUrl/ThumbnailUrl
             print(f"   Payload: {json.dumps(status_payload_form, default=str)}")
             
             request_start_time = time.monotonic()
@@ -2764,6 +2778,15 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
         file_ext = os.path.splitext(file_path)[1].lower()
         blob_container = "render-videos" if file_ext == '.mp4' else "render-images"
         blob_url = _upload_to_blob_storage(file_path, blob_container=blob_container)
+        thumbnail_url = None
+        thumbnail_path = _get_thumbnail_path(file_path)
+        if os.path.exists(thumbnail_path):
+            print(f"{COLOR_BLUE}🖼️ Uploading thumbnail: {thumbnail_path}{COLOR_RESET}")
+            thumbnail_url = _upload_to_blob_storage(thumbnail_path, blob_container=blob_container)
+            if not thumbnail_url:
+                print(f"{COLOR_YELLOW}⚠️ Thumbnail upload failed, continuing with the main render only.{COLOR_RESET}")
+        else:
+            print(f"{COLOR_YELLOW}⚠️ Thumbnail not found at: {thumbnail_path}{COLOR_RESET}")
         
         # Step 2: Send blob URL + status to main API (NO binary file)
         if not blob_url:
@@ -2783,7 +2806,7 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
             )
             return False
 
-        # We use _send_status_update which sends the blob URL in ImageUrl field
+        # We use _send_status_update which sends the main blob URL and thumbnail URL
         
         # --- NEW: Read Asset Report to include log details in final JSON ---
         final_details = {}
@@ -2797,6 +2820,9 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
         except Exception as e:
             print(f"⚠️ Could not include asset report: {e}")
 
+        if thumbnail_url:
+            final_details["thumbnail_url"] = thumbnail_url
+
         success = _send_status_update(
             project_id=project_id,
             gallery_id=gallery_id,
@@ -2808,6 +2834,7 @@ def _upload_render_to_api(project_id: int, gallery_id: int, file_path: str, user
             message="Your render is ready!" if render_type == "IMAGE" else "Your video is ready!",
             render_type=render_type,
             blob_url=blob_url,  # Send blob URL in ImageUrl field
+            thumbnail_url=thumbnail_url,
             logger=logger,
             details=final_details,
             wait_for_delivery=True
@@ -3013,6 +3040,7 @@ def _run_godot_video_render(job_id: str, payload: VideoGenerationPayload, logger
         "res://video_main.tscn",
         "--",
         input_json_path,
+        output_video_path,
         temp_img_base  # passed so GDScript knows where to save PNGs if MovieWriter fails
     ])
     

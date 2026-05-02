@@ -21,7 +21,8 @@ var _use_movie_writer: bool = false
 var _use_png_fallback: bool = false
 var _needs_auto_pan: bool = false
 var _render_data = {}    # Full parsed JSON — used by setup_fixed_fill_lights()
-var _output_path: String = ""  # Stored for save_logs at completion
+var _output_path: String = ""  # Stored for save_logs / thumbnail naming
+var _fallback_path: String = "" # Stored for PNG fallback frame output
 var _first_frame_saved: bool = false  # Track whether first-frame thumbnail has been saved
 
 func _ready():
@@ -33,17 +34,23 @@ func _ready():
 	
 	var input_json_path = ""
 	var output_path = ""
+	var fallback_path = ""
 	
 	for i in range(args.size()):
 		var arg = args[i]
 		if arg.ends_with(".json"):
 			input_json_path = arg
-		elif arg.ends_with(".png") or arg.ends_with(".jpg") or arg.ends_with(".mp4") or arg.ends_with(".avi") or arg == "video_output":
+		elif arg.ends_with(".mp4") or arg.ends_with(".avi"):
+			output_path = arg
+		elif arg.ends_with(".png") or arg.ends_with(".jpg"):
+			fallback_path = arg
+		elif arg == "video_output" and output_path == "":
 			output_path = arg
 			
-	if (input_json_path == "" or output_path == "") and args.size() >= 2:
-		input_json_path = args[args.size()-2]
-		output_path = args[args.size()-1]
+	if input_json_path == "" and args.size() >= 1:
+		input_json_path = args[0]
+	if output_path == "" and fallback_path != "":
+		output_path = fallback_path
 	
 	if input_json_path == "":
 		print("Error: Missing input JSON argument.")
@@ -60,7 +67,9 @@ func _ready():
 	else:
 		print("MovieWriter NOT active - using PNG fallback")
 		_use_png_fallback = true
-		if output_path != "":
+		if fallback_path != "":
+			_base_filename = fallback_path.get_basename()
+		elif output_path != "":
 			_base_filename = output_path.get_basename()
 	
 	if not FileAccess.file_exists(input_json_path):
@@ -77,16 +86,18 @@ func _ready():
 		return
 		
 	var data = json.data
-	_setup_render(data, output_path)
+	_setup_render(data, output_path, fallback_path)
 
-func _setup_render(data, output_path):
+func _setup_render(data, output_path, fallback_path):
 	_render_data = data   # Cache for later use by setup_fixed_fill_lights()
 	_output_path = output_path  # Store for save_logs at completion
+	_fallback_path = fallback_path
 	set_resolution(data)
 	build_scene(data)
 	# Set up fill lights IMMEDIATELY so they exist from frame 0.
 	# If done during warmup, the first few frames captured by MovieWriter are dark.
 	setup_fixed_fill_lights()
+	_apply_color_mood_to_scene()
 	setup_camera(data)
 	
 	# Extract keyframes
@@ -185,6 +196,35 @@ func _capture_thumbnail_async():
 	if img and not img.is_empty():
 		_save_thumbnail_webp(img, _output_path)
 
+func _apply_color_mood_to_scene() -> void:
+	var directional_tint = _get_color_mood_light_color("directional")
+	var ambient_tint = _get_color_mood_light_color("ambient")
+	var fill_tint = _get_color_mood_light_color("fill")
+	var fixture_tint = _get_color_mood_light_color("fixture")
+
+	for child in get_children():
+		if child is WorldEnvironment:
+			var world_env := child as WorldEnvironment
+			if world_env.environment != null:
+				world_env.environment.ambient_light_color = ambient_tint
+
+	for node in _get_all_children_recursive(self):
+		if node is DirectionalLight3D:
+			(node as DirectionalLight3D).light_color = directional_tint
+		elif node is SpotLight3D or node is OmniLight3D:
+			var n = node.name.to_lower()
+			if "fixture" in n:
+				(node as Light3D).light_color = fixture_tint
+			else:
+				(node as Light3D).light_color = fill_tint
+
+func _get_all_children_recursive(node: Node) -> Array:
+	var out: Array = []
+	for child in node.get_children():
+		out.append(child)
+		out.append_array(_get_all_children_recursive(child))
+	return out
+
 func _apply_keyframe(frame_idx: int):
 	var cam = get_node_or_null("MainCamera")
 	if not cam:
@@ -281,7 +321,7 @@ func _apply_keyframe(frame_idx: int):
 			cam.basis = Basis(blended)
 
 	# Dynamic sunlight: update sun orientation to favor windows in this frame's view
-	if _dir_light != null:
+	if _dir_light != null and not _directional_light_authoring_locked:
 		var cam_pose = {
 			"position": cam.position,
 			"target": cam.position - cam.basis.z * 5.0
@@ -578,6 +618,8 @@ func setup_fixed_fill_lights():
 		l.queue_free()
 
 	var placed = 0
+	var lighting_scale = _resolve_illumination_scale(_render_data)
+	var mood_fill_color = _get_color_mood_light_color("fill")
 
 	# ── 1. Try floor-plan area data (preferred — one light per room) ──
 	var areas = _get_floor_plan_areas()
@@ -656,15 +698,15 @@ func setup_fixed_fill_lights():
 			var light = OmniLight3D.new()
 			light.name = "RoomLight_" + str(area_id)
 			light.position = Vector3(cx, light_y, cz)  # ← fixed world position
-			light.light_energy = energy
+			light.light_energy = energy * lighting_scale
 			light.omni_range = omni_range
 			light.shadow_enabled = false   # sun handles primary shadows; fills add brightness
-			light.light_color = Color(1.0, 0.97, 0.90)  # warm white
+			light.light_color = Color(1.0 * mood_fill_color.r, 0.97 * mood_fill_color.g, 0.90 * mood_fill_color.b)
 			light.add_to_group("fill_lights")
 			add_child(light)
 			placed += 1
 			print("[VideoRender] Room light '%s' at (%.2f, %.2f, %.2f)  range=%.1f  energy=%.2f" \
-				% [area_id, cx, light_y, cz, omni_range, energy])
+				% [area_id, cx, light_y, cz, omni_range, energy * lighting_scale])
 
 	# ── 2. Fallback: single centre light derived from mesh AABB ──
 	if placed == 0:
@@ -686,10 +728,10 @@ func setup_fixed_fill_lights():
 		var light = OmniLight3D.new()
 		light.name = "RoomLight_Fallback"
 		light.position = Vector3(scene_center.x, light_y, scene_center.z)
-		light.light_energy = 1.5
+		light.light_energy = 1.5 * lighting_scale
 		light.omni_range = 18.0
 		light.shadow_enabled = false
-		light.light_color = Color(1.0, 0.97, 0.90)
+		light.light_color = Color(1.0 * mood_fill_color.r, 0.97 * mood_fill_color.g, 0.90 * mood_fill_color.b)
 		light.add_to_group("fill_lights")
 		add_child(light)
 		placed = 1
