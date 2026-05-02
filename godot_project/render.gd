@@ -51,6 +51,7 @@ func _ready():
 		
 	var data = json.data
 	_render_data = data
+	_image_render_only = not _should_render_video(data)
 	
 	set_resolution(data)
 	build_scene(data) # From image_glb_creation.gd
@@ -249,6 +250,7 @@ func render_image(data, output_path):
 	var cam = get_node_or_null("MainCamera")
 	if cam:
 		setup_fixed_fill_lights()
+		_apply_color_mood_to_scene()
 		await _wait_frames(1)
 	
 	var img = await _capture_viewport_image(6)
@@ -259,6 +261,35 @@ func render_image(data, output_path):
 	
 	save_logs(data, output_path)
 	get_tree().quit(0)
+
+func _apply_color_mood_to_scene() -> void:
+	var directional_tint = _get_color_mood_light_color("directional")
+	var ambient_tint = _get_color_mood_light_color("ambient")
+	var fill_tint = _get_color_mood_light_color("fill")
+	var fixture_tint = _get_color_mood_light_color("fixture")
+
+	for child in get_children():
+		if child is WorldEnvironment:
+			var world_env := child as WorldEnvironment
+			if world_env.environment != null:
+				world_env.environment.ambient_light_color = ambient_tint
+
+	for node in _get_all_children_recursive(self):
+		if node is DirectionalLight3D:
+			(node as DirectionalLight3D).light_color = directional_tint
+		elif node is SpotLight3D or node is OmniLight3D:
+			var n = node.name.to_lower()
+			if "fixture" in n:
+				(node as Light3D).light_color = fixture_tint
+			else:
+				(node as Light3D).light_color = fill_tint
+
+func _get_all_children_recursive(node: Node) -> Array:
+	var out: Array = []
+	for child in node.get_children():
+		out.append(child)
+		out.append_array(_get_all_children_recursive(child))
+	return out
 
 func save_logs(input_data, output_image_path):
 	print("Saving logs...")
@@ -349,6 +380,10 @@ func setup_fixed_fill_lights():
 	for l in get_tree().get_nodes_in_group("fill_lights"):
 		l.queue_free()
 
+	var illumination_scale = _lighting_illumination_scale
+	if illumination_scale <= 0.0:
+		illumination_scale = _resolve_illumination_scale(_render_data)
+
 	# Dim automated room fills if manual light fixtures are already present
 	var energy_multiplier = 1.0
 	var fixture_count = get_tree().get_nodes_in_group("fixture_lights").size()
@@ -434,7 +469,7 @@ func setup_fixed_fill_lights():
 			var light = OmniLight3D.new()
 			light.name = "RoomLight_" + str(area_id)
 			light.position = Vector3(cx, light_y, cz)  # ← fixed world position
-			light.light_energy = energy * energy_multiplier
+			light.light_energy = energy * energy_multiplier * illumination_scale
 			light.omni_range = omni_range
 			light.shadow_enabled = false
 			light.light_color = Color(1.0, 0.97, 0.90)  # warm white (match video)
@@ -447,7 +482,7 @@ func setup_fixed_fill_lights():
 		var light = OmniLight3D.new()
 		light.name = "RoomLight_Fallback"
 		light.position = Vector3(0, 2.1, 0)
-		light.light_energy = 1.5
+		light.light_energy = 1.5 * illumination_scale
 		light.omni_range = 18.0
 		light.shadow_enabled = false
 		light.light_color = Color(1.0, 0.97, 0.90)
