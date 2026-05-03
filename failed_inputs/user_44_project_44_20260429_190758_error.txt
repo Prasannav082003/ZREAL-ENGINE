@@ -1,0 +1,29 @@
+============================================================
+RENDER FAILURE REPORT
+============================================================
+
+Timestamp      : 2026-04-29T19:07:58.252033
+Job ID         : newpipe1
+Job Type       : IMAGE
+User ID        : 44
+Project ID     : 44
+Gallery ID     : 44
+Total Attempts : 3/3
+
+────────────────────────────────────────────────────────────
+ERROR DETAILS:
+────────────────────────────────────────────────────────────
+Godot did not produce an output image.
+
+Full Traceback:
+Traceback (most recent call last):
+  File "C:\Zlendo2026\ZlenderRender_SceneExport_and_CustomizeEngine\main.py", line 754, in render_queue_worker
+    _background_render_task(
+  File "C:\Zlendo2026\ZlenderRender_SceneExport_and_CustomizeEngine\main.py", line 2911, in _background_render_task
+    output_image_path = _run_godot_render(job_id, payload, logger=logger)
+  File "C:\Zlendo2026\ZlenderRender_SceneExport_and_CustomizeEngine\main.py", line 2139, in _run_godot_render
+    raise Exception("Godot did not produce an output image.")
+Exception: Godot did not produce an output image.
+
+
+============================================================

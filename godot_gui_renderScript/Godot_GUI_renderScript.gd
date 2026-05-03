@@ -1,0 +1,262 @@
+extends Node
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Godot_GUI_renderScript.gd
+# High-quality 4K render script for use in the Godot GUI editor.
+# Matches the production quality of the headless render.gd pipeline:
+#   - MSAA 8X + TAA + FXAA + Debanding
+#   - AgX Tonemapping with contrast/saturation correction
+#   - SDFGI, SSR, SSAO, SSIL enabled
+#   - Smart camera-relative fill lights (physics-aware, no wall clipping)
+#   - Multi-retry viewport capture
+#   - WebP thumbnail output alongside the PNG
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Output path for the final 4K PNG render
+@export var output_path: String = "user://screen_4k.png"
+
+# How many frames to stabilize before capturing (more = better GI quality)
+@export var stabilize_frames: int = 60
+
+# Whether to add smart fill lights relative to the main camera
+@export var use_smart_lights: bool = true
+
+
+# ─── Viewport Quality Setup ──────────────────────────────────────────────────
+
+func _apply_viewport_quality() -> void:
+	var vp = get_viewport()
+	# MSAA 8X — primary anti-aliasing, stable single-frame (no temporal history needed)
+	vp.msaa_3d = Viewport.MSAA_8X
+	# FXAA post-process pass — smooths remaining jaggies on top of MSAA
+	vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+	# ⚠️ TAA DISABLED intentionally — TAA causes zig-zag/tear artifacts on mesh
+	# silhouette edges because it requires many stable frames of temporal history
+	# to fully converge. The headless automation pipeline effectively runs without
+	# TAA (no display = no temporal accumulation), which is why it produces clean
+	# edges. Setting use_taa=false here matches that behaviour exactly.
+	vp.use_taa = false
+	# Debanding removes colour banding gradients in shadows/sky
+	vp.use_debanding = true
+	# Force full LOD — no mesh popping at render distance
+	vp.mesh_lod_threshold = 0.0
+	print("[GUIRender] Viewport quality applied: MSAA 8X + FXAA (TAA disabled to prevent edge artifacts)")
+
+
+# ─── Environment / GI Enhancement ───────────────────────────────────────────
+
+func _apply_environment_quality() -> void:
+	var world := get_viewport().get_world_3d()
+	if not (world and world.environment):
+		print("[GUIRender] Warning: No WorldEnvironment found — skipping environment quality pass.")
+		return
+
+	var env = world.environment
+
+	# ── Tonemapping ────────────────────────────────────────────────────────
+	# AgX (Godot 4.3+) gives far more natural highlights than ACES.
+	env.tonemap_mode       = Environment.TONE_MAPPER_AGX
+	env.tonemap_exposure   = 0.72  # Matches render.gd setup_lighting()
+	env.tonemap_agx_contrast = 1.18
+
+	# ── Post-Process Adjustments ───────────────────────────────────────────
+	env.adjustment_enabled    = true
+	env.adjustment_brightness = 1.0
+	env.adjustment_contrast   = 1.06
+	env.adjustment_saturation = 1.1   # Slightly more punch than the GUI default
+
+	# ── Glow ──────────────────────────────────────────────────────────────
+	env.glow_enabled       = true
+	env.glow_intensity     = 0.22
+	env.glow_bloom         = 0.08
+	env.glow_blend_mode    = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	env.glow_hdr_threshold = 1.35
+	env.glow_hdr_scale     = 1.9
+
+	# ── Screen Space Reflections (SSR) ────────────────────────────────────
+	env.ssr_enabled         = true
+	env.ssr_depth_tolerance = 0.2
+
+	# ── Ambient Occlusion (SSAO) ──────────────────────────────────────────
+	env.ssao_enabled  = true
+	env.ssao_intensity = 0.45
+	env.ssao_power     = 0.9
+	env.ssao_detail    = 0.25
+	env.ssao_horizon   = 0.03
+
+	# ── Indirect Lighting (SSIL) ──────────────────────────────────────────
+	env.ssil_enabled = true
+
+	# ── SDFGI — Global Illumination ───────────────────────────────────────
+	# Note: SDFGI must already be set up in the scene's WorldEnvironment
+	# node for this to take effect. We just boost the energy output.
+	if env.sdfgi_enabled:
+		env.sdfgi_energy   = 1.5
+		env.sdfgi_cascades = 8
+
+	print("[GUIRender] Environment quality applied: AgX + Glow + SSR + SSAO + SSIL + SDFGI boost")
+
+
+# ─── Smart Fill Lights ────────────────────────────────────────────────────────
+# Places 5 camera-relative OmniLights that avoid embedding into walls.
+
+func setup_smart_point_lights(cam: Camera3D) -> void:
+	# Clear any previously placed smart lights
+	for l in get_tree().get_nodes_in_group("smart_lights"):
+		l.queue_free()
+
+	var space_state = cam.get_world_3d().direct_space_state
+	if not space_state:
+		print("[GUIRender] Warning: Physics space unavailable — skipping smart lights.")
+		return
+
+	var cam_pos = cam.global_position
+	var basis   = cam.global_transform.basis
+	var forward = -basis.z
+	var right   = basis.x
+	var up      = basis.y
+
+	# Equal to render.gd: 5 lights around the camera in useful directions
+	var light_configs = [
+		{"offset": Vector3(0, 0.5, 0),              "energy": 1.5, "range": 15.0, "name": "Near"},
+		{"offset": forward * 2.5 + up * 0.5,       "energy": 1.2, "range": 12.0, "name": "Ahead"},
+		{"offset": right * 1.8 + up * 0.2,         "energy": 0.8, "range": 10.0, "name": "Right"},
+		{"offset": -right * 1.8 + up * 0.2,        "energy": 0.8, "range": 10.0, "name": "Left"},
+		{"offset": -forward * 1.2 + up * 1.0,      "energy": 0.6, "range": 10.0, "name": "Behind"}
+	]
+
+	print("[GUIRender] Placing ", light_configs.size(), " smart fill lights...")
+
+	for config in light_configs:
+		var target_pos = cam_pos + config["offset"]
+		var safe_pos   = _get_safe_light_pos(cam_pos, target_pos, space_state)
+
+		var light             = OmniLight3D.new()
+		light.name            = "SmartLight_" + config["name"]
+		light.position        = safe_pos
+		light.light_energy    = config["energy"]
+		light.omni_range      = config["range"]
+		light.shadow_enabled  = false
+		light.light_color     = Color(1.0, 0.98, 0.92)  # Neutral warm white
+		light.add_to_group("smart_lights")
+		add_child(light)
+
+
+func _get_safe_light_pos(start: Vector3, end: Vector3, space_state: PhysicsDirectSpaceState3D) -> Vector3:
+	var query = PhysicsRayQueryParameters3D.create(start, end)
+	query.collide_with_bodies = true
+	query.collide_with_areas  = false
+
+	var result = space_state.intersect_ray(query)
+	if result:
+		var hit_pos = result.position
+		var dir     = (hit_pos - start).normalized()
+		var dist    = (hit_pos - start).length()
+		var back_off = min(0.25, dist * 0.4)
+		return hit_pos - dir * back_off
+
+	return end
+
+
+# ─── Viewport Capture (multi-retry) ─────────────────────────────────────────
+
+func _capture_viewport_image(retries: int = 6):
+	var vp = get_viewport()
+	for i in range(max(1, retries)):
+		RenderingServer.force_draw()
+		await get_tree().process_frame
+		var tex = vp.get_texture()
+		if tex:
+			var img = tex.get_image()
+			if img and not img.is_empty():
+				return img
+		await get_tree().process_frame
+	return null
+
+
+# ─── WebP Thumbnail ──────────────────────────────────────────────────────────
+
+func _save_thumbnail_webp(source_image: Image, png_path: String) -> void:
+	if source_image == null or source_image.is_empty():
+		return
+
+	var dir       = png_path.get_base_dir()
+	var basename  = png_path.get_file().get_basename()
+	var thumb_path = dir.path_join(basename + "_thumb.webp")
+
+	var thumb = source_image.duplicate()
+	var max_dim = 480
+	var w = thumb.get_width()
+	var h = thumb.get_height()
+
+	if w >= h:
+		thumb.resize(max_dim, max(int(float(h) * float(max_dim) / float(w)), 1), Image.INTERPOLATE_LANCZOS)
+	else:
+		thumb.resize(max(int(float(w) * float(max_dim) / float(h)), 1), max_dim, Image.INTERPOLATE_LANCZOS)
+
+	var err = thumb.save_webp(thumb_path, true, 0.75)
+	if err == OK:
+		print("[GUIRender] Thumbnail saved: ", thumb_path)
+	else:
+		print("[GUIRender] Warning: Thumbnail save failed (code ", err, ")")
+
+
+# ─── Main Entry Point ────────────────────────────────────────────────────────
+
+func _ready():
+	print("[GUIRender] === Zlendo 4K GUI Render Script Started ===")
+
+	# 1. Force 4K — BOTH the OS window AND the viewport render target.
+	# DisplayServer.window_set_size resizes the OS window but the actual GPU
+	# render target stays at whatever DPI-scaled size the editor chose.
+	# Setting get_viewport().size directly bypasses DPI scaling and guarantees
+	# a true 4K render buffer — matching what the headless pipeline does.
+	const RENDER_W = 3840
+	const RENDER_H = 2160
+	DisplayServer.window_set_size(Vector2i(RENDER_W, RENDER_H))
+	get_viewport().size = Vector2i(RENDER_W, RENDER_H)
+	await get_tree().process_frame
+
+	# 2. Apply MSAA / TAA / FXAA / LOD settings
+	_apply_viewport_quality()
+
+	# 3. Apply environment quality (tonemapping, SSR, SSAO, SSIL, SDFGI, glow)
+	_apply_environment_quality()
+
+	# 4. Place camera-relative smart fill lights
+	if use_smart_lights:
+		var cam = get_viewport().get_camera_3d()
+		if cam:
+			setup_smart_point_lights(cam)
+			print("[GUIRender] Smart lights placed relative to: ", cam.name)
+		else:
+			print("[GUIRender] Warning: No active Camera3D found — skipping smart lights.")
+
+	# 5. Wait for SDFGI / GI / shadows to fully converge
+	print("[GUIRender] Stabilizing scene for ", stabilize_frames, " frames...")
+	for i in range(stabilize_frames):
+		RenderingServer.force_draw()
+		await get_tree().process_frame
+
+	# 6. Capture the final image with multi-retry
+	print("[GUIRender] Capturing viewport...")
+	var img = await _capture_viewport_image(6)
+
+	if img and not img.is_empty():
+		# Resolve output path (supports both res:// and absolute paths)
+		var abs_path = output_path
+		if output_path.begins_with("user://") or output_path.begins_with("res://"):
+			abs_path = ProjectSettings.globalize_path(output_path)
+
+		var err = img.save_png(abs_path)
+		if err == OK:
+			print("[GUIRender] ✅ 4K PNG saved: ", abs_path)
+			_save_thumbnail_webp(img, abs_path)
+		else:
+			print("[GUIRender] ❌ Failed to save PNG (error code ", err, ")")
+	else:
+		print("[GUIRender] ❌ Viewport capture returned empty image!")
+
+	print("[GUIRender] === Render Complete — Quitting ===")
+	get_tree().quit()
+

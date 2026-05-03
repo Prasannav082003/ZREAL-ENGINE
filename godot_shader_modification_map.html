@@ -1,0 +1,110 @@
+
+<style>
+.card{background:var(--color-background-secondary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1rem 1.25rem;margin-bottom:12px}
+.pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:500;margin-right:4px}
+.pill-high{background:var(--color-background-danger);color:var(--color-text-danger)}
+.pill-med{background:var(--color-background-warning);color:var(--color-text-warning)}
+.pill-low{background:var(--color-background-success);color:var(--color-text-success)}
+.pill-info{background:var(--color-background-info);color:var(--color-text-info)}
+.path{font-family:var(--font-mono);font-size:11px;color:var(--color-text-secondary);display:block;margin:4px 0 8px}
+.section{font-size:12px;color:var(--color-text-secondary);margin-top:6px}
+.section strong{color:var(--color-text-primary);font-weight:500}
+.row{display:flex;gap:10px;margin-bottom:12px}
+.col{flex:1;min-width:0}
+h3{font-size:14px;font-weight:500;margin:0 0 2px;color:var(--color-text-primary)}
+</style>
+
+<h2 style="font-size:16px;font-weight:500;margin:0 0 16px;padding-top:0.5rem">Shader & source modification guide — by quality goal</h2>
+
+<div class="row">
+<div class="col">
+
+<div class="card">
+<span class="pill pill-high">Highest impact</span><span class="pill pill-info">Forward+</span>
+<h3>Main PBR + Lighting Shader</h3>
+<span class="path">servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl</span>
+<p class="section">
+<strong>Shadow PCF quality</strong> — search <code>shadow_sample_count</code> or <code>SHADOW_MODE_PCF_5</code>. Increase sample count from 5→13 (Poisson disk) for softer shadows.<br><br>
+<strong>PCSS soft shadows</strong> — the angular distance blocker search; search <code>penumbra_size</code>. Increase blocker search taps from 8→16.<br><br>
+<strong>GGX specular</strong> — search <code>D_GGX</code>. Replace with a more accurate GTR2 distribution for sharper highlights at low roughness.<br><br>
+<strong>Clearcoat / anisotropy</strong> — search <code>CLEARCOAT</code>, <code>ANISOTROPY</code>. Improve the per-lobe Fresnel integration here.<br><br>
+<strong>IBL (reflection capture quality)</strong> — search <code>textureLod(radiance_map</code>. Increase mip-bias compensation for sharper reflections.
+</p>
+</div>
+
+<div class="card">
+<span class="pill pill-high">High impact</span>
+<h3>Tone Mapping</h3>
+<span class="path">servers/rendering/renderer_rd/shaders/effects/tonemap.glsl</span>
+<p class="section">
+<strong>Operator selection</strong> — search <code>TONEMAPPER_LINEAR</code>, <code>TONEMAPPER_REINHARDT</code>, <code>TONEMAPPER_FILMIC</code>, <code>TONEMAPPER_ACES</code>. Add AgX by inserting a new branch.<br><br>
+<strong>Exposure</strong> — search <code>exposure</code> uniform. Auto-exposure response curve is computed above the tone-map call.<br><br>
+<strong>Color grading LUT</strong> — search <code>color_correction</code> sampler. Increase LUT resolution from 32³ → 64³ for smoother gradients.<br><br>
+<strong>White point</strong> — search <code>white</code> uniform — controls the shoulder of Filmic/ACES.
+</p>
+</div>
+
+<div class="card">
+<span class="pill pill-med">Medium impact</span>
+<h3>SSAO / SSIL</h3>
+<span class="path">servers/rendering/renderer_rd/shaders/effects/ssao.glsl<br>servers/rendering/renderer_rd/shaders/effects/ssil.glsl<br>servers/rendering/renderer_rd/effects/ss_effects.cpp</span>
+<p class="section">
+<strong>Sample count</strong> — in <code>ss_effects.cpp</code>, search <code>quality</code> enum or <code>ssao_num_samples</code>. Increasing from Medium (8) → Ultra (32) dramatically reduces noise.<br><br>
+<strong>Blur passes</strong> — search <code>ssao_blur_passes</code>. Adding a 3rd bilateral blur pass removes banding with little cost.<br><br>
+<strong>Depth-aware weighting</strong> — in <code>ssao.glsl</code>, search <code>depth_fade</code>. Tighten the falloff for contact shadows to appear only on close surfaces.
+</p>
+</div>
+
+</div>
+<div class="col">
+
+<div class="card">
+<span class="pill pill-high">High impact</span>
+<h3>Glow / Bloom</h3>
+<span class="path">servers/rendering/renderer_rd/shaders/effects/glow.glsl<br>drivers/gles3/effects/glow.cpp (Compatibility)</span>
+<p class="section">
+<strong>Blur kernel size</strong> — search <code>GLOW_FILTER_GAUSSIAN</code>, <code>GLOW_FILTER_BICUBIC</code>. Bicubic mode gives smoother bloom at 2× cost.<br><br>
+<strong>Mip levels</strong> — search <code>glow_levels</code>. Using 7 mip levels (vs default 5) adds wider, more physically plausible scatter.<br><br>
+<strong>Threshold knee</strong> — search <code>glow_bloom</code>, <code>glow_hdr_threshold</code>. A softer knee curve (quadratic instead of hard step) removes the harsh bloom edge.
+</p>
+</div>
+
+<div class="card">
+<span class="pill pill-med">Medium impact</span>
+<h3>Screen Space Reflections</h3>
+<span class="path">servers/rendering/renderer_rd/shaders/effects/ssr.glsl<br>servers/rendering/renderer_rd/shaders/effects/ssr_filter.glsl</span>
+<p class="section">
+<strong>Ray march steps</strong> — search <code>max_steps</code> or <code>ssr_max_steps</code>. Increasing from 64→128 prevents rays missing geometry at distance.<br><br>
+<strong>Binary refinement iterations</strong> — search <code>BINARY_SEARCH_ITERATIONS</code>. More iterations → sharper reflection edges at surfaces.<br><br>
+<strong>Roughness fade</strong> — search <code>roughness_fade</code>. Widen the fade ramp to allow SSR on slightly rough surfaces.
+</p>
+</div>
+
+<div class="card">
+<span class="pill pill-med">Medium impact</span>
+<h3>IBL Prefilter (Reflections)</h3>
+<span class="path">servers/rendering/renderer_rd/shaders/effects/cubemap_roughness.glsl</span>
+<p class="section">
+<strong>Sample count</strong> — search <code>NUM_SAMPLES</code>. Increase from 512 → 2048 for smoother IBL at the cost of a slower bake.<br><br>
+<strong>Importance sampling</strong> — search <code>ImportanceSampleGGX</code>. This can be swapped for a multi-scattering GGX (Karis 2013) to prevent energy loss on rough metals.
+</p>
+</div>
+
+<div class="card">
+<span class="pill pill-low">No C++ needed</span><span class="pill pill-info">GDScript</span>
+<h3>Custom Compositor Effect</h3>
+<span class="path">Extend CompositorEffect — no engine rebuild required</span>
+<p class="section">
+Create a <code>@tool</code> GDScript extending <code>CompositorEffect</code>. Hook into <code>EFFECT_CALLBACK_TYPE_POST_TRANSPARENT</code> or <code>POST_SKY</code>. Write a compute shader as a string, compile it with <code>RenderingDevice</code>, and dispatch it in <code>_render_callback()</code>. Gives you full access to color, depth, and normal/roughness buffers without recompiling Godot.
+</p>
+</div>
+
+</div>
+</div>
+
+<div class="card" style="border-color:var(--color-border-info)">
+<span class="pill pill-info">Compatibility renderer (GLES3/OpenGL)</span>
+<h3>Equivalent files for the Compatibility renderer</h3>
+<span class="path">drivers/gles3/shaders/scene.glsl — main PBR pass<br>drivers/gles3/shaders/tonemap_inc.glsl — tone mapping<br>drivers/gles3/effects/glow.cpp + glow.glsl — bloom<br>drivers/gles3/effects/post_effects.cpp — DOF, adjustments<br>drivers/gles3/shaders/effects/post.glsl — final composite</span>
+<p class="section">The Compatibility renderer has fewer post-processing stages and no SSAO/SSR, but all lighting and tone mapping changes mirror the same sections as the Forward+ shaders above. Look for the same uniform and function names — they are intentionally kept in sync.</p>
+</div>

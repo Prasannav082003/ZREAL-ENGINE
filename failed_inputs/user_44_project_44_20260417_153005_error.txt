@@ -1,0 +1,35 @@
+============================================================
+RENDER FAILURE REPORT
+============================================================
+
+Timestamp      : 2026-04-17T15:30:05.600046
+Job ID         : newtest2
+Job Type       : IMAGE
+User ID        : 44
+Project ID     : 44
+Gallery ID     : 44
+Total Attempts : 3/3
+
+────────────────────────────────────────────────────────────
+ERROR DETAILS:
+────────────────────────────────────────────────────────────
+[WinError 2] The system cannot find the file specified
+
+Full Traceback:
+Traceback (most recent call last):
+  File "C:\Zlendo2026\ZlenderRender_SceneExport_and_CustomizeEngine\main.py", line 675, in render_queue_worker
+    _background_render_task(
+  File "C:\Zlendo2026\ZlenderRender_SceneExport_and_CustomizeEngine\main.py", line 2808, in _background_render_task
+    output_image_path = _run_godot_render(job_id, payload, logger=logger)
+  File "C:\Zlendo2026\ZlenderRender_SceneExport_and_CustomizeEngine\main.py", line 2088, in _run_godot_render
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=1500)
+  File "C:\Users\aiadmin\AppData\Local\Programs\Python\Python310\lib\subprocess.py", line 501, in run
+    with Popen(*popenargs, **kwargs) as process:
+  File "C:\Users\aiadmin\AppData\Local\Programs\Python\Python310\lib\subprocess.py", line 966, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+  File "C:\Users\aiadmin\AppData\Local\Programs\Python\Python310\lib\subprocess.py", line 1435, in _execute_child
+    hp, ht, pid, tid = _winapi.CreateProcess(executable, args,
+FileNotFoundError: [WinError 2] The system cannot find the file specified
+
+
+============================================================

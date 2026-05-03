@@ -1,0 +1,122 @@
+{
+    "blender_camera": {
+        "location": [
+            12.172295351387078,
+            -7.436128443491448,
+            2.240245566075883
+        ],
+        "rotation_euler": [
+            -1.3291557561806224,
+            0,
+            -2.769351903797057
+        ],
+        "rotation_mode": "XYZ",
+        "type": "PERSP",
+        "lens_unit": "FOV",
+        "lens": 60,
+        "clip_start": 0.1,
+        "clip_end": 500,
+        "sensor_width": 32,
+        "sensor_height": 18,
+        "sensor_fit": "AUTO",
+        "shift_x": 0,
+        "shift_y": 0
+    },
+    "blender_target": {
+        "location": [
+            11.30196763138468,
+            2.2733385556980537,
+            0.011169467903034302
+        ],
+        "rotation_euler": [
+            0,
+            0,
+            0
+        ],
+        "rotation_mode": "XYZ",
+        "type": "EMPTY",
+        "empty_display_type": "PLAIN_AXES",
+        "empty_display_size": 1
+    },
+    "blender_script": "\nimport bpy\nimport bmesh\nfrom mathutils import Vector, Euler\n\n# Clear existing camera and target\nif \"Camera\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"Camera\"], do_unlink=True)\nif \"CameraTarget\" in bpy.data.objects:\n    bpy.data.objects.remove(bpy.data.objects[\"CameraTarget\"], do_unlink=True)\n\n# Create camera\nbpy.ops.object.camera_add()\ncamera = bpy.context.object\ncamera.name = \"Camera\"\n\n# Set camera properties\ncamera.location = (12.172295351387078, -7.436128443491448, 2.240245566075883)\ncamera.rotation_euler = (-1.3291557561806224, 0, -2.769351903797057)\ncamera.rotation_mode = 'XYZ'\ncamera.data.type = 'PERSP'\ncamera.data.lens_unit = 'FOV'\ncamera.data.lens = 60\ncamera.data.clip_start = 0.1\ncamera.data.clip_end = 500\ncamera.data.sensor_width = 32\ncamera.data.sensor_height = 18\ncamera.data.sensor_fit = 'AUTO'\ncamera.data.shift_x = 0\ncamera.data.shift_y = 0\n\n# Create camera target (Empty object)\nbpy.ops.object.empty_add(type='PLAIN_AXES')\ntarget = bpy.context.object\ntarget.name = \"CameraTarget\"\ntarget.location = (11.30196763138468, 2.2733385556980537, 0.011169467903034302)\ntarget.rotation_euler = (0, 0, 0)\ntarget.empty_display_size = 1\n\n# Set camera to track target\ncamera.constraints.new(type='TRACK_TO')\ncamera.constraints[\"Track To\"].target = target\ncamera.constraints[\"Track To\"].track_axis = 'TRACK_NEGATIVE_Z'\ncamera.constraints[\"Track To\"].up_axis = 'UP_Y'\n\n# Set camera as active camera\nbpy.context.scene.camera = camera\n\nprint(\"Camera setup complete!\")\nprint(f\"Camera location: {camera.location}\")\nprint(f\"Camera rotation: {camera.rotation_euler}\")\nprint(f\"Target location: {target.location}\")\nprint(f\"Camera FOV: {camera.data.lens}\")\n",
+    "threejs_camera": {
+        "position": {
+            "x": 12.172295351387078,
+            "y": 2.240245566075883,
+            "z": 7.436128443491448
+        },
+        "rotation": {
+            "x": -0.22566717008821086,
+            "y": 0.0871430227902561,
+            "z": 0.019978116276171912
+        },
+        "target": {
+            "x": 11.30196763138468,
+            "y": 0.011169467903034302,
+            "z": -2.2733385556980537
+        },
+        "fov": 60,
+        "near": 0.1,
+        "far": 500
+    },
+    "coordinate_system": "right_handed_y_up",
+    "target_coordinate_system": "right_handed_z_up",
+    "_lightingSettings": {
+        "timeOfDay": "day",
+        "sunAzimuth": 225,
+        "sunAltitude": 45,
+        "nightLightOn": true,
+        "illuminationLevel": 3,
+        "colorMood": "Soft",
+        "ambient": 0.15,
+        "directional": 3,
+        "directionalPosition": {
+            "x": -12.64183873574549,
+            "y": 31.092271247461902,
+            "z": -1.2320033154399432
+        },
+        "directionalColor": {
+            "r": 1,
+            "g": 1,
+            "b": 1
+        },
+        "directionalTarget": {
+            "x": 7.358161264254507,
+            "y": 2.808,
+            "z": 18.76799668456006
+        },
+        "directionalCastShadow": true,
+        "directionalShadowMapSize": 35,
+        "directionalShadowBias": -0.0001
+    },
+    "ambient_light": {
+        "intensity": 0.15
+    },
+    "directional_light": {
+        "intensity": 3,
+        "position": {
+            "x": -12.64183873574549,
+            "y": 31.092271247461902,
+            "z": -1.2320033154399432
+        },
+        "color": {
+            "r": 1,
+            "g": 1,
+            "b": 1
+        },
+        "target": {
+            "x": 7.358161264254507,
+            "y": 2.808,
+            "z": 18.76799668456006
+        },
+        "cast_shadow": true,
+        "shadow_map_size": 35,
+        "shadow_bias": -0.0001
+    },
+    "floor_plan_data": "{\"id\":\"7ba11db3-771d-473d-8943-6044b1d78b30\",\"name\":\"video_img_render\",\"unit\":\"Square feet\",\"selectedLayer\":\"6b90b8ff-34a7-4bc7-867b-13d403f68229\",\"layers\":{\"6b90b8ff-34a7-4bc7-867b-13d403f68229\":{\"id\":\"6b90b8ff-34a7-4bc7-867b-13d403f68229\",\"name\":\"Ground Floor\",\"altitude\":0,\"visible\":true,\"locked\":false,\"color\":\"#00d4ff\",\"vertices\":{\"fb99b1d2-c0c1-4c50-9b20-14621d1bf695\":{\"id\":\"fb99b1d2-c0c1-4c50-9b20-14621d1bf695\",\"x\":7500,\"y\":1400},\"d10bf7c1-6486-4c5a-aaf9-80ecb11381fd\":{\"id\":\"d10bf7c1-6486-4c5a-aaf9-80ecb11381fd\",\"x\":15935.52025910703,\"y\":1400},\"2f657111-83c8-4889-a9ba-9183a6d7f857\":{\"id\":\"2f657111-83c8-4889-a9ba-9183a6d7f857\",\"x\":15935.52025910703,\"y\":7665.767219240259},\"c4442fd7-7238-4663-a7da-77e0dcc7a47f\":{\"id\":\"c4442fd7-7238-4663-a7da-77e0dcc7a47f\",\"x\":7659.156400797372,\"y\":7665.767219240259}},\"lines\":{\"866efa18-375e-40f9-a2f9-e669e89d5fe6\":{\"id\":\"866efa18-375e-40f9-a2f9-e669e89d5fe6\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"fb99b1d2-c0c1-4c50-9b20-14621d1bf695\",\"d10bf7c1-6486-4c5a-aaf9-80ecb11381fd\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"Nordic Kitchen Floor\",\"color\":\"#ffffff\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":1524,\"repeatY\":1524,\"mapUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_BaseColor.png\",\"normalUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_Normal.png\",\"roughnessUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_Roughness.png\",\"metalnessUrl\":\"\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"}}},\"4f022d65-212a-4887-b613-2a364039fb7a\":{\"id\":\"4f022d65-212a-4887-b613-2a364039fb7a\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"d10bf7c1-6486-4c5a-aaf9-80ecb11381fd\",\"2f657111-83c8-4889-a9ba-9183a6d7f857\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}}},\"84b16366-e80e-4d56-9ca6-783179a8c050\":{\"id\":\"84b16366-e80e-4d56-9ca6-783179a8c050\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"2f657111-83c8-4889-a9ba-9183a6d7f857\",\"c4442fd7-7238-4663-a7da-77e0dcc7a47f\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}}},\"077f85ee-86c5-4d58-b9b3-164f700b8886\":{\"id\":\"077f85ee-86c5-4d58-b9b3-164f700b8886\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"c4442fd7-7238-4663-a7da-77e0dcc7a47f\",\"fb99b1d2-c0c1-4c50-9b20-14621d1bf695\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}}}},\"areas\":{\"auto_611485053\":{\"id\":\"auto_611485053\",\"type\":\"area\",\"visible\":true,\"selected\":false,\"prototype\":\"area\",\"vertices\":[\"fb99b1d2-c0c1-4c50-9b20-14621d1bf695\",\"d10bf7c1-6486-4c5a-aaf9-80ecb11381fd\",\"2f657111-83c8-4889-a9ba-9183a6d7f857\",\"c4442fd7-7238-4663-a7da-77e0dcc7a47f\"],\"holes\":[],\"misc\":{},\"properties\":{\"height\":{\"length\":2800},\"type\":\"room\",\"label\":\"Room 1\",\"areaColor\":\"#281b1b\"},\"ceiling_properties\":{\"isvisible\":true,\"thickness\":152.4,\"material\":{\"code\":\"Nordic Kitchen Floor\",\"color\":\"#ffffff\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":1524,\"repeatY\":1524,\"mapUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_BaseColor.png\",\"normalUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_Normal.png\",\"roughnessUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_Roughness.png\",\"metalnessUrl\":\"\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"},\"customShapes\":[]},\"floor_properties\":{\"isvisible\":true,\"thickness\":20,\"material\":{\"code\":\"Nordic Kitchen Floor\",\"color\":\"#ffffff\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":1524,\"repeatY\":1524,\"mapUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_BaseColor.png\",\"normalUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_Normal.png\",\"roughnessUrl\":\"https://zrealtystoragedev.blob.core.windows.net/textures/LowResolution/Tiles/Nordic_Kitchen_Floor/tiling86_LR_Roughness.png\",\"metalnessUrl\":\"\",\"aoUrl\":\"\",\"emissionUrl\":\"\",\"displacementUrl\":\"\"},\"customShapes\":[]}}},\"items\":{},\"holes\":{},\"order\":0,\"opacity\":1,\"externalAreas\":{},\"structures\":{}},\"13070250-25fc-40f4-9d60-650e3399fa5a\":{\"id\":\"13070250-25fc-40f4-9d60-650e3399fa5a\",\"name\":\"First Floor\",\"altitude\":3048,\"visible\":true,\"locked\":false,\"color\":\"#ffd93d\",\"vertices\":{\"8d6cb05e-fffa-4fa1-8e48-b60df47b4a11\":{\"id\":\"8d6cb05e-fffa-4fa1-8e48-b60df47b4a11\",\"x\":3900,\"y\":1870.5607610473623},\"7c9c5c34-c671-4908-8a55-1fa8fc642f1c\":{\"id\":\"7c9c5c34-c671-4908-8a55-1fa8fc642f1c\",\"x\":3900,\"y\":12232.420809217896},\"3ed9db8f-cc71-4d39-8934-aba4666e43f9\":{\"id\":\"3ed9db8f-cc71-4d39-8934-aba4666e43f9\",\"x\":18000,\"y\":12200},\"24dd83da-6277-44c7-bd0d-3e6c86a0b254\":{\"id\":\"24dd83da-6277-44c7-bd0d-3e6c86a0b254\",\"x\":18000,\"y\":1800}},\"lines\":{\"8f34afe7-672f-4d22-b39d-3602ebc0ebb6\":{\"id\":\"8f34afe7-672f-4d22-b39d-3602ebc0ebb6\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"8d6cb05e-fffa-4fa1-8e48-b60df47b4a11\",\"7c9c5c34-c671-4908-8a55-1fa8fc642f1c\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}}},\"610b94aa-5c78-4099-904c-f17120e2aaa0\":{\"id\":\"610b94aa-5c78-4099-904c-f17120e2aaa0\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"7c9c5c34-c671-4908-8a55-1fa8fc642f1c\",\"3ed9db8f-cc71-4d39-8934-aba4666e43f9\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}}},\"ca417435-2d4b-4fa4-934e-48feaa39190a\":{\"id\":\"ca417435-2d4b-4fa4-934e-48feaa39190a\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"3ed9db8f-cc71-4d39-8934-aba4666e43f9\",\"24dd83da-6277-44c7-bd0d-3e6c86a0b254\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}}},\"71d903cd-3ee2-4b5d-9c54-e90cd621ce22\":{\"id\":\"71d903cd-3ee2-4b5d-9c54-e90cd621ce22\",\"type\":\"wall\",\"visible\":true,\"selected\":false,\"prototype\":\"wall\",\"vertices\":[\"24dd83da-6277-44c7-bd0d-3e6c86a0b254\",\"8d6cb05e-fffa-4fa1-8e48-b60df47b4a11\"],\"holes\":[],\"properties\":{\"thickness\":{\"length\":228.6},\"height\":{\"length\":3048},\"bearingType\":false,\"color\":\"#b0bec5\",\"alignment\":\"center\"},\"outer_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}},\"inner_properties\":{\"material\":{\"code\":\"DEFAULT\",\"color\":\"#b0bec5\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":0,\"repeatY\":0}}}},\"areas\":{\"auto_678864312\":{\"id\":\"auto_678864312\",\"type\":\"area\",\"visible\":true,\"selected\":false,\"prototype\":\"area\",\"vertices\":[\"7c9c5c34-c671-4908-8a55-1fa8fc642f1c\",\"8d6cb05e-fffa-4fa1-8e48-b60df47b4a11\",\"24dd83da-6277-44c7-bd0d-3e6c86a0b254\",\"3ed9db8f-cc71-4d39-8934-aba4666e43f9\"],\"holes\":[],\"misc\":{},\"properties\":{\"height\":{\"length\":2800},\"type\":\"room\",\"label\":\"Room 1\",\"areaColor\":\"#281b1b\"},\"ceiling_properties\":{\"isvisible\":true,\"thickness\":152.4,\"material\":{\"code\":\"DEFAULT\",\"color\":\"#ffffff\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":304.8,\"repeatY\":304.8}},\"floor_properties\":{\"isvisible\":true,\"thickness\":20,\"material\":{\"code\":\"DEFAULT\",\"color\":\"#ffffff\",\"roughness\":0.8,\"metalness\":0,\"repeatX\":304.8,\"repeatY\":304.8,\"mapUrl\":\"textures/LowResolution/Wood/Wood floor /Wood091A_4K-PNG_LR_Color.jpg\"}}}},\"items\":{},\"holes\":{},\"order\":1,\"opacity\":1,\"externalAreas\":{},\"structures\":{}}},\"directionangle\":0,\"version\":\"2.0.0\",\"showAllFloors\":false}",
+    "timestamp": 1776517523867,
+    "aspect_ratio": "16:9",
+    "render_quality": "4K",
+    "day_render": true,
+    "night_render": false
+}

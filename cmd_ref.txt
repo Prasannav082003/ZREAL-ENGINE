@@ -1,0 +1,2 @@
+# command to get scene file from stage json
+python json_to_tscn.py --input input2.json --output godot_project/exported2_scene.tscn --no-optimize
