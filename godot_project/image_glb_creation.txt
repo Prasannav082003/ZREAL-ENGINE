@@ -355,14 +355,26 @@ func setup_lighting(data, geom_data = {}):
 	# â”€â”€ Tone Mapping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	# CRITICAL: exposure must be set high enough that headless render is NOT black.
 	# CameraAttributesPhysical is intentionally NOT used (causes black in headless).
-	# Daytime still renders keep the linear look instead of the filmic curve.
-	env.tonemap_mode     = Environment.TONE_MAPPER_LINEAR if _image_render_only and lighting_profile == "day" else Environment.TONE_MAPPER_FILMIC
+	# AGX tonemapper: better shadow detail and naturalistic highlight rolloff vs filmic.
+	env.tonemap_mode     = Environment.TONE_MAPPER_AGX
 	env.tonemap_exposure = lighting["tonemap_exposure"]
-	env.tonemap_white    = lighting["tonemap_white"]
+	env.tonemap_white    = lighting.get("tonemap_agx_white", lighting["tonemap_white"])
+	# AGX contrast is applied via exposure adjustment: contrast > 1.0 brightens the curve.
+	# Godot 4 AGX does not expose a separate contrast param, so we bake it into exposure.
+	env.tonemap_exposure = env.tonemap_exposure * lighting.get("tonemap_agx_contrast", 1.0)
 
 	# â”€â”€ SDFGI: DISABLED â€” crashes / produces black in headless Godot export â”€
 	# SDFGI also blocks proper ReflectionProbe updates in some headless scenarios.
 	env.sdfgi_enabled = true
+	env.sdfgi_min_cell_size    = 0.1    # Double probe density near camera
+	env.sdfgi_cascades         = 6      # Max cascade count for wide coverage
+	env.sdfgi_bounce_feedback  = 0.5    # Multi-bounce colour bleeding
+	env.sdfgi_use_occlusion    = true   # Prevent light leaking through walls
+	env.sdfgi_y_scale          = Environment.SDFGI_Y_SCALE_75_PERCENT
+	env.sdfgi_energy           = 0.8    # Compensate for bounce brightness
+	env.sdfgi_normal_bias      = 1.5    # Reduce self-illumination artifacts
+	env.sdfgi_probe_bias       = 1.1    # Probe offset for wall proximity
+
 
 	# â”€â”€ Screen-Space Indirect Light (safe GI replacement for headless) â”€â”€â”€â”€
 	env.ssil_enabled        = true
@@ -447,12 +459,75 @@ func setup_lighting(data, geom_data = {}):
 	add_child(world_env)
 
 	# â”€â”€ Scene Fill Lights â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-	# Fill OmniLights REMOVED: FillLight / FrontFillLight / BackFillLight caused
-	# a hot warm blob at the room center in every render regardless of fixtures.
-	# Illumination is now: ceiling fixture OmniLights (sqrt-normalised) + DirectionalLight + SSIL.
+	# Fill lights restored as conditional fallback — only fires when NO fixture
+	# lights are present (e.g. empty rooms).  Safe now because the real sources
+	# of the center blob are gone: setup_fixed_fill_lights() deleted from
+	# render.gd, and emissive-material fallback removed from _should_add_light_fixture_effect().
 	_ceiling_fixture_count = max(1, _count_ceiling_fixture_lights(geom_data))
 	var fixture_count = _count_fixture_lights(geom_data)
-	print("[ImageGLB] Fill lights disabled. ", fixture_count, " fixture(s), ", _ceiling_fixture_count, " ceiling. sqrt factor=", snappedf(sqrt(float(_ceiling_fixture_count)), 0.01))
+	var has_fixture_lights = _has_fixture_lights(geom_data)
+	if has_fixture_lights:
+		print("[ImageGLB] ", fixture_count, " fixture(s) detected (", _ceiling_fixture_count, " ceiling) — skipping fill lights.")
+	else:
+		print("[ImageGLB] No fixture lights — adding fill lights as fallback.")
+		var mood_fill_color = _get_color_mood_light_color("fill")
+		if lighting_profile == "day" or lighting_profile == "sunset":
+			var fill = OmniLight3D.new()
+			fill.name           = "FillLight"
+			fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
+			fill.light_energy   = lighting["fill_energy"] * _lighting_illumination_scale
+			fill.omni_range     = max(room_extent.x, room_extent.y) * 2.5 + 10.0
+			fill.light_color    = Color(
+				lighting["fill_color"].r * mood_fill_color.r,
+				lighting["fill_color"].g * mood_fill_color.g,
+				lighting["fill_color"].b * mood_fill_color.b
+			)
+			fill.light_specular = 0.0
+			fill.shadow_enabled = false
+			add_child(fill)
+
+			var fill_offset = max(room_extent.x, room_extent.y) * 0.28
+			var fill_front = OmniLight3D.new()
+			fill_front.name           = "FrontFillLight"
+			fill_front.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) + cam_forward * fill_offset
+			fill_front.light_energy   = lighting["front_back_fill_energy"] * _lighting_illumination_scale
+			fill_front.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
+			fill_front.light_color    = Color(
+				lighting["front_back_fill_color"].r * mood_fill_color.r,
+				lighting["front_back_fill_color"].g * mood_fill_color.g,
+				lighting["front_back_fill_color"].b * mood_fill_color.b
+			)
+			fill_front.light_specular = 0.0
+			fill_front.shadow_enabled = false
+			add_child(fill_front)
+
+			var fill_back = OmniLight3D.new()
+			fill_back.name           = "BackFillLight"
+			fill_back.position       = Vector3(room_center.x, room_ceiling_y - 0.9, room_center.z) - cam_forward * fill_offset
+			fill_back.light_energy   = lighting["front_back_fill_energy"] * _lighting_illumination_scale
+			fill_back.omni_range     = max(room_extent.x, room_extent.y) * 1.6 + 4.0
+			fill_back.light_color    = Color(
+				lighting["front_back_fill_color"].r * mood_fill_color.r,
+				lighting["front_back_fill_color"].g * mood_fill_color.g,
+				lighting["front_back_fill_color"].b * mood_fill_color.b
+			)
+			fill_back.light_specular = 0.0
+			fill_back.shadow_enabled = false
+			add_child(fill_back)
+		else:
+			var fill = OmniLight3D.new()
+			fill.name           = "FillLight"
+			fill.position       = Vector3(room_center.x, room_ceiling_y - 0.55, room_center.z)
+			fill.light_energy   = lighting["fill_energy"] * _lighting_illumination_scale
+			fill.omni_range     = max(room_extent.x, room_extent.y) * 2.2 + 7.0
+			fill.light_color    = Color(
+				lighting["fill_color"].r * mood_fill_color.r,
+				lighting["fill_color"].g * mood_fill_color.g,
+				lighting["fill_color"].b * mood_fill_color.b
+			)
+			fill.light_specular = 0.0
+			fill.shadow_enabled = false
+			add_child(fill)
 
 	print("Photorealistic lighting setup complete. profile=", lighting_profile)
 
@@ -746,6 +821,8 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"ambient_energy": 0.05,
 				"tonemap_exposure": 0.45,
 				"tonemap_white": 4.8,
+				"tonemap_agx_white": 14.0,
+				"tonemap_agx_contrast": 1.12,
 				"glow_intensity": 0.26,
 				"glow_bloom": 0.10,
 				"glow_hdr_threshold": 1.15,
@@ -770,6 +847,8 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"ambient_energy": 0.28,
 				"tonemap_exposure": 0.78,
 				"tonemap_white": 4.6,
+				"tonemap_agx_white": 16.0,
+				"tonemap_agx_contrast": 1.30,
 				"glow_intensity": 0.28,
 				"glow_bloom": 0.11,
 				"glow_hdr_threshold": 1.10,
@@ -794,6 +873,8 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"ambient_energy": 0.15,
 				"tonemap_exposure": 0.72,
 				"tonemap_white": 5.0,
+				"tonemap_agx_white": 16.29,
+				"tonemap_agx_contrast": 1.18,
 				"glow_intensity": 0.22,
 				"glow_bloom": 0.08,
 				"glow_hdr_threshold": 1.35,
@@ -3010,11 +3091,15 @@ func _node_has_emissive_material(node: Node3D) -> bool:
 	return false
 
 func _should_add_light_fixture_effect(node: Node3D, item: Dictionary) -> bool:
-	# Keep the existing light-name detection, but also allow emissive GLBs to
-	# get a light so image renders do not miss built-in glowing assets.
+	# ONLY items whose metadata explicitly identifies them as light fixtures
+	# should get an OmniLight3D.  The previous _node_has_emissive_material()
+	# fallback was adding OmniLights to beds, sofas, and other furniture
+	# whose GLBs happened to have emissive materials — causing a warm center
+	# blob in every room.
 	if _is_light_fixture_item(item):
+		print("[LightFixture] ACCEPTED: ", item.get("name", "?"), " type=", item.get("type", "?"), " mount=", item.get("mounting_type", "?"))
 		return true
-	return _node_has_emissive_material(node)
+	return false
 
 func _normalize_material_label(value: String) -> String:
 	var text := str(value).strip_edges().to_lower()
@@ -3122,17 +3207,20 @@ func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB,
 		emission_energy = 11.0
 
 	if mounting_type == "ceiling_mount":
-		# NOTE: ~12 ceiling OmniLights stack additively + SDFGI bounce — keep values LOW.
-		# At illumination level 5 (scale=0.50), finals are: day≈0.25, sunset≈0.35, night≈0.45
-		light_energy = 0.5   # day — was 1.0 → still too bright with many fixtures
-		light_range  = max(light_range, 7.0)  # was 12.0 — reduced to limit fixture overlap
-		emission_energy = 2.0  # day emission — was 3.0
+		# Values doubled from the over-dimmed era — emissive-furniture OmniLights
+		# Values raised 2× — room was still dim after previous doubling.
+		# At level 5 (scale=0.50) with 21 fixtures (sqrt cap=4.0):
+		#   day final/fixture: 2.0 × 0.5 / 4.0 = 0.25  → 21 fixtures = 5.25 total
+		#   night final/fixture: 3.5 × 0.5 / 4.0 = 0.44 → 21 fixtures = 9.2 total
+		light_energy = 2.0   # day  (was 1.0)
+		light_range  = max(light_range, 7.0)
+		emission_energy = 10.0  # day emission (was 7.0)
 		if is_sunset:
-			light_energy = 0.7   # was 1.6
-			emission_energy = 3.0  # was 4.5
+			light_energy = 4.2   # was 2.8
+			emission_energy = 14.0  # was 10.0
 		elif is_night:
-			light_energy = 0.9   # was 2.0 — 12 × 0.9 × 0.5scale = 5.4 total, much saner
-			emission_energy = 4.0  # was 6.0
+			light_energy = 5.5   # was 3.5
+			emission_energy = 18.0  # was 13.0
 	elif "wall" in full_desc:
 		light_energy = 1.2
 		light_range = max(light_range, 4.2)

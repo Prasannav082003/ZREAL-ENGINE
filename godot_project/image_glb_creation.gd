@@ -24,6 +24,10 @@ const USE_REFLECTION_RESPONSE_ASSIST = true
 # true  -> apply optimizer presets / overrides
 # false -> keep raw material values from the JSON / asset defaults
 const USE_MATERIAL_OPTIMIZER = true
+# Global kill-switch for substrate material features (sheen, iridescence).
+# true  -> enable sheen on fabric/cloth, iridescence on ceramic/glass
+# false -> skip substrate features entirely (safe rollback)
+const USE_SUBSTRATE_FEATURES = true
 # Must match the video scene builder so floor and ceiling textures stay
 # consistent across both render paths.
 const FLOOR_CEIL_TEXTURE_DENSITY_BOOST: float = 2.0
@@ -43,6 +47,26 @@ var _image_render_only: bool = false
 # Count of ceiling_mount light fixtures in the scene — used by sqrt normalization
 # to prevent n fixtures from contributing n× the intended luminance additively.
 var _ceiling_fixture_count: int = 1
+# Substrate feature enum values — resolved dynamically at runtime via ClassDB
+# so the script compiles even if the custom engine features are not yet bound.
+# -1 means the feature is not available in this engine build.
+var _FEATURE_SHEEN: int = -1
+var _FEATURE_IRIDESCENCE: int = -1
+
+func _init():
+	# Safely resolve custom engine feature enum values.
+	# If the custom Godot build doesn't expose these constants to GDScript,
+	# the values stay at -1 and all substrate calls become no-ops.
+	if ClassDB.class_has_integer_constant("BaseMaterial3D", "FEATURE_SHEEN"):
+		_FEATURE_SHEEN = ClassDB.class_get_integer_constant("BaseMaterial3D", "FEATURE_SHEEN")
+		print("[Substrate] FEATURE_SHEEN resolved to enum ", _FEATURE_SHEEN)
+	else:
+		print("[Substrate] WARNING: FEATURE_SHEEN not found in engine — sheen disabled.")
+	if ClassDB.class_has_integer_constant("BaseMaterial3D", "FEATURE_IRIDESCENCE"):
+		_FEATURE_IRIDESCENCE = ClassDB.class_get_integer_constant("BaseMaterial3D", "FEATURE_IRIDESCENCE")
+		print("[Substrate] FEATURE_IRIDESCENCE resolved to enum ", _FEATURE_IRIDESCENCE)
+	else:
+		print("[Substrate] WARNING: FEATURE_IRIDESCENCE not found in engine — iridescence disabled.")
 
 func _accumulate_plan_bounds(raw_vertex, bounds: Array) -> bool:
 	if typeof(raw_vertex) != TYPE_DICTIONARY:
@@ -223,6 +247,8 @@ func build_scene(data):
 	load_assets(geom_data)
 	
 	_apply_anisotropic_filtering_to_all(self)
+	if USE_SUBSTRATE_FEATURES:
+		_apply_substrate_features_to_scene(self)
 	# setup_camera(data) - Moved to render_image.gd
 
 func setup_lighting(data, geom_data = {}):
@@ -366,6 +392,15 @@ func setup_lighting(data, geom_data = {}):
 	# â”€â”€ SDFGI: DISABLED â€” crashes / produces black in headless Godot export â”€
 	# SDFGI also blocks proper ReflectionProbe updates in some headless scenarios.
 	env.sdfgi_enabled = true
+	env.sdfgi_min_cell_size    = 0.1    # Double probe density near camera
+	env.sdfgi_cascades         = 6      # Max cascade count for wide coverage
+	env.sdfgi_bounce_feedback  = 0.5    # Multi-bounce colour bleeding
+	env.sdfgi_use_occlusion    = true   # Prevent light leaking through walls
+	env.sdfgi_y_scale          = Environment.SDFGI_Y_SCALE_75_PERCENT
+	env.sdfgi_energy           = 0.8    # Compensate for bounce brightness
+	env.sdfgi_normal_bias      = 1.5    # Reduce self-illumination artifacts
+	env.sdfgi_probe_bias       = 1.1    # Probe offset for wall proximity
+
 
 	# â”€â”€ Screen-Space Indirect Light (safe GI replacement for headless) â”€â”€â”€â”€
 	env.ssil_enabled        = true
@@ -3641,6 +3676,9 @@ func _load_layer_items(items, layer_altitude, layer_id := "", render_mode: Strin
 												# Apply Optimizer with context (item)
 												if USE_MATERIAL_OPTIMIZER:
 													new_mat = optimize_material(new_mat, mat_opt, "item")
+												# Apply substrate features (sheen / iridescence) on asset overrides.
+												if USE_SUBSTRATE_FEATURES:
+													new_mat = _apply_substrate_features(new_mat, mat_opt, "item")
 												m.set_surface_override_material(i, new_mat)
 												applied_material_keys[matched_key_text] = true
 												if limit_single_generic_key:
@@ -4038,6 +4076,10 @@ func create_material(mat_data, surface_type: String = "item"):
 	if USE_MATERIAL_OPTIMIZER:
 		mat = optimize_material(mat, mat_data, surface_type)
 
+	# Apply substrate features (sheen / iridescence) as a purely additive layer.
+	if USE_SUBSTRATE_FEATURES:
+		mat = _apply_substrate_features(mat, mat_data, surface_type)
+
 	return mat
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -4181,6 +4223,104 @@ func load_image_texture(path):
 			img.generate_mipmaps()
 		return ImageTexture.create_from_image(img)
 	return null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Substrate Material Features (Sheen / Iridescence)
+# ─────────────────────────────────────────────────────────────────────────────
+# Detects whether a material qualifies for a substrate enhancement based on
+# texture path keywords and surface context.  Returns "fabric", "ceramic",
+# or "" (no match).  Mirrors the keyword detection in optimize_material().
+func _detect_substrate_category(mat_data: Dictionary, surface_type: String) -> String:
+	# Substrate features are only meaningful on item / floor surfaces.
+	# Walls and ceilings should never receive sheen or iridescence.
+	if surface_type in ["wall", "ceiling"]:
+		return ""
+
+	var path = str(mat_data.get("mapUrl", "")).to_lower()
+
+	# ── Fabric / Cloth → Sheen ──────────────────────────────────────────────
+	var fabric_keywords = [
+		"fabric", "cloth", "textile", "rug", "carpet",
+		"velvet", "upholster", "sofa", "curtain", "cushion",
+		"linen", "cotton", "wool", "silk", "denim",
+		"drape", "blanket", "pillow"
+	]
+	for kw in fabric_keywords:
+		if kw in path:
+			return "fabric"
+
+	# ── Ceramic / Glazed → Iridescence ──────────────────────────────────────
+	var ceramic_keywords = [
+		"ceramic", "porcelain", "glazed", "glaze",
+		"faience", "stoneware", "earthenware"
+	]
+	for kw in ceramic_keywords:
+		if kw in path:
+			return "ceramic"
+
+	return ""
+
+# Applies substrate material features as a purely additive layer.
+# This function NEVER removes or modifies existing material properties —
+# it only enables additional feature flags using the engine's hardcoded defaults.
+func _apply_substrate_features(mat: StandardMaterial3D, mat_data: Dictionary, surface_type: String) -> StandardMaterial3D:
+	var category = _detect_substrate_category(mat_data, surface_type)
+	if category == "":
+		return mat
+
+	match category:
+		"fabric":
+			# Enable sheen for fabric/cloth/textile surfaces.
+			# Uses engine defaults: SHEEN_COLOR=white, SHEEN_ROUGHNESS=0.5
+			if _FEATURE_SHEEN >= 0:
+				mat.set_feature(_FEATURE_SHEEN, true)
+				print("  [Substrate] Sheen enabled for fabric material: ", str(mat_data.get("mapUrl", "<no-url>")).get_file())
+			else:
+				print("  [Substrate] Sheen SKIPPED (not available): ", str(mat_data.get("mapUrl", "<no-url>")).get_file())
+		"ceramic":
+			# Enable iridescence for ceramic/glazed surfaces.
+			# Uses engine defaults: IOR=1.5, thickness=400nm
+			if _FEATURE_IRIDESCENCE >= 0:
+				mat.set_feature(_FEATURE_IRIDESCENCE, true)
+				print("  [Substrate] Iridescence enabled for ceramic material: ", str(mat_data.get("mapUrl", "<no-url>")).get_file())
+			else:
+				print("  [Substrate] Iridescence SKIPPED (not available): ", str(mat_data.get("mapUrl", "<no-url>")).get_file())
+
+	return mat
+
+# Post-load tree walk: applies substrate features to GLB-embedded materials
+# that were NOT overridden by JSON material data.  Works identically to
+# _apply_anisotropic_filtering_to_all() — walks every MeshInstance3D in
+# the scene tree and checks embedded material texture names.
+func _apply_substrate_features_to_scene(node: Node) -> void:
+	var meshes = _get_all_meshes(node)
+	for m in meshes:
+		if not m.mesh:
+			continue
+		for i in range(m.mesh.get_surface_count()):
+			var mat = m.get_active_material(i)
+			if mat == null:
+				mat = m.mesh.surface_get_material(i)
+			if mat == null or not (mat is StandardMaterial3D):
+				continue
+
+			# Build a synthetic mat_data from the embedded material's texture path
+			# so the keyword detector can classify it.
+			var tex_path := ""
+			if mat.albedo_texture and mat.albedo_texture.resource_path != "":
+				tex_path = mat.albedo_texture.resource_path
+			elif mat.resource_name != "":
+				tex_path = mat.resource_name
+
+			var synthetic_data := {"mapUrl": tex_path}
+			var category = _detect_substrate_category(synthetic_data, "item")
+			if category == "":
+				continue
+
+			# Duplicate so we don't mutate shared GLB material resources.
+			var new_mat = mat.duplicate()
+			new_mat = _apply_substrate_features(new_mat, synthetic_data, "item")
+			m.set_surface_override_material(i, new_mat)
 
 func _apply_anisotropic_filtering_to_all(node: Node) -> void:
 	var meshes = _get_all_meshes(node)

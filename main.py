@@ -2120,20 +2120,67 @@ def _run_godot_render(job_id: str, payload: GenerationPayload, logger: Optional[
         output_image_path
     ])
     
+    # ── Log file: full Godot output saved next to the input JSON ─────────────
+    godot_log_path = os.path.abspath(
+        os.path.join(RUNTIME_DIR, f"{job_id}_godot.log")
+    )
     print(f"Executing Godot: {' '.join(cmd)}")
-    
+    print(f"[GodotLog] Full output → {godot_log_path}")
+
+    # Use Popen so stdout/stderr stream line-by-line to the FastAPI console
+    # in real-time.  capture_output=True buffers everything until exit and
+    # hides GDScript print() lines during a freeze — Popen avoids that.
+    all_output_lines: list[str] = []
+
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=1500)
-        print(res.stdout)
-        if res.stderr:
-            print("Godot Stderr:", res.stderr)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,   # merge stderr → stdout so one loop covers both
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        # Stream output line-by-line with a wall-clock timeout
+        import threading, time as _time
+
+        def _stream(proc, lines):
+            try:
+                for line in proc.stdout:
+                    line = line.rstrip("\r\n")
+                    print(f"[Godot] {line}", flush=True)
+                    lines.append(line)
+            except Exception:
+                pass
+
+        reader = threading.Thread(target=_stream, args=(proc, all_output_lines), daemon=True)
+        reader.start()
+
+        TIMEOUT = 1500  # seconds — same as the old subprocess.run timeout
+        reader.join(timeout=TIMEOUT)
+
+        if reader.is_alive():
+            # Still running after timeout — kill it
+            proc.kill()
+            reader.join(timeout=5)
+            raise subprocess.TimeoutExpired(cmd, TIMEOUT)
+
+        proc.wait()
+
+        # Write the complete log to disk regardless of success/failure
+        with open(godot_log_path, "w", encoding="utf-8") as lf:
+            lf.write("\n".join(all_output_lines))
+
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd)
+
     except subprocess.CalledProcessError as e:
-        print(f"Godot failed: {e}")
-        print("STDOUT:", e.stdout)
-        print("STDERR:", e.stderr)
-        raise Exception(f"Godot execution failed: {e}")
+        print(f"[GodotLog] Godot exited with non-zero code {e.returncode}")
+        print(f"[GodotLog] Full log saved to: {godot_log_path}")
+        raise Exception(f"Godot execution failed (exit code {e.returncode}). See log: {godot_log_path}")
     except subprocess.TimeoutExpired:
-        raise Exception("Godot execution timed out")
+        raise Exception(f"Godot execution timed out after {TIMEOUT}s. Partial log: {godot_log_path}")
         
     if not os.path.exists(output_image_path):
         raise Exception("Godot did not produce an output image.")
