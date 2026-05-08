@@ -247,8 +247,13 @@ func build_scene(data):
 	load_assets(geom_data)
 	
 	_apply_anisotropic_filtering_to_all(self)
-	if USE_SUBSTRATE_FEATURES:
-		_apply_substrate_features_to_scene(self)
+	# NOTE: _apply_substrate_features_to_scene is intentionally disabled.
+	# It duplicates GLB-embedded materials which breaks their internal texture
+	# references, causing assets (sofas, rugs, etc.) to render flat with no detail.
+	# Substrate features (sheen/iridescence) are still applied correctly for
+	# JSON-driven materials via create_material() and _load_layer_items().
+	# if USE_SUBSTRATE_FEATURES:
+	# 	_apply_substrate_features_to_scene(self)
 	# setup_camera(data) - Moved to render_image.gd
 
 func setup_lighting(data, geom_data = {}):
