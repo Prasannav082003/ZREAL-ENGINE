@@ -240,6 +240,26 @@ func setup_camera(data):
 
 	add_child(cam)
 
+	# ── UnrealPostFX Compositor Effect ────────────────────────────────────────
+	# Attach after add_child() so the camera is already in the scene tree.
+	# CompositorEffect requires Forward+ renderer (Godot 4.3+). We guard with
+	# ClassDB so this script doesn't crash on compatibility renderer builds.
+	if USE_POST_FX:
+		# Compositor is a native C++ class (Godot 4.3+) — ClassDB check is correct here.
+		# UnrealPostFX is a GDScript class: ClassDB never sees it, so we load by path instead.
+		if ClassDB.class_exists("Compositor"):
+			var post_fx_script = load("res://compositor_effect.gd")
+			if post_fx_script:
+				var comp := Compositor.new()
+				var post_fx = post_fx_script.new()
+				comp.compositor_effects = [post_fx]
+				cam.compositor = comp
+				print("  [PostFX] UnrealPostFX compositor attached to MainCamera (ACES tonemap, CDL, vignette, grain)")
+			else:
+				print("  [PostFX] WARNING: compositor_effect.gd not found at res:// — post-fx skipped.")
+		else:
+			print("  [PostFX] WARNING: Compositor class unavailable — requires Forward+ renderer and Godot 4.3+.")
+
 	if need_look_at:
 		if cam.global_position.distance_to(target) > 0.001:
 			cam.look_at(target, Vector3.UP)

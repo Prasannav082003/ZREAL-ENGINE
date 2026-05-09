@@ -28,6 +28,11 @@ const USE_MATERIAL_OPTIMIZER = true
 # true  -> enable sheen on fabric/cloth, iridescence on ceramic/glass
 # false -> skip substrate features entirely (safe rollback)
 const USE_SUBSTRATE_FEATURES = true
+# Global kill-switch for the UnrealPostFX compositor effect (tonemapping, CDL,
+# vignette, chromatic aberration, film grain).
+# true  -> attach the compositor effect to the Camera3D at render time
+# false -> skip entirely (safe rollback, raw Godot output)
+const USE_POST_FX = true
 # Must match the video scene builder so floor and ceiling textures stay
 # consistent across both render paths.
 const FLOOR_CEIL_TEXTURE_DENSITY_BOOST: float = 2.0
