@@ -407,7 +407,7 @@ func setup_lighting(data, geom_data = {}):
 	env.sdfgi_bounce_feedback  = 0.5    # Multi-bounce colour bleeding
 	env.sdfgi_use_occlusion    = true   # Prevent light leaking through walls
 	env.sdfgi_y_scale          = Environment.SDFGI_Y_SCALE_75_PERCENT
-	env.sdfgi_energy           = 0.8    # Compensate for bounce brightness
+	env.sdfgi_energy           = 0.7    # Compensate for bounce brightness
 	env.sdfgi_normal_bias      = 1.5    # Reduce self-illumination artifacts
 	env.sdfgi_probe_bias       = 1.1    # Probe offset for wall proximity
 
@@ -445,8 +445,8 @@ func setup_lighting(data, geom_data = {}):
 
 	# â”€â”€ Colour Grading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	env.adjustment_enabled    = true
-	env.adjustment_brightness = 1.0
-	env.adjustment_contrast   = 1.06
+	env.adjustment_brightness = 0.92   # Slightly lower exposure → darks get darker (Coohom-match)
+	env.adjustment_contrast   = 1.35   # S-curve depth — was 1.06 (flat), Coohom is ~1.35
 	env.adjustment_saturation = 1.10
 
 	var world_env = WorldEnvironment.new()
