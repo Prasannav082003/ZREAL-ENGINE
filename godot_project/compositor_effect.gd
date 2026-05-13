@@ -16,11 +16,11 @@ class_name UnrealPostFX
 @export_enum("ACES Filmic", "AgX", "Reinhard") var tonemap_mode: int = 0
 
 @export_group("Color Grading (CDL)")
-@export var lift: Color = Color(0.0, 0.0, 0.0)
+@export var lift: Color = Color(0.025, 0.0, -0.02)   # Warm shadows: +orange, -blue
 @export var gamma_grade: Color = Color(1.0, 1.0, 1.0)
-@export var gain: Color = Color(1.0, 1.0, 1.0)
-@export var saturation: float = 1.1
-@export var contrast: float = 1.0
+@export var gain: Color = Color(1.04, 1.0, 0.94)      # Warm highlights: +red, -blue
+@export var saturation: float = 1.15
+@export var contrast: float = 1.35
 
 @export_group("Lens")
 @export_range(0.0, 1.0) var vignette_strength: float = 0.45

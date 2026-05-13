@@ -407,7 +407,7 @@ func setup_lighting(data, geom_data = {}):
 	env.sdfgi_bounce_feedback  = 0.5    # Multi-bounce colour bleeding
 	env.sdfgi_use_occlusion    = true   # Prevent light leaking through walls
 	env.sdfgi_y_scale          = Environment.SDFGI_Y_SCALE_75_PERCENT
-	env.sdfgi_energy           = 0.7    # Compensate for bounce brightness
+	env.sdfgi_energy           = 0.55   # Reduced: was 0.7 → less GI bounce flooding shadows
 	env.sdfgi_normal_bias      = 1.5    # Reduce self-illumination artifacts
 	env.sdfgi_probe_bias       = 1.1    # Probe offset for wall proximity
 
@@ -905,8 +905,11 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"ground_horizon_color": Color(0.30, 0.28, 0.22),
 				"sun_angle_max": 30.0,
 				"sun_curve": 0.15,
-				"ambient_color": Color(0.76, 0.77, 0.78),
-				"ambient_energy": 0.15,
+				# Warm amber ambient — pushes room tone toward Coohom's interior photograph look.
+				# Energy reduced from 0.15: lower fill lets shadows go genuinely dark (corners,
+				# under sofa, ceiling junctions) instead of being flooded with white light.
+				"ambient_color": Color(0.82, 0.74, 0.66),
+				"ambient_energy": 0.30,
 				"tonemap_exposure": 0.72,
 				"tonemap_white": 5.0,
 				"tonemap_agx_white": 16.29,
