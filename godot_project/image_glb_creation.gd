@@ -428,14 +428,14 @@ func setup_lighting(data, geom_data = {}):
 
 	# â”€â”€ Screen-Space Ambient Occlusion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	env.ssao_enabled   = true
-	env.ssao_radius    = 1.0
-	env.ssao_intensity = 0.45
-	env.ssao_power     = 0.9
-	env.ssao_detail    = 0.25
-	env.ssao_horizon   = 0.03
+	env.ssao_radius    = 1.2 #1.0
+	env.ssao_intensity = 0.5 # 0.45
+	env.ssao_power     = 1.0 # 0.9
+	env.ssao_detail    = 0.3 # 0.25
+	env.ssao_horizon   = 0.03 #0.03
 	env.ssao_sharpness = 0.98
 
-	# â”€â”€ Glow (subtle bloom for realism) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	# â”€â”€ Glow (subtle bloom for realism`) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	env.glow_enabled       = true
 	env.glow_intensity     = lighting["glow_intensity"]
 	env.glow_bloom         = lighting["glow_bloom"]
@@ -446,7 +446,7 @@ func setup_lighting(data, geom_data = {}):
 	# â”€â”€ Colour Grading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	env.adjustment_enabled    = true
 	env.adjustment_brightness = 0.92   # Slightly lower exposure → darks get darker (Coohom-match)
-	env.adjustment_contrast   = 1.35   # S-curve depth — was 1.06 (flat), Coohom is ~1.35
+	env.adjustment_contrast   = 1.40   # S-curve depth — was 1.06 (flat), Coohom is ~1.35
 	env.adjustment_saturation = 1.10
 
 	var world_env = WorldEnvironment.new()
@@ -880,7 +880,7 @@ func _get_lighting_profile_settings() -> Dictionary:
 				"sun_angle_max": 18.0,
 				"sun_curve": 0.22,
 				"ambient_color": Color(0.62, 0.50, 0.42),
-				"ambient_energy": 0.28,
+				"ambient_energy": 0.25, #0.28 -> 0.25
 				"tonemap_exposure": 0.78,
 				"tonemap_white": 4.6,
 				"tonemap_agx_white": 16.0,
@@ -909,7 +909,7 @@ func _get_lighting_profile_settings() -> Dictionary:
 				# Energy reduced from 0.15: lower fill lets shadows go genuinely dark (corners,
 				# under sofa, ceiling junctions) instead of being flooded with white light.
 				"ambient_color": Color(0.82, 0.74, 0.66),
-				"ambient_energy": 0.30,
+				"ambient_energy": 0.27, #0.30 -> 0.27
 				"tonemap_exposure": 0.72,
 				"tonemap_white": 5.0,
 				"tonemap_agx_white": 16.29,
@@ -3215,7 +3215,7 @@ func _add_light_fixture_effect(node: Node3D, item: Dictionary, local_aabb: AABB,
 	var is_street_light = "street" in full_desc or "exterior" in full_desc
 	var is_night = lighting_profile == "night"
 	var is_sunset = lighting_profile == "sunset"
-	var warm_color = Color(1.0, 0.90, 0.74)
+	var warm_color = Color(1.0, 0.88, 0.72) # old -> Color(1.0, 0.90, 0.74)
 	var street_color = Color(1.0, 0.92, 0.80)
 	if is_sunset:
 		warm_color = Color(1.0, 0.72, 0.46)

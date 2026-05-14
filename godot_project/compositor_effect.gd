@@ -12,7 +12,7 @@ class_name UnrealPostFX
 
 # ── Exposed settings ───────────────────────────────────────────────────
 @export_group("Exposure & Tonemap")
-@export var exposure: float = 1.0
+@export var exposure: float = 0.68
 @export_enum("ACES Filmic", "AgX", "Reinhard") var tonemap_mode: int = 0
 
 @export_group("Color Grading (CDL)")
@@ -20,7 +20,7 @@ class_name UnrealPostFX
 @export var gamma_grade: Color = Color(1.0, 1.0, 1.0)
 @export var gain: Color = Color(1.04, 1.0, 0.94)      # Warm highlights: +red, -blue
 @export var saturation: float = 1.15
-@export var contrast: float = 1.35
+@export var contrast: float = 1.40
 
 @export_group("Lens")
 @export_range(0.0, 1.0) var vignette_strength: float = 0.45
